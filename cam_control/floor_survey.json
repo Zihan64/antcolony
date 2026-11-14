@@ -1,0 +1,130 @@
+{
+  "family": "tag36h11",
+  "tag_size": 0.1,
+  "floor_tags": {
+    "29": {
+      "x": 0.0,
+      "y": -0.0,
+      "yaw_deg": -0.0
+    },
+    "30": {
+      "x": -1.0558,
+      "y": 0.1444,
+      "yaw_deg": -178.7
+    },
+    "31": {
+      "x": -0.8827,
+      "y": 1.464,
+      "yaw_deg": -175.99
+    },
+    "32": {
+      "x": -0.1193,
+      "y": 1.5576,
+      "yaw_deg": -164.49
+    },
+    "33": {
+      "x": -0.7083,
+      "y": 0.4976,
+      "yaw_deg": 88.47
+    },
+    "36": {
+      "x": 0.0602,
+      "y": 1.1887,
+      "yaw_deg": -165.65
+    }
+  },
+  "objects": {},
+  "tags_on_floor": true,
+  "arena": {
+    "corner_ids": [
+      29,
+      32,
+      31,
+      30
+    ],
+    "tape_m": null,
+    "width_m": null,
+    "height_m": null,
+    "focal_px": 952.43,
+    "positions": null,
+    "margin_m": 0.0,
+    "max_range_m": 4.0,
+    "max_extent_m": 6.0,
+    "min_px_per_cell": 0.35,
+    "unknown_blocked": true,
+    "learn_anchors": true,
+    "map_resolution_m": 0.004,
+    "plan_resolution_m": 0.01,
+    "robot_id": null,
+    "robot_radius_m": 0.1,
+    "obstacle_threshold": 30,
+    "min_obstacle_area_m2": 0.0004,
+    "layout": {
+      "origin": 29,
+      "x": 32,
+      "y": 30,
+      "opposite": 31
+    },
+    "focal_source": "tags",
+    "focal_at_px": [
+      1280,
+      720
+    ],
+    "k1": 0.0
+  },
+  "tag_sizes": {},
+  "_survey_report": {
+    "origin_tag": 29,
+    "n_tags": 6,
+    "plane_rms_mm": 14.55,
+    "camera_height_m": 1.7548,
+    "camera_tilt_from_vertical_deg": 37.9,
+    "tags": {
+      "29": {
+        "frames": 9,
+        "size_mm": 112.0,
+        "height_off_plane_mm": -17.7,
+        "tilt_vs_plane_deg": 0.8,
+        "reproj_px": 0.06
+      },
+      "30": {
+        "frames": 9,
+        "size_mm": 112.0,
+        "height_off_plane_mm": 3.7,
+        "tilt_vs_plane_deg": 2.9,
+        "reproj_px": 0.481
+      },
+      "31": {
+        "frames": 9,
+        "size_mm": 112.0,
+        "height_off_plane_mm": -20.0,
+        "tilt_vs_plane_deg": 2.6,
+        "reproj_px": 0.163
+      },
+      "32": {
+        "frames": 9,
+        "size_mm": 112.0,
+        "height_off_plane_mm": 5.1,
+        "tilt_vs_plane_deg": 1.9,
+        "reproj_px": 0.113
+      },
+      "33": {
+        "frames": 9,
+        "size_mm": 88.0,
+        "height_off_plane_mm": 20.0,
+        "tilt_vs_plane_deg": 4.1,
+        "reproj_px": 0.351
+      },
+      "36": {
+        "frames": 9,
+        "size_mm": 88.0,
+        "height_off_plane_mm": 8.9,
+        "tilt_vs_plane_deg": 3.7,
+        "reproj_px": 0.121
+      }
+    },
+    "warnings": [
+      "Tag 33 is 4.1 deg off the fitted plane: curled paper, not flat, or wrong size in the sheet."
+    ]
+  }
+}
