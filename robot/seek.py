@@ -72,7 +72,8 @@ HUES = {"red": [(0, 9), (171, 180)], "orange": [(8, 22)], "yellow": [(20, 35)], 
 
 def colour_blob(cv2, np, frame, name):
     """Biggest vivid blob of the colour named in `name` ("red block"; no colour word = any vivid
-    colour). -> (x1, y1, x2, y2) or None. Carpet, wood, paper and white things are not vivid."""
+    colour). -> (x1, y1, x2, y2) or None. Carpet, wood, paper and white things are not vivid.
+    A blob with white all round it is skipped: that is an object already lying in the tray."""
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
     vivid = (hsv[:, :, 1] > 140) & (hsv[:, :, 2] > 110)
     rng = next((v for k, v in HUES.items() if k in name.lower()), None)
@@ -83,11 +84,24 @@ def colour_blob(cv2, np, frame, name):
         vivid &= hue
     m = cv2.morphologyEx(vivid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cs = [c for c in cs if 40 <= cv2.contourArea(c) <= 0.25 * m.size]
-    if not cs:
-        return None
-    x, y, w, h = cv2.boundingRect(max(cs, key=cv2.contourArea))
-    return x, y, x + w, y + h
+    cs = sorted((c for c in cs if 40 <= cv2.contourArea(c) <= 0.25 * m.size), key=cv2.contourArea, reverse=True)
+    white, (H, W) = None, m.shape
+    for c in cs:
+        x, y, w, h = cv2.boundingRect(c)
+        if white is None:                                 # smooth and not coloured = tray (lit or in the block's shadow);
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)          # carpet is speckled
+            white = (cv2.blur(np.abs(gray - cv2.blur(gray, (9, 9))), (15, 15)) < 3.0) & (hsv[:, :, 1] < 90)
+        gx, gy = max(6, int(0.6 * w)), max(6, int(0.6 * h))
+        X1, Y1, X2, Y2 = max(0, x - gx), max(0, y - gy), min(W, x + w + gx), min(H, y + h + gy)
+        ring = white[Y1:Y2, X1:X2].sum() - white[y:y + h, x:x + w].sum()
+        if ring / float(max(1, (X2 - X1) * (Y2 - Y1) - w * h)) > IN_TRAY:
+            continue                                      # lies in the white tray: delivered, not to be fetched
+        return x, y, x + w, y + h
+    return None
+
+
+IN_TRAY = 0.35                                # share of smooth, uncoloured surface around a coloured blob that means "it lies
+                                              # in the tray" (photos 2026-11-14: in the tray 0.75-0.82, on the carpet 0.00-0.04)
 
 
 def open_cam(cv2):

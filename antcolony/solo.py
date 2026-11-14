@@ -9,6 +9,10 @@ forward round anything tall in the way, put it down.
                                                               # bring it to a landmark: find the white box with the
                                                               # camera + VLM, drive up to it, put the object down there
     python -m antcolony.solo --robot B --steps look --target "white box"    # one photo: where is it? (only the arm moves)
+    python -m antcolony.solo --robot B --labels "red block,red block" --obj-height 3 --steps find,grab,seek,dock,drop \\
+            --target "white tray" --seek '{"img_tokens": 576, "view": "far"}' --drop-y 22 --drop-z 10
+                                                              # two objects into the tray, one after the other; an object
+                                                              # that already lies in the tray is not fetched again
 
 The car's agent.py must be running, and (for grab) the VLM server. Put the object 25-40 cm in
 front of the car. A missed grab is tried again, at most --tries times (default 5); before each
@@ -105,6 +109,9 @@ def main():
     ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
     ap.add_argument("--steps", default="grab,carry,drop", help="any of back, find, grab, carry, seek, look, dock, drop, home, status - in this order")
     ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
+    ap.add_argument("--labels", help='several objects, one after the other: "red block,red block" or "red block,blue block". '
+                                     "The steps run once per object; between two objects the car backs away from the tray")
+    ap.add_argument("--away-cm", type=float, default=25, help="how far to back away from the tray before the next object")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
     ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
     ap.add_argument("--obj-height", type=float, help="cm, if the object is a block of known height (skips the shape guess)")
@@ -129,8 +136,24 @@ def main():
     say(show(t))
     if t is None:
         sys.exit(1)
-    for step in [s.strip() for s in a.steps.split(",") if s.strip()]:
+    labels = [x.strip() for x in a.labels.split(",") if x.strip()] if a.labels else [a.label]
+    steps = [s.strip() for s in a.steps.split(",") if s.strip()]
+    plan = []                                    # several objects: the same steps for each, backing away from the tray in between
+    for k, label in enumerate(labels):
+        plan += [(k, label, st) for st in steps]
+        if k < len(labels) - 1:
+            plan.append((k, label, "away"))
+    shown = -1
+    for k, label, step in plan:
+        if len(labels) > 1 and k != shown and step != "away":
+            say(f"=== object {k + 1} of {len(labels)}: {label}")
+            shown = k
+        a.label = label
         if step == "status":
+            continue
+        if step == "away":                       # the car stands ~7 cm from the rim: straight back before it may turn
+            say(f"backing away from the tray, {a.away_cm:.0f} cm")
+            link.back_up(a.away_cm)
             continue
         if step == "grab":
             gargs, backed = {"label": a.label}, 0.0
