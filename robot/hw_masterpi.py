@@ -134,6 +134,7 @@ class MasterPi:
                 out = (p.communicate(timeout=5)[0] or "").strip().splitlines()
             finally:
                 self._open()
+                self.car.stop()                  # a killed vlm_grab.py (timeout / cancel) leaves the motors as they were
         last = out[-1] if out else ""
         # exit 0 + a final "done..." line = holding; exit 2 = jaws closed on nothing; 1 = not seen / not reached
         ok = p.returncode == 0 and last.startswith("done")

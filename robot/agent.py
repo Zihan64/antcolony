@@ -161,13 +161,15 @@ def main():
     ap.add_argument("--rot-max", type=float, default=80, help="freenove")
     ap.add_argument("--pcb", type=int, default=2, choices=[1, 2], help="freenove: shield PCB version (battery reading only)")
     ap.add_argument("--stop-cm", type=float, default=8, help="sonar emergency stop distance, 0 = off")
+    ap.add_argument("--no-sonar", action="store_true",
+                    help="freenove: do not use the front ultrasonic (e.g. when the blade blocks it)")
     a = ap.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))          # `kill` also stops the motors (see finally)
     if a.hw == "mock":
         hw = MockHW()
     elif a.hw == "freenove":
         from hw_freenove import Freenove
-        hw = Freenove(a.min_duty or 35, a.max_duty or 65, a.rot_min, a.rot_max, pcb=a.pcb)
+        hw = Freenove(a.min_duty or 35, a.max_duty or 65, a.rot_min, a.rot_max, pcb=a.pcb, sonar=not a.no_sonar)
     else:
         from hw_masterpi import MasterPi
         hw = MasterPi(a.min_duty or 30, a.max_duty or 45, a.rate_min, a.rate_max, arm=not a.no_arm)

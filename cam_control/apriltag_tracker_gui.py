@@ -72,6 +72,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apriltag_floor_mapper as m  # noqa: E402
 import arena_map as am  # noqa: E402
 import object_detector as od  # noqa: E402
+import antcolony_pub  # noqa: E402
 
 RESOLUTIONS = ["1920x1080", "3840x2160", "2560x1440", "1280x720"]
 
@@ -334,6 +335,8 @@ class Worker(QtCore.QThread):
         self.arena_free = True
         self.arena_last = {}
         self.udp = None                # (socket, (host, port))
+        # tags + detected objects -> the AntColony coordinator (--antcolony HOST or ANTCOLONY_WORLD)
+        self.world_pub = antcolony_pub.from_env()
         self._last_plan_t = 0.0
         self._plan = None
         self.objdet = None             # object_detector.ObjectDetector (optional YOLO proposals)
@@ -1680,6 +1683,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_floor_items()
         self.fitted = False
         self.worker = Worker(self.source, self.mapper)
+        if getattr(self.args, "antcolony", None):
+            self.worker.world_pub = antcolony_pub.WorldPub(self.args.antcolony)
+        if self.worker.world_pub is not None:
+            self.log_msg("AntColony: sending tags + objects to %s:%d" % self.worker.world_pub.addr)
         self.worker.show_grid = self.grid_chk.isChecked()
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.results_ready.connect(self._drain_results)
@@ -2688,6 +2695,9 @@ def main():
     ap.add_argument("--autostart", action="store_true")
     ap.add_argument("--detect", metavar="MODEL", nargs="?", const=od.MODEL_CHOICES[0][0],
                     help=f"start class-agnostic object detection (default model {od.MODEL_CHOICES[0][0]})")
+    ap.add_argument("--antcolony", metavar="HOST[:PORT]",
+                    help="send tags + detected objects to the AntColony coordinator on that computer "
+                         "(port 9100 by default), e.g. --antcolony 127.0.0.1")
     ap.add_argument("--path", nargs=2, type=int, metavar=("START_TAG", "GOAL_TAG"),
                     help="plan the A* path from START_TAG to GOAL_TAG as soon as the floor is ready, "
                          "e.g. --path 28 50")
