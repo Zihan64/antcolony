@@ -87,6 +87,11 @@ def main():
         P("no data from the tracker. Start it with  --antcolony <this computer's IP>  "
           "(cam_control/apriltag_tracker_gui.py), check the IP and this computer's firewall (UDP 9100)")
         print("  nothing received")
+    elif last.get("floor_valid") is False:
+        print(f"  the tracker is connected ({len(snaps)} heartbeats), but it has NO FLOOR yet "
+              f"(it sees {last.get('n_tags', 0)} tag(s) in the picture)")
+        P("the tracker has no floor: set up the arena in its GUI (the four corner tags must be visible and "
+          "locked); until then it cannot place the robots or the objects")
     else:
         rate = len(snaps) / a.secs
         print(f"  {len(snaps)} snapshots, {rate:.0f} per second")
@@ -104,7 +109,7 @@ def main():
         else:
             ar = cfg["arena"]
             print(f"  arena from the config: x {ar['xmin']}..{ar['xmax']}, y {ar['ymin']}..{ar['ymax']} m")
-            if snaps:
+            if snaps and last.get("floor_valid") is not False:
                 W("the tracker sent no arena corner tags: the arena in config.json must match the tracker's frame")
     ar = cfg["arena"]
     if min(ar["xmax"] - ar["xmin"], ar["ymax"] - ar["ymin"]) < 1.0:
@@ -123,7 +128,7 @@ def main():
         line = f"  {name} ({rc['role']}, tag {tag}, {rc['addr'][0]}): "
         if not n:
             line += "TAG NOT SEEN"
-            if snaps:
+            if snaps and last.get("floor_valid") is not False:
                 P(f"robot {name}: tag {tag} not seen. Tags the tracker does see: {seen_tags or 'none'} "
                   f"- set robots.{name}.tag in config.json to the tag on that car")
         else:
@@ -169,7 +174,7 @@ def main():
     for p in world.parked:
         print(f"  at the edge already: ({p[0]:.2f}, {p[1]:.2f})  (not a target)")
     raw = len(last.get("objects", []))
-    if snaps and not objs and not world.parked:
+    if snaps and not objs and not world.parked and last.get("floor_valid") is not False:
         (P if not raw else W)("the tracker reports no objects in the arena" + (
             f" ({raw} outside it or under a robot)" if raw else
             ": is object detection switched on in the tracker? As a fallback give the coordinator the "

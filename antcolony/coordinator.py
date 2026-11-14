@@ -242,6 +242,7 @@ class Coordinator:
         snap = self.bus.world()
         if snap is not None:
             self.snap_t = now
+            self.no_floor = snap.get("floor_valid") is False     # tracker heartbeat: arena not set up
             if self.manual is not None:                      # positions typed by hand replace the detector
                 snap = dict(snap, objects=[dict(m) for m in self.manual])
             self.world.update(snap, now)
@@ -285,6 +286,8 @@ class Coordinator:
         bad = []
         if self.snap_t is None or now - self.snap_t > 2.0:
             bad.append(f"no tracker data on UDP {self.cfg.get('world_port', PORT_WORLD)}")
+        elif getattr(self, "no_floor", False):
+            bad.append("tracker connected but it has no floor yet (set up the arena / corner tags in its GUI)")
         else:
             for b in self.brains:
                 if not b.r.fresh(now, 2.0):

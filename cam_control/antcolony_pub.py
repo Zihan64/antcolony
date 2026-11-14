@@ -90,15 +90,22 @@ class WorldPub:
     def __init__(self, target):
         self.addr = parse_target(target)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sent, self.err = 0, None
+        self.sent, self.err, self._beat = 0, None, 0.0
 
     def publish(self, r, floor, corner_ids=None):
         """Never raises: a tracker frame must not die because of the network."""
         try:
             msg = world_message(r, floor, corner_ids)
-            if msg is not None:
-                self.sock.sendto(json.dumps(msg, separators=(",", ":")).encode(), self.addr)
-                self.sent += 1
+            if msg is None:
+                # no floor yet: say so twice a second, so the other side can tell "tracker is
+                # connected but its arena is not set up" from "nothing arrives at all"
+                if time.time() - self._beat < 0.5:
+                    return
+                self._beat = time.time()
+                msg = {"t": time.time(), "tags": {}, "objects": [], "floor_valid": False,
+                       "n_tags": int(r.get("n_tags", 0)) if isinstance(r, dict) else 0}
+            self.sock.sendto(json.dumps(msg, separators=(",", ":")).encode(), self.addr)
+            self.sent += 1
         except Exception as e:          # noqa: BLE001 - report once, keep tracking
             if repr(e) != self.err:
                 self.err = repr(e)
