@@ -338,7 +338,7 @@ class Worker(QtCore.QThread):
         self._plan = None
         self.objdet = None             # object_detector.ObjectDetector (optional YOLO proposals)
         self.appearance = False        # objects = floor that does not look like floor (no model)
-        self.app_tracker = od.FloorTracker(gate_m=0.15, ttl=0.4, min_hits=2)
+        self.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=2)
         self._app_objs = []
         self.tracker = od.FloorTracker()
         self.det_obstacles = True
@@ -473,6 +473,10 @@ class Worker(QtCore.QThread):
                 self.arena_ready.emit(QtGui.QImage(), 1.0, info)
             return
         objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world"}
+        # detected objects (ids 1000+) from the last update, so an object can be a path start,
+        # goal or stop (they used to be added only after the endpoints were looked up: "lost")
+        for o_ in self._app_objs:
+            objs.setdefault(o_["id"], o_)
         robot = objs.get(a.get("robot_id"))
         # Tag-to-tag mode: the start tag is the robot, the goal tag is the target. Both are
         # followed live; if one drops out of view its last seen position is kept.
@@ -495,7 +499,9 @@ class Worker(QtCore.QThread):
                          "start_age_s": None if not s_ else round(now - s_[1], 2),
                          "goal_age_s": None if not g_ else round(now - g_[1], 2)}
         clear, attach = [], []
-        if robot is not None:
+        if robot is not None and robot["id"] < od.DET_ID_BASE:
+            # (a detected object used as the start is not "the robot": its own blob must stay,
+            # otherwise it would erase itself from the map. The path starts at its edge.)
             # the robot's body (configured radius, height from its tag) is never an obstacle, and
             # anything the camera sees attached to it (arm, wheels, cables, the tag's border) is
             # the robot too: such blobs are removed from the map instead of becoming objects
@@ -544,7 +550,12 @@ class Worker(QtCore.QThread):
             self._fuse_t = now
             if self.appearance:
                 found = gm.objects_in_view()
-                tag_pts = [(o_["x"], o_["y"]) for o_ in objs.values() if o_.get("method") != "detect"]
+                tag_pts = [(o_["x"], o_["y"]) for o_ in objs.values() if o_["id"] < od.DET_ID_BASE]
+                # list objects in and around the arena only (the far floor, sofa, people beyond it
+                # flickered in and out); everything stays in the obstacle map for A* regardless
+                mg = float(a.get("objects_margin_m", 0.5))
+                lo_, hi_ = gm.corners.min(0) - mg, gm.corners.max(0) + mg
+                found = [o_ for o_ in found if lo_[0] <= o_["x"] <= hi_[0] and lo_[1] <= o_["y"] <= hi_[1]]
                 tracks = self.app_tracker.update(od.dedupe(found, tag_pts), now)
                 self._app_objs = od.as_result_objects(tracks, now)
                 for o_ in self._app_objs:
@@ -693,11 +704,11 @@ class Worker(QtCore.QThread):
             p = tuple(np.round(gm.w2p([goal])[0]).astype(int))
             cv2.drawMarker(vis, p, (0, 255, 0), cv2.MARKER_STAR, 18, 2)
             if pair:
-                cv2.putText(vis, f"goal tag {pair[1]}", (p[0] + 10, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                cv2.putText(vis, f"goal {'tag' if pair[1] < od.DET_ID_BASE else 'object'} {pair[1]}", (p[0] + 10, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, (0, 255, 0), 1, cv2.LINE_AA)
         if pair and robot is not None:
             p = tuple(np.round(gm.w2p([(robot["x"], robot["y"])])[0]).astype(int))
-            cv2.putText(vis, f"start tag {pair[0]}", (p[0] + 10, p[1] + 16), cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.putText(vis, f"start {'tag' if pair[0] < od.DET_ID_BASE else 'object'} {pair[0]}", (p[0] + 10, p[1] + 16), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 0, 255), 1, cv2.LINE_AA)
         if cmd:
             p = tuple(np.round(gm.w2p([cmd["target_xy"]])[0]).astype(int))
@@ -1146,6 +1157,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for cb in (self.pair_start, self.pair_goal):
             cb.setToolTip("Any tag (0-101) or detected object (1000+) seen on the floor.")
         self.pair_btn = QtWidgets.QPushButton("Plan path", checkable=True)
+        self.pair_btn.setToolTip("Start and goal can each be a tag or a detected object (1000+).")
         self.pair_btn.setToolTip("A* from the start to the goal, replanned live as either moves. The start "
                                  "is treated as the robot: obstacles are inflated by the robot radius, and a "
                                  "steering command is computed from its heading.")
@@ -2097,6 +2109,9 @@ class MainWindow(QtWidgets.QMainWindow):
                        + (" | legs " + ", ".join(f"{v:.2f}" for v in legs) + " m" if legs else ""))
         pi = info.get("pair")
         if pi:
+            def kind(i_):
+                return "tag" if i_ < od.DET_ID_BASE else "object"
+
             def st(seen, age):
                 return "seen" if seen else ("lost" if age is None else f"last seen {age:.1f} s ago")
             pl2 = info.get("plan") or {}
@@ -2105,10 +2120,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 route = "".join(f"stop {s_['n']} {s_['label']}: " + ("reached" if s_["done"] else
                                 ("ok" if s_["xy"] is not None else "not seen yet")) + "\n" for s_ in sts)
             self.pair_info.setText(
-                f"start tag {pi['start_id']}: {st(pi['start_seen'], pi['start_age_s'])}\n" + route +
-                f"goal tag {pi['goal_id']}: {st(pi['goal_seen'], pi['goal_age_s'])}\n"
+                f"start {kind(pi['start_id'])} {pi['start_id']}: {st(pi['start_seen'], pi['start_age_s'])}\n" + route +
+                f"goal {kind(pi['goal_id'])} {pi['goal_id']}: {st(pi['goal_seen'], pi['goal_age_s'])}\n"
                 + (f"path {pl2['length_m']:.3f} m, {len(pl2['waypoints'])} waypoints"
-                   if pl2.get("status") == "ok" else f"path: {pl2.get('status', 'waiting for both tags')}"))
+                   if pl2.get("status") == "ok" else f"path: {pl2.get('status', 'waiting for start and goal')}"))
         cmd = info.get("command")
         if cmd:
             txt.append(f"steer {cmd['heading_error_deg']:+.1f}°, {cmd['distance_to_goal_m']:.3f} m to go")
@@ -2130,7 +2145,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.det_status.setText("off")
             return
         self.cfg.setdefault("arena", {})["appearance_z"] = self.det_app_z.value()
-        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=0.4, min_hits=2)
+        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=2)
         self.log_msg("Object detection on: anything on the floor that does not look like the floor becomes "
                      "an object and an obstacle (compared with the rest of the floor in each frame).")
         if not self.worker.amap:
@@ -2222,7 +2237,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ids = self._pair_ids()
         if ids is None:
             self.pair_btn.setChecked(False)
-            self.log_msg("Choose two different tag ids for start and goal.")
+            self.log_msg("Choose two different ids (tags or detected objects) for start and goal.")
             return
         if self.worker.amap is None:
             self.pair_btn.setChecked(False)
@@ -2237,7 +2252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.pair = ids
         self.pair_btn.setText(f"Stop path {ids[0]} → {ids[1]}")
         self.tabs.setCurrentIndex(1)
-        self.log_msg(f"Planning A* from tag {ids[0]} (robot) to tag {ids[1]}, replanned live as they move.")
+        self.log_msg(f"Planning A* from {ids[0]} (start) to {ids[1]} (goal), replanned live as they move.")
 
     def _swap_pair(self):
         a_, b_ = self.pair_start.currentText(), self.pair_goal.currentText()
@@ -2352,6 +2367,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_frame(self, qimg, scale):
         self.video.set_frame(qimg, scale)
         if self.worker:
+            # let the worker deliver frames at the size they are shown (no rescale on the GUI thread)
+            self.worker.max_display_w = max(320, min(1920, self.video.width()))
             self.worker.display_free = True
 
     def _recent_tags(self, r, window=0.6):

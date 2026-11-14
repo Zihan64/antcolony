@@ -366,7 +366,7 @@ class FloorTracker:
             if best is None:
                 best = self.next_id
                 self.next_id += 1
-                self.tracks[best] = dict(o, x=cx, y=cy, length=L, width=Wd, angle=ang, first=now, hits=0)
+                self.tracks[best] = dict(o, x=cx, y=cy, length=L, width=Wd, angle=ang, first=now, hits=0, score=0)
             else:
                 t = self.tracks[best]
                 a, sa = self.alpha, self.size_alpha
@@ -389,11 +389,18 @@ class FloorTracker:
             t["footprint"] = box_polygon(t["x"], t["y"], t["length"], t["width"], t["angle"])
             t["seen"] = now
             t["hits"] += 1
+            t["score"] = min(t.get("score", 0) + 2, 6)
             used.add(best)
-        for tid in [t for t, v in self.tracks.items() if now - v["seen"] > self.ttl]:
+        # Score: +2 per sighting (max 6), -1 per update without one; shown while >= 3. A box that
+        # flickers (seen, missed, seen...) stays steadily visible; a new one shows on its 2nd
+        # sighting; a removed one disappears after 3 missed updates.
+        for tid, t in self.tracks.items():
+            if tid not in used:
+                t["score"] = t.get("score", 0) - 1
+        for tid in [t for t, v in self.tracks.items() if now - v["seen"] > self.ttl or v.get("score", 0) <= 0]:
             del self.tracks[tid]
         return {tid: t for tid, t in self.tracks.items()
-                if t["hits"] >= self.min_hits and (tid in used or now - t["seen"] <= self.ttl)}
+                if t["hits"] >= self.min_hits and t.get("score", 0) >= 3 and now - t["seen"] <= self.ttl}
 
 
 def as_result_objects(tracks, now):

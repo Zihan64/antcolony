@@ -977,8 +977,9 @@ class GlobalMap:
     def update(self, frame, floor, K, D, now, clear_polys=(), max_range=4.0, min_px_per_cell=0.35,
                capture_bg=False, adapt_rate=0.02, attach_polys=()):
         """Fuse one camera frame into the map. Returns the current window's obstacle mask.
-        clear_polys: never obstacles (robot body, flat tags). attach_polys: any obstacle blob that
-        overlaps one of these belongs to it (the robot's arm, wheels...) and is removed as a whole."""
+        clear_polys: never obstacles (robot body, flat tags). attach_polys: an obstacle blob lying
+        mostly (>= 50 %) inside one of these belongs to it (the robot's arm, wheels...) and is removed
+        as a whole; one that only touches it (an obstacle next to the robot) stays."""
         if not floor.valid:
             self.view = None
             return None
@@ -1038,8 +1039,10 @@ class GlobalMap:
                 am_ = np.zeros(vis.shape, np.uint8)
                 for poly in attach_polys:
                     cv2.fillConvexPoly(am_, np.round(self.w2p(poly) - [c0, r0]).astype(np.int32), 1)
-                parts = np.unique(labl[am_ > 0])
-                parts = parts[parts > 0]
+                # a blob belongs to the robot only if most of it lies in the robot's zone (its arm,
+                # wheels); an obstacle the robot merely passes close to only touches the zone's edge
+                inside = np.bincount(labl[am_ > 0].ravel(), minlength=n)
+                parts = np.flatnonzero((inside >= 0.5 * stats[:, cv2.CC_STAT_AREA]) & (np.arange(n) > 0))
                 if len(parts):
                     keep[parts] = False
                     attached = np.isin(labl, parts)
@@ -1082,7 +1085,17 @@ class GlobalMap:
         if self.view is None:
             return []
         r0, r1, c0, c1, vis = self.view
-        ob = ((self.logodds[r0:r1, c0:c1] > 1.0) & vis).astype(np.uint8)
+        # Hysteresis: a cell becomes part of an object at evidence > 1, but stays one until the
+        # evidence falls below -0.5. Cells hovering around the threshold made objects flash on and
+        # off every update; a real change (an object removed) still clears in 1-2 updates.
+        lo = self.logodds[r0:r1, c0:c1]
+        prev = getattr(self, "_obj_on", None)
+        was = prev[r0:r1, c0:c1] if prev is not None and prev.shape == self.logodds.shape else np.zeros(lo.shape, bool)
+        on = vis & ((lo > 1.0) | (was & (lo > -0.5)))
+        if prev is None or prev.shape != self.logodds.shape:
+            self._obj_on = np.zeros(self.logodds.shape, bool)
+        self._obj_on[r0:r1, c0:c1] = on
+        ob = on.astype(np.uint8)
         k = max(3, int(round(0.02 / self.res)) | 1)          # join fragments of one object first
         ob = cv2.morphologyEx(ob, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         lab = cv2.cvtColor(cv2.GaussianBlur(self.color[r0:r1, c0:c1], (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
