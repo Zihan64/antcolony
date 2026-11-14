@@ -142,7 +142,8 @@ class MasterPi:
             return False, "no arm"
         label = args.get("label") or "any"
         # grab_runner.py = vlm_grab.py with the object finder from detector.json (VLM or local YOLO)
-        script = "grab_runner.py" if os.path.isfile(os.path.join(HERE, "grab_runner.py")) else "vlm_grab.py"
+        runner = os.path.join(HERE, "grab_runner.py")         # (an empty one = a copy that broke off: ignore it)
+        script = "grab_runner.py" if os.path.isfile(runner) and os.path.getsize(runner) > 100 else "vlm_grab.py"
         cmd = [sys.executable, os.path.join(HERE, script), "approach", label,
                "--min-speed", str(args.get("min_speed", self.min_duty))]
         with self.lock:
