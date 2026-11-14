@@ -1,0 +1,150 @@
+"""One arm car on its own - no tracker, no coordinator: grab what lies in front of it, carry it
+forward round anything tall in the way, put it down.
+
+    python -m antcolony.solo --robot B                        # grab -> carry 20 cm -> drop
+    python -m antcolony.solo --robot B --steps carry,drop     # it already holds something
+    python -m antcolony.solo --robot B --dist-cm 30 --side right
+    python -m antcolony.solo --robot B --steps status         # battery, sonar, holding - nothing moves
+
+The car's agent.py must be running, and (for grab) the VLM server. Put the object 25-40 cm in
+front of the car. A missed grab is tried again, at most --tries times (default 5). If the
+carry fails (blocked on both sides) the car keeps holding the object: put it down with
+`--steps drop` once there is room in front of it.
+
+What "round anything in the way" means is in robot/hw_masterpi.py, carry(): front sonar only,
+things about 10 cm tall or more, the side the car slides to must be free.
+"""
+import argparse
+import json
+import socket
+import sys
+import time
+
+from .common import load_config
+
+PORT_TELEM = 9201
+
+
+class Link:
+    """Skills to one robot's agent, telemetry back."""
+
+    def __init__(self, name, addr):
+        self.name, self.addr = name, addr
+        self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.rx.bind(("0.0.0.0", PORT_TELEM))
+        self.rx.settimeout(0.1)
+        self.telem = None
+
+    def send(self, msg):
+        self.tx.sendto(json.dumps(msg).encode(), self.addr)
+
+    def pump(self, secs=0.1):
+        """Read telemetry for `secs`; -> the newest message from this robot (or None)."""
+        t_end = time.monotonic() + secs
+        while time.monotonic() < t_end:
+            try:
+                data, _ = self.rx.recvfrom(65535)
+                m = json.loads(data.decode())
+            except (socket.timeout, ValueError):
+                continue
+            if isinstance(m, dict) and m.get("name") == self.name:
+                self.telem = m
+        return self.telem
+
+    def status(self, secs=1.5):
+        """A zero velocity command makes the agent send telemetry to us. -> telemetry or None."""
+        self.telem, t_end = None, time.monotonic() + secs
+        while time.monotonic() < t_end and (self.telem is None or self.telem.get("sonar_cm") is None):
+            self.send({"type": "vel", "vx": 0, "vy": 0, "w": 0, "dur": 0.1})
+            self.pump(0.2)
+        return self.telem
+
+    def skill(self, name, args, timeout):
+        """Run one skill to its end. -> (ok, detail, seconds)."""
+        sid = int(time.time() * 10) % 2_000_000_000
+        msg, t0, last = {"type": "skill", "id": sid, "name": name, "args": args}, time.monotonic(), 0.0
+        while time.monotonic() - t0 < timeout:
+            if time.monotonic() - last > 0.5:            # the same id again is harmless; a lost datagram is not
+                self.send(msg)
+                last = time.monotonic()
+            t = self.pump(0.1)
+            s = (t or {}).get("skill") or {}
+            if s.get("id") == sid and s.get("state") in ("ok", "fail"):
+                return s["state"] == "ok", s.get("detail", ""), time.monotonic() - t0
+        self.send({"type": "skill", "id": sid + 1, "name": "stop", "args": {}})      # cancels it on the car
+        return False, f"no answer within {timeout:.0f} s", time.monotonic() - t0
+
+
+def show(t):
+    if t is None:
+        return "no telemetry - is agent.py running on the car, and is this the right address?"
+    b, s = t.get("batt_mv"), t.get("sonar_cm")
+    return (f"battery {b / 1000:.2f} V" if b else "battery ?") + ", " + \
+           (f"sonar {s:.0f} cm" if s is not None else "sonar ?") + f", holding: {'yes' if t.get('holding') else 'no'}"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default="config.json")
+    ap.add_argument("--robot", required=True)
+    ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
+    ap.add_argument("--steps", default="grab,carry,drop", help="any of grab, carry, drop, home, status - in this order")
+    ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
+    ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
+    ap.add_argument("--dist-cm", type=float, default=20, help="how far to carry it forward")
+    ap.add_argument("--side", choices=["left", "right"], help="which way to try first round an obstacle (default left)")
+    ap.add_argument("--carry", default="{}", help='more carry settings as JSON, e.g. \'{"margin_cm": 18, "cm_s": 15}\'')
+    ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base")
+    ap.add_argument("--drop-z", type=float, default=4, help="cm above the floor")
+    a = ap.parse_args()
+    cfg = load_config(a.config)
+    addr = (a.addr, 9200) if a.addr else tuple(cfg["robots"][a.robot]["addr"])
+    link, name = Link(a.robot, addr), a.robot
+    say = lambda msg: print(f"[{name}] {msg}", flush=True)
+
+    t = link.status()
+    say(show(t))
+    if t is None:
+        sys.exit(1)
+    for step in [s.strip() for s in a.steps.split(",") if s.strip()]:
+        if step == "status":
+            continue
+        if step == "grab":
+            for i in range(1, a.tries + 1):
+                say(f"grab, try {i} of {a.tries} ...")
+                ok, detail, secs = link.skill("grab", {"label": a.label}, 150)
+                say(f"  {'ok' if ok else 'missed'} - {detail}  ({secs:.0f} s)")
+                if ok:
+                    break
+            else:
+                say(f"GIVES UP after {a.tries} tries")
+                sys.exit(2)
+            say("with the object in the gripper: " + show(link.status()))
+        elif step == "carry":
+            args = dict(json.loads(a.carry), dist_cm=a.dist_cm)
+            if a.side:
+                args["side"] = a.side
+            say(f"carry {a.dist_cm:.0f} cm forward ...")
+            ok, detail, secs = link.skill("carry", args, float(args.get("timeout", 60)) + 30)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say("still holding the object - when there is room in front: --steps drop")
+                sys.exit(3)
+        elif step == "drop":
+            say("drop ...")
+            ok, detail, secs = link.skill("drop", {"y_cm": a.drop_y, "z_cm": a.drop_z}, 20)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                sys.exit(4)
+        elif step == "home":
+            ok, detail, secs = link.skill("home", {}, 15)
+            say(f"home: {'ok' if ok else 'FAILED'} - {detail}")
+        else:
+            sys.exit(f"unknown step {step!r}")
+    say("done")
+
+
+if __name__ == "__main__":
+    main()

@@ -36,7 +36,7 @@ Testing tools
              whole pipeline can be tested without the camera.
 
 Run
-  pip install opencv-contrib-python pupil-apriltags PyQt6 pyqtgraph pygrabber
+  python -m pip install -r requirements.txt     # opencv-contrib, pupil-apriltags, PyQt6, pyqtgraph
   python apriltag_tracker_gui.py                       # pick the source in the GUI
   python apriltag_tracker_gui.py --synthetic --autostart
   python apriltag_tracker_gui.py --calib calib.npz --autostart

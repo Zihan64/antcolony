@@ -85,7 +85,7 @@ The coordinator can run on either computer; on the camera computer the tag data 
 1. **Network.** All four devices on the same LAN. Put the cars' IPs into the `lan` profile under `networks` in `config.json` and set `"network": "lan"` (or run with `ANTCOLONY_NET=lan`).
 2. **VLM (computer 1).** `llama-server` with `--host 0.0.0.0 --port 8090 -np 1` (see "Arm robots' VLM"). On **each car** set `masterpi_lite/masterpi_lite/vlm_server.json` to `{"url": "http://<computer 1's new IP>:8090", "img_tokens": 256}` — the old hotel address no longer works on the new LAN.
 3. **Tags.** Put the tag id that is on each car into `robots.A.tag` / `robots.B.tag` in `config.json` (defaults 10 and 11). In the tracker's `arena.json` give each car's tag its height so it is located precisely: `"objects": {"10": {"name": "car A", "height_m": 0.17}, "11": {"name": "car B", "height_m": 0.17}}` (tag face above the floor, measure it).
-4. **Tracker (computer 2).** `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
+4. **Tracker (computer 2).** Once per machine: `python -m pip install -r cam_control/requirements.txt` (add `ultralytics` for object detection). Then `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
 5. **Cars.** Copy the current `robot/agent.py` and `robot/hw_masterpi.py` next to `vlm_grab.py`, then on each car: `python3 agent.py --name A --min-duty 30` (`--name B` on B; 30 on carpet).
 6. **Drive calibration**, one car at a time with ~50 cm free around it: `python -m antcolony.calibrate --robot A --u 0.3 --fwd-secs 0.8 --strafe-secs 0.8` (then B). The arm cars cover about 30 cm per second on carpet, so the default 1.5 s moves are too long for a 1 m wide arena. The car is stopped at once if the tracker loses its tag. Saves `calib/A.json`. Done for A and B on 2026-11-14 (tag 8.5 cm behind the turning centre on both).
    If a car does something odd, look at one short move at a time first: `python -m antcolony.jog --robot A --w 0.3 --secs 0.4` (also `--vx`, `--vy`) prints how far the tag moved and turned.
@@ -135,6 +135,16 @@ To use your own YOLO: train, `yolo export model=best.pt format=onnx imgsz=416 op
 - a car that loses its tag on the last 60 cm to its object hands over to its own camera (`vlm_grab approach`).
 
 In the simulator with tags hidden within ±35 deg of facing the camera: without this 1 of 8 layouts finished, with it 8 of 8, as fast as with no hiding (`tests/test_edge.py` check 4). Raising the tags above the arm (12–15 cm) is still the better fix; this keeps the cars going until then.
+
+## One car alone: grab, carry round obstacles, put down (2026-11-14)
+
+No tracker and no coordinator: `python -m antcolony.solo --robot B` sends one arm car three skills in a row — `grab` (what lies 25–40 cm in front of it; a miss is tried again, at most `--tries` 5), `carry` (20 cm forward, `--dist-cm`), `drop`. `--steps carry,drop` if it already holds something, `--steps status` only reads battery and sonar (nothing moves). Needs `agent.py` on the car and, for the grab, the VLM server.
+
+`carry` is a skill in `robot/hw_masterpi.py`. The car drives in short pulses (0.33 s ≈ 5.7 cm on carpet at duty 30) and reads its front sonar while standing between them. Something nearer than the rest of the way + 15 cm (`margin_cm`: the gripper and the object stick out in front of the sonar) counts as in the way: the car slides sideways until the sonar is clear, about 10 cm more for its own half width, then drives on. If one side does not clear within 30 cm of the starting line it comes back and tries the other; if both fail it returns to the line and reports failure, still holding the object.
+
+Limits, all from the hardware: the sonar only sees things about 10 cm tall or more, straight ahead (a second block lying on the floor is not seen); there is no sensor to the sides, so the side the car slides to must be free; the 20 cm are counted from drive pulses, not measured (expect ±20 %; `cm_s` / `side_cm_s` in the skill arguments set the assumed speeds, `--carry '{"cm_s": 15}'`).
+
+`tests/test_carry.py` runs the skill on a fake floor (16 cases: boxes ahead, a box reaching far to one side, a wall right across, real speeds 30 % off, narrow / wide sonar beam, no sonar, cancel): the car never touches an obstacle. Not yet run on a real car.
 
 ## Current robot deployment (2026-11-14)
 
@@ -261,6 +271,7 @@ antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
 antcolony/jog.py          one short move of one robot, measured by the tracker
+antcolony/solo.py         one arm car alone: grab -> carry round obstacles -> drop (no tracker)
 robot/detector.py         car: object finder, laptop VLM or local YOLO (detector.json)
 robot/grab_runner.py      car: vlm_grab.py with that object finder
 robot/landmarks.py        car: AprilTags in the car's own camera (distance, direction)
@@ -273,6 +284,7 @@ robot/hw_freenove.py      dozer: Freenove FNK0043, direct I2C; built-in wheel di
 tracker_bridge/world_pub.py  tracker → coordinator publisher
 tests/test_sim.py         end-to-end test
 tests/test_edge.py        end-to-end test of the edge task (one block each, 5 tries, give up)
+tests/test_carry.py       the carry skill (sonar obstacle avoidance) on a fake floor
 ```
 
 ## Messages (each is one JSON object over UDP)

@@ -119,6 +119,8 @@ class MasterPi:
             return self.grab(args, cancel)
         if name == "drop":
             return self.drop(args)
+        if name == "carry":
+            return self.carry(args, cancel)
         if name == "open":
             with self.lock:
                 self.arm.open(600)
@@ -188,3 +190,129 @@ class MasterPi:
         self.holding = False
         self.rest(1500)                          # lift first, close the jaws afterwards
         return True, "dropped"
+
+    # ------------------------------------------------------- carry: forward, round obstacles
+    def sonar_med(self, n=3, gap=0.04):
+        """Median of n front-sonar readings in cm; None if not one came back."""
+        v = []
+        for _ in range(n):
+            d = self.sonar_cm()
+            if d is not None:
+                v.append(d)
+            time.sleep(gap)
+        return sorted(v)[len(v) // 2] if v else None
+
+    def pulse(self, vx, vy, secs, cancel):
+        """One short timed move, then stand still (the sonar is read at rest)."""
+        self.set_velocity(vx, vy, 0.0)
+        t_end = time.monotonic() + secs
+        while time.monotonic() < t_end and not cancel.is_set():
+            time.sleep(0.01)
+        self.stop()
+        time.sleep(0.25)
+
+    def carry(self, args, cancel):
+        """Drive `dist_cm` forward (default 20) with whatever the gripper holds, going round
+        anything tall in the way. No tracker: the distance is counted from the drive pulses
+        (`cm_s`, measured on car B on carpet: a 0.33 s pulse at duty 30 = 5.7 cm), so expect
+        +-20 %.
+
+        Between pulses the car stands still and reads the front sonar. Something nearer than
+        the rest of the way + `margin_cm` (the gripper and the object stick out in front of the
+        sonar) is in the way: the car slides sideways, pulse by pulse, until the sonar is
+        clear, then `extra_cm` more for its own half width, and drives on. If one side does not
+        clear within `max_side_cm` of the starting line it comes back and tries the other
+        side; if that fails too it returns to the line and reports failure, still holding.
+
+        Limits: the sonar sees only things about 10 cm tall or more, straight ahead; there is
+        no sensor to the sides, so the side it slides to must be free."""
+        dist = float(args.get("dist_cm", 20))
+        cm_s, side_cm_s = float(args.get("cm_s", 17)), float(args.get("side_cm_s", 15))
+        step = float(args.get("step_s", 0.33))
+        margin, extra = float(args.get("margin_cm", 15)), float(args.get("extra_cm", 10))
+        max_side, look = float(args.get("max_side_cm", 30)), float(args.get("look_cm", 25))
+        u = float(args.get("u", 0.05))                       # just above min_duty: slow and predictable
+        first = -1 if args.get("side") == "right" else 1     # + = left
+        only = args.get("side") in ("left", "right") and args.get("strict")
+        t0, done, side, seen = time.monotonic(), 0.0, 0.0, None
+        say = lambda msg: print(f"  carry: {msg}", flush=True)
+
+        def read():
+            for _ in range(5):                               # a failed I2C read now and then is normal
+                d = self.sonar_med()
+                if d is not None:
+                    return d
+                time.sleep(0.2)
+            return None
+
+        def slide(sgn, room):
+            """Slide towards sgn until the sonar reads `room`+5 or the side limit. -> cleared?"""
+            nonlocal side
+            while not cancel.is_set() and side * sgn + side_cm_s * step <= max_side:
+                self.pulse(0.0, sgn * u, step, cancel)
+                side += sgn * side_cm_s * step
+                d = read()
+                if d is None or d < room + 5:
+                    continue
+                for _ in range(max(1, round(extra / (side_cm_s * step)))):         # half the car's width
+                    if side * sgn + side_cm_s * step > max_side:
+                        break
+                    self.pulse(0.0, sgn * u, step, cancel)
+                    side += sgn * side_cm_s * step
+                d = read()
+                if d is not None and d >= room:              # (a second thing behind the first: keep sliding)
+                    return True
+            return False
+
+        def back_to(target):
+            nonlocal side
+            while not cancel.is_set() and abs(side - target) > side_cm_s * step / 2:
+                sgn = 1 if target > side else -1
+                self.pulse(0.0, sgn * u, step, cancel)
+                side += sgn * side_cm_s * step
+
+        d = read()
+        if d is None:
+            return False, "no sonar reading - not driving blind"
+        if d < 6:
+            return False, f"sonar reads {d:.0f} cm before moving - does the held object hang in front of it?"
+        say(f"{dist:.0f} cm to go, sonar {d:.0f} cm")
+        while dist - done > 1.0:
+            if cancel.is_set():
+                return False, f"cancelled after {done:.0f} cm"
+            if time.monotonic() - t0 > float(args.get("timeout", 60)):
+                return False, f"timeout after {done:.0f} cm"
+            rest = dist - done
+            d = read()
+            if d is None:
+                return False, f"sonar stopped answering after {done:.0f} cm"
+            room = min(rest, look) + margin
+            if d >= room:
+                t = min(step, max(0.12, rest / cm_s))
+                self.pulse(u, 0.0, t, cancel)
+                done += cm_s * t
+                say(f"forward, {done:.0f} of {dist:.0f} cm (sonar was {d:.0f})")
+                continue
+            seen = d if seen is None else seen
+            start = side
+            say(f"something {d:.0f} cm ahead (need {room:.0f}) - sliding {'left' if first > 0 else 'right'}")
+            if slide(first, room):
+                say(f"clear, {abs(side):.0f} cm to the {'left' if side > 0 else 'right'} of the starting line")
+                continue
+            if cancel.is_set():
+                continue
+            back_to(start)
+            if not only:
+                say(f"not clear on that side - trying the {'right' if first > 0 else 'left'}")
+                if slide(-first, room):
+                    first = -first                           # keep going round on the side that worked
+                    say(f"clear, {abs(side):.0f} cm to the {'left' if side > 0 else 'right'} of the starting line")
+                    continue
+                if cancel.is_set():
+                    continue
+                back_to(start)
+            return False, f"blocked {d:.0f} cm ahead after {done:.0f} cm, no way round within {max_side:.0f} cm"
+        detail = f"carried {done:.0f} cm"
+        if seen is not None:
+            detail += f", {abs(side):.0f} cm {'left' if side > 0 else 'right'} round something {seen:.0f} cm ahead"
+        return True, detail
