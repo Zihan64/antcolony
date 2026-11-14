@@ -101,7 +101,7 @@ From the vendor's spec sheet:
 | Camera | 480p, on the arm |
 | Compute | Raspberry Pi 5 + MasterPi expansion board |
 | Link | Wi-Fi / Ethernet |
-| Battery | about 60 min of continuous use |
+| Battery | 2 × 18650 3.7 V cells in series (stock: Hiwonder 1800 mAh), about 60 min of continuous use |
 
 What this means for `config.json`:
 - `radius` 0.15 m covers the body: half the footprint diagonal is ≈ 0.123 m, so there is ≈ 2.7 cm of margin.
