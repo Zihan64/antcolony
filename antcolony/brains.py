@@ -139,6 +139,8 @@ class Brain:
         """Back straight out. -> (command, done)"""
         if dist(self.r.xy, self.ret_from) > metres or now - self.t_state > 5.0:
             return dict(ZERO), True
+        if self.yield_since and now - self.yield_since > 0.5:
+            return dict(ZERO), True                        # someone is right behind: stop backing, plan a way out
         return vel(-0.5, 0, 0, guard=False), False
 
     def park(self, now):

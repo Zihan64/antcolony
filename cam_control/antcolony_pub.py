@@ -17,8 +17,15 @@ What is sent (arena frame, metres, radians):
                                               untagged things on the floor (YOLOE and / or the
                                               appearance detector), w = short side, l = long side
      "floor":   {"29": [x, y], ...}           paper tags on the floor (the robots keep off them)
-     "corners": [29, 32, 31, 30]}             the arena corner tags (the coordinator can take its
+     "corners": [29, 32, 31, 30],             the arena corner tags (the coordinator can take its
                                               arena rectangle from them: --arena-from-tags)
+     "camera":  [x, y, z],                    where the camera is: a tall robot seen at a slant
+                                              covers the floor behind it; the coordinator ignores
+                                              detections in that shadow
+     "tag_info": {"10": {"method": "plane", "z": 0.17, "pose_z": 0.171}}}
+                                              how each tag was located (plane = at a known height,
+                                              precise; pose = from its apparent size, cm worse)
+Objects also carry "h" (estimated height, m) and "conf".
 
 Why not the GUI's own "UDP out": that message is for ONE robot following the GUI's A* path, and
 json.dumps(..., default=float) raises TypeError as soon as a detected object is in it
@@ -55,7 +62,7 @@ def world_message(r, floor, corner_ids=None, now=None):
     or None while there is no floor yet."""
     if floor is None or not getattr(floor, "valid", False):
         return None
-    tags, objs = {}, []
+    tags, objs, info = {}, [], {}
     for o in r.get("objects", []):
         if o.get("frame") != "world":
             continue
@@ -65,6 +72,10 @@ def world_message(r, floor, corner_ids=None, now=None):
         if o.get("method") in ("detect", "appearance"):
             a, b = float(o.get("width_m") or 0.0), float(o.get("depth_m") or 0.0)
             d = {"id": int(o["id"]), "label": str(o.get("name", "object")), "x": float(x), "y": float(y)}
+            if o.get("height_m") is not None:
+                d["h"] = round(float(o["height_m"]), 3)
+            if o.get("conf") is not None:
+                d["conf"] = round(float(o["conf"]), 2)
             if a > 0 and b > 0:
                 d["w"], d["l"] = min(a, b), max(a, b)
                 # a compact object's box is drawn along the camera's line of sight, not along the
@@ -74,6 +85,9 @@ def world_message(r, floor, corner_ids=None, now=None):
             objs.append(d)
         else:
             tags[str(int(o["id"]))] = [float(x), float(y), math.radians(float(o.get("yaw_deg") or 0.0))]
+            info[str(int(o["id"]))] = {"method": str(o.get("method", "?")).split(" ")[0],
+                                       "z": round(float(o.get("z") or 0.0), 3),
+                                       "pose_z": None if o.get("pose_z_m") is None else round(float(o["pose_z_m"]), 3)}
     fl = {}
     for tid, c in getattr(floor, "world_corners", {}).items():
         if str(int(tid)) in tags:        # a tag that is tracked as an object (a robot) is not floor paper
@@ -83,6 +97,13 @@ def world_message(r, floor, corner_ids=None, now=None):
     msg = {"t": time.time() if now is None else now, "tags": tags, "objects": objs, "floor": fl}
     if corner_ids:
         msg["corners"] = [int(i) for i in corner_ids]
+    if info:
+        msg["tag_info"] = info
+    cam = r.get("camera") or getattr(floor, "camera_position", None)
+    if isinstance(cam, dict):
+        msg["camera"] = [round(float(cam["x"]), 3), round(float(cam["y"]), 3), round(float(cam["z"]), 3)]
+    elif cam is not None and len(cam) >= 3:
+        msg["camera"] = [round(float(cam[0]), 3), round(float(cam[1]), 3), round(float(cam[2]), 3)]
     return msg
 
 
@@ -123,7 +144,7 @@ if __name__ == "__main__":
     from types import SimpleNamespace
     sq = lambda x, y: np.array([[x - .05, y - .05, 0], [x + .05, y - .05, 0], [x + .05, y + .05, 0], [x - .05, y + .05, 0]])
     floor = SimpleNamespace(valid=True, world_corners={29: sq(0, 0), 32: sq(1.55, 0), 31: sq(1.55, 1.19), 30: sq(0, 1.19)})
-    r = {"objects": [
+    r = {"camera": {"x": 0.78, "y": -1.2, "z": 1.8}, "objects": [
         {"id": 10, "frame": "world", "method": "plane", "x": 0.40, "y": 0.30, "yaw_deg": 90.0},
         {"id": 11, "frame": "world", "method": "pose", "x": 1.10, "y": 0.30, "yaw_deg": -45.0},
         {"id": 1000, "name": "object", "frame": "world", "method": "detect", "x": 0.70, "y": 0.60,

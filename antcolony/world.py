@@ -6,7 +6,9 @@ Snapshot (from the tracker bridge, JSON over UDP):
      "objects": [{"id": 1000, "label": "bag", "x": .., "y": .., "w": .., "l": .., "ang": ..}, ...]}
 Everything is in the tracker's floor frame, metres. `ang` (long-axis direction) is optional.
 Optional extras: "floor": {"29": [x, y], ...} = paper tags lying on the floor (robots keep off
-them), "corners": [29, 32, 31, 30] = which of those mark the arena corners.
+them), "corners": [29, 32, 31, 30] = which of those mark the arena corners, "camera": [x, y, z]
+= where the camera is. A camera that looks at a slant sees a tall robot lying across the floor
+behind it; detections in that shadow are parts of the robot, not objects (see World.hidden).
 
 deliver.mode "edge" (instead of the bin): an object counts as delivered once it lies in the
 band `deliver.edge_zone` wide along the arena boundary. Detections in that band are never
@@ -32,6 +34,8 @@ class Robot:
         # detections this close to the tag-derived centre are the robot itself; for the dozer the mask
         # must end just behind the blade face, or the object it is pushing would vanish too
         self.mask_r = rc.get("mask_r", 0.22 if self.role == "arm" else rc.get("blade_fwd", 0.14) - 0.02)
+        self.height = rc.get("height", 0.35 if self.role == "arm" else 0.12)   # tallest part above the floor, m
+        self.shadow_r = rc.get("shadow_r", 0.12)       # half width of what that tall part covers (the arm column)
 
     def set_tag(self, x, y, h, now):
         """Tag pose -> pose of the chassis centre, using this robot's calibration."""
@@ -122,6 +126,7 @@ class World:
         self.edge = self.dc.get("mode", "bin") == "edge"
         self.bin.on = not self.edge
         self.floor_tags = {}             # id -> (x, y) of paper tags on the floor
+        self.camera = None               # (x, y, z) of the overhead camera, if the tracker says
         self.parked = []                 # edge mode: [x, y, last seen] of things lying in the edge band
         self.objects = []                # live + held
         self.delivered = []
@@ -143,7 +148,22 @@ class World:
         """True where the tracker cannot be trusted: under a robot or in the bin."""
         if self.bin.on and dist(p, self.bin.xy) < self.bin.r + 0.02:
             return True
-        return any(r.x is not None and dist(p, r.xy) < r.mask_r + pad for r in self.robots.values())
+        for r in self.robots.values():
+            if r.x is None:
+                continue
+            if dist(p, r.xy) < r.mask_r + pad:
+                return True
+            cam = self.camera
+            if cam and cam[2] > r.height + 0.2:
+                # the robot's top, seen from the camera, lands on the floor this far behind it; only
+                # the arm column is that tall, so the strip is narrow (shadow_r), not the body's width
+                k = r.height / (cam[2] - r.height)
+                ex, ey = r.x + (r.x - cam[0]) * k, r.y + (r.y - cam[1]) * k
+                dx, dy = ex - r.x, ey - r.y
+                t = clamp(((p[0] - r.x) * dx + (p[1] - r.y) * dy) / max(dx * dx + dy * dy, 1e-9), 0.0, 1.0)
+                if dist(p, (r.x + t * dx, r.y + t * dy)) < r.shadow_r + pad:
+                    return True
+        return False
 
     # ------------------------------------------------------------------ update
     def update(self, snap, now):
@@ -158,12 +178,17 @@ class World:
             self.bin.x, self.bin.y = t[0], t[1]
             self.bin.th = wrap(t[2] + math.radians(self.bin.bc.get("th_off_deg", 0.0)))
 
+        if snap.get("camera"):
+            self.camera = tuple(snap["camera"][:3])
         if snap.get("floor"):
             own = {str(r.rc["tag"]) for r in self.robots.values()} | {str(self.bin.bc.get("tag"))}
             self.floor_tags = {str(k): (v[0], v[1]) for k, v in snap["floor"].items() if str(k) not in own}
 
         dets = [d for d in snap.get("objects", [])
                 if self._in_arena((d["x"], d["y"]), 0.05) and not self.hidden((d["x"], d["y"]), now)]
+        max_h = self.oc.get("max_h")             # taller than this = not something to pick up
+        if max_h:
+            dets = [d for d in dets if not d.get("h") or d["h"] <= max_h]
         if self.edge:                            # things in the edge band are done: obstacles, not targets
             zone = self.dc.get("edge_zone", 0.20)
             for d in dets:

@@ -98,6 +98,13 @@ def main():
         if rate < 5:
             W(f"tracker sends only {rate:.1f} snapshots/s - the robots will drive in jerks (10+ is good)")
         floor = last.get("floor") or {}
+        cam = last.get("camera")
+        if cam:
+            print(f"  camera at ({cam[0]:.2f}, {cam[1]:.2f}), {cam[2]:.2f} m up - detections in each robot's shadow "
+                  f"(the floor it covers, seen from there) are ignored")
+        else:
+            W("the tracker does not say where the camera is (old cam_control/antcolony_pub.py?): parts of a "
+              "robot seen at a slant can show up as objects next to it")
         ids = [str(i) for i in last.get("corners") or []]
         pts = [floor[i] for i in ids if i in floor]
         print(f"  floor tags: {sorted(floor, key=int) or 'none'}   arena corners: {ids or 'not sent'}")
@@ -134,6 +141,16 @@ def main():
         else:
             line += f"tag seen in {100 * n // max(1, len(snaps))}% of snapshots, centre ({r.x:.2f}, {r.y:.2f}), " \
                     f"heading {math.degrees(r.th):.0f} deg"
+            ti = (last.get("tag_info") or {}).get(tag)
+            if ti:
+                line += f" [{ti['method']}, z {ti['z']:.2f} m]"
+                if ti["method"] == "pose":
+                    W(f"robot {name}: tag {tag} is located from its apparent size (about {ti['z']:.2f} m above the "
+                      f"floor). For cm precision set its height in the tracker's arena.json: "
+                      f"\"objects\": {{\"{tag}\": {{\"name\": \"car {name}\", \"height_m\": <measured>}}}}")
+                elif ti["z"] < 0.03 and (ti.get("pose_z") or 0) > 0.05:
+                    W(f"robot {name}: tag {tag} is treated as lying ON the floor, but it looks {ti['pose_z']:.2f} m up: "
+                      f"its position is off by several cm - set objects.{tag}.height_m in the tracker's arena.json")
             if n < 0.8 * len(snaps):
                 W(f"robot {name}: tag seen in only {100 * n // len(snaps)}% of snapshots (glare? arm over the tag?)")
             if not (ar["xmin"] <= r.x <= ar["xmax"] and ar["ymin"] <= r.y <= ar["ymax"]):

@@ -299,6 +299,8 @@ class SimWorld:
         snap = {"t": self.t, "tags": tags, "objects": objs}
         if self.floor:
             snap["floor"], snap["corners"] = self.floor, [29, 32, 31, 30]
+            a = self.cfg["arena"]                          # camera on a stand beside the arena, looking in
+            snap["camera"] = [(a["xmin"] + a["xmax"]) / 2, a["ymin"] - 1.2, 1.8]
         return snap
 
     def delayed(self):
