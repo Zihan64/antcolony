@@ -41,6 +41,13 @@ Run
   python apriltag_tracker_gui.py --synthetic --autostart
   python apriltag_tracker_gui.py --calib calib.npz --autostart
 
+  python apriltag_tracker_gui.py --extra-camera "name=go3s,camera=Insta360,fps=30"
+  python apriltag_tracker_gui.py --synthetic --extra-camera synthetic --autostart   # fusion demo
+
+Extra cameras (multi_camera.py): each locates the tags against the same 4 pivots on its own
+thread; every tag's pose is fused across the cameras that see it (outliers voted out), and while
+the main camera is silent the robots' poses still go out from the extras alone.
+
 Keep apriltag_sheet_a4.json next to the scripts: it holds the printed marker sizes.
 AprilTags and ArUco markers are tracked together. IDs are global: AprilTag 0-86 keep their
 number, ArUco 0-14 become 87-101 (the table's Name column shows e.g. "aruco3" for id 90).
@@ -73,6 +80,7 @@ import apriltag_floor_mapper as m  # noqa: E402
 import arena_map as am  # noqa: E402
 import object_detector as od  # noqa: E402
 import antcolony_pub  # noqa: E402
+import multi_camera as mc  # noqa: E402
 
 RESOLUTIONS = ["1920x1080", "3840x2160", "2560x1440", "1280x720"]
 
@@ -225,6 +233,20 @@ class SyntheticScene:
         self.rng = np.random.default_rng(0)
         self.empty_frames = 0          # >0: render without objects (for "Capture empty floor")
 
+    def view_from(self, C, target=(0.6, 0.4, 0.0), t0=None):
+        """Move this scene's camera (same arena, another viewpoint): a second synthetic camera
+        for testing multi-camera fusion. t0: share another scene's clock (same robot motion)."""
+        self.C = np.asarray(C, float)
+        z = (np.asarray(target, float) - self.C) / np.linalg.norm(np.asarray(target, float) - self.C)
+        x = np.cross(z, [0, 0, 1.0])
+        x /= np.linalg.norm(x)
+        self.R = np.vstack([x, np.cross(z, x), z])
+        self.rvec, _ = cv2.Rodrigues(self.R)
+        self.tvec = -self.R @ self.C
+        if t0 is not None:
+            self.t0 = t0
+        return self
+
     def _proj(self, P):
         return cv2.projectPoints(np.asarray(P, float).reshape(-1, 3), self.rvec, self.tvec,
                                  self.K, self.D)[0].reshape(-1, 2)
@@ -355,6 +377,11 @@ class Worker(QtCore.QThread):
         self.stops = []
         self._next_stop = 0            # with a robot: stops before this index are reached
         self._route_draw = []          # (number, xy, done) for drawing
+        # extra cameras (multi_camera.CameraRig): their tag poses are fused into every result, and
+        # while this (main) camera is silent the robots' poses still go out from the extras alone
+        self.rig = None
+        self.pub_floor = None          # the floor the publisher uses (an extra's if the main has none)
+        self.primary_silent_s = 0.15   # main camera silent this long -> publish from the extras only
 
     def start_recording(self, path):
         with self.rec_lock:
@@ -724,6 +751,23 @@ class Worker(QtCore.QThread):
         qimg = QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy()
         self.arena_ready.emit(qimg, s_, info)
 
+    def _publish_extras_only(self, now):
+        """The main camera delivered nothing for a while (unplugged, USB stall, stopped video):
+        the extra cameras alone keep the robots' poses going to the coordinator and the GUI."""
+        r = self.rig.fuse_into(None, None, self.mapper.floor, self.mapper.K, self.mapper.tag_size, now)
+        r.update(latency_ms=0.0, proc_fps=0.0, grab_fps=0.0, truth=None, wall=now, _floor=None,
+                 planner_ms=self.planner_ms)
+        self.pub_floor = self.rig.pub_floor(self.mapper.floor)
+        r["floor_valid"] = bool(self.pub_floor is not None and self.pub_floor.valid)
+        self._fast_control(r, now)
+        if self.world_pub is not None:
+            self.world_pub.publish(r, self.pub_floor, self.amap.arena.get("corner_ids") if self.amap is not None
+                                   else (self.mapper.cfg.get("arena") or {}).get("corner_ids"))
+        self.results.append(r)
+        if self.results_free:
+            self.results_free = False
+            self.results_ready.emit()
+
     def run(self):
         self._planner_in, self._planner_ev, self._planner_stop = None, threading.Event(), False
         self.planner_ms = 0.0
@@ -731,13 +775,21 @@ class Worker(QtCore.QThread):
         planner.start()
         try:
             fid, n, t_fps, fps = 0, 0, time.perf_counter(), 0.0
+            last_main = last_fallback = time.perf_counter()
             while not self.isInterruptionRequested():
                 K, D = self.mapper.K, self.mapper.D
-                frame, fid, stamp = self.source.latest(fid, timeout=0.5)
+                frame, fid, stamp = self.source.latest(fid, timeout=0.05 if self.rig else 0.5)
                 if frame is None:
+                    if self.rig:
+                        t_ = time.perf_counter()
+                        if t_ - last_main > self.primary_silent_s and t_ - last_fallback > 0.033:
+                            last_fallback = t_
+                            self._publish_extras_only(t_)
+                        continue
                     if not self.source.running:
                         raise RuntimeError("Source stopped delivering frames.")
                     continue
+                last_main = time.perf_counter()
                 meta = getattr(self.source, "last_meta", None)
                 if self.pending_detector is not None:
                     old = self.mapper.detector
@@ -757,6 +809,9 @@ class Worker(QtCore.QThread):
                 r = self.mapper.process(frame, stamp)
                 if self.objdet is not None:
                     self._merge_detections(r, stamp)
+                if self.rig:
+                    # one pose per tag from every camera that sees it (outliers voted out)
+                    self.rig.fuse_into(r, stamp, self.mapper.floor, K, self.mapper.tag_size)
                 now = time.perf_counter()
                 n += 1
                 if now - t_fps >= 1.0:
@@ -772,9 +827,10 @@ class Worker(QtCore.QThread):
                     self._planner_in = (raw, dict(r, objects=list(r["objects"])), now)
                     self._planner_ev.set()
                 r["objects"].extend(self._app_objs)       # newest objects from the planner
+                self.pub_floor = self.rig.pub_floor(floor) if self.rig else floor
                 self._fast_control(r, now)
                 if self.world_pub is not None:            # --antcolony: tags + objects -> the coordinator
-                    self.world_pub.publish(r, floor, self.amap.arena.get("corner_ids") if self.amap is not None
+                    self.world_pub.publish(r, self.pub_floor, self.amap.arena.get("corner_ids") if self.amap is not None
                                            else (self.mapper.cfg.get("arena") or {}).get("corner_ids"))
                 self.results.append(r)
                 if self.results_free:
@@ -838,6 +894,17 @@ class Worker(QtCore.QThread):
                             u, v = floor.world_to_pixel([p], K, D)[0]
                             if np.isfinite(u) and np.isfinite(v):
                                 cv2.drawMarker(frame, (int(u), int(v)), (0, 140, 255), cv2.MARKER_CROSS, 22, 2)
+                    if floor.valid and self.rig:
+                        # tags this camera does not see right now, located by an extra camera
+                        own = {t for t, _ in r.get("_dets", [])}
+                        hh_, ww_ = frame.shape[:2]
+                        for o in r["objects"]:
+                            if o.get("cams") and o["id"] not in own and o.get("frame") == "world":
+                                u_, v_ = floor.world_to_pixel([[o["x"], o["y"], o["z"]]], K, D)[0]
+                                if np.isfinite(u_) and np.isfinite(v_) and 0 <= u_ < ww_ and 0 <= v_ < hh_:
+                                    cv2.circle(frame, (int(u_), int(v_)), 16, (255, 200, 0), 3, cv2.LINE_AA)
+                                    m._put(frame, f"{o['name']} via {'+'.join(o['cams'])}",
+                                           (int(u_) + 18, int(v_) - 14), (255, 200, 0))
                     self.last_frame = frame
                     s = min(1.0, self.max_display_w / frame.shape[1])
                     disp = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else frame
@@ -962,9 +1029,12 @@ def pixel_to_floor(Rt, K, D, u, v):
 class MainWindow(QtWidgets.QMainWindow):
     COLS = ["ID", "Name", "X m", "Y m", "Z m", "Heading°", "Tilt°", "σX mm", "σY mm", "σZ mm",
             "Hz", "Reproj px", "Err mm"]
+    log_signal = pyqtSignal(str)       # log lines from other threads (extra cameras)
 
     def __init__(self, args):
         super().__init__()
+        self.log_signal.connect(self.log_msg)
+        self.extra_thumbs = []
         self.setWindowTitle("AprilTag tracker test GUI")
         self.resize(1700, 950)
         self.args = args
@@ -1138,6 +1208,32 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow("Connection", self.conn_combo)
         f.addRow("Camera", cam_row)
         f.addRow(self.start_btn)
+
+        # extra cameras: specs in the Settings tab, live status + thumbnails here
+        self.extra_edit = QtWidgets.QLineEdit(self._initial_extra_specs())
+        self.extra_edit.setPlaceholderText("e.g. name=go3s,camera=Insta360,fps=30 ; 2")
+        self.extra_edit.setToolTip(
+            "More cameras for a steadier robot position (separate several with ';'). Each one locates the "
+            "tags against the 4 pivots by itself; the poses are fused and a camera that drops out is simply "
+            "left out. Items: camera (index or part of the name), name, width, height, fps, calib (.npz), "
+            "focal_px, k1, k2, k3, hfov_deg, backend, decimate, max_fps. Applied at Start. 'synthetic' = a "
+            "second test view.\nA wide lens (GO 3S) or a camera that sees few pivots learns its lens and "
+            "pose from the main camera: let the robot pause (or move a tag) at 6+ spots both cameras see.")
+        self.extra_pick = QtWidgets.QComboBox()
+        self.extra_pick.setToolTip("Connected cameras: pick the second view and press Add")
+        extra_add = QtWidgets.QPushButton("Add")
+        extra_add.setToolTip("Add the picked camera as an extra (fused) camera")
+        extra_add.clicked.connect(self._add_extra_camera)
+        extra_clear = QtWidgets.QPushButton("Clear")
+        extra_clear.clicked.connect(lambda: self.extra_edit.setText(""))
+        f = group("Extra cameras (fused)", cl)
+        f.addRow(hrow(self.extra_pick, extra_add, extra_clear))
+        f.addRow(self.extra_edit)
+        self.extra_status = QtWidgets.QLabel("none: pick a second camera above and press Add, then Start")
+        self.extra_status.setWordWrap(True)
+        self.extra_thumb_row = QtWidgets.QHBoxLayout()
+        f.addRow(self.extra_status)
+        f.addRow(self.extra_thumb_row)
 
         f = group("Floor plane (4 pivot tags)", cl)
         self.pivot_label = QtWidgets.QLabel("Pivots: the 4 largest tags on the print sheet.")
@@ -1433,6 +1529,111 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.hover_label)
         self.refresh_cameras(prefer=self.args.camera)
 
+    def _initial_extra_specs(self):
+        """--extra-camera options, else cameras.json (--cameras or next to arena.json), else last time."""
+        a = self.args
+        if getattr(a, "extra_camera", None):
+            return " ; ".join(a.extra_camera)
+        path = getattr(a, "cameras", None) or mc.DEFAULT_CAMERAS_FILE
+        try:
+            specs = mc.load_specs(path)
+        except Exception as e:                      # noqa: BLE001
+            print(f"Could not read {path}: {e}")
+            specs = []
+        if specs:
+            return " ; ".join(mc.spec_text(s) for s in specs)
+        return QtCore.QSettings("apriltag_floor_mapper", "tracker_gui").value("extra_cameras", "", type=str)
+
+    def _start_extras(self, mode, primary_idx):
+        """Open the extra cameras for this run (each failure is logged and that camera skipped)."""
+        txt = self.extra_edit.text().strip()
+        QtCore.QSettings("apriltag_floor_mapper", "tracker_gui").setValue("extra_cameras", txt)
+        self._clear_extra_thumbs()
+        if not txt:
+            self.extra_status.setText("none: pick a second camera above and press Add, then Start")
+            return None
+        try:
+            specs = mc.parse_specs(txt)
+        except ValueError as e:
+            self.log_msg(f"Extra cameras: {e}")
+            return None
+        log = self.log_signal.emit
+        extras = []
+        if mode == "Synthetic":
+            # 'synthetic' specs: the same test arena seen from other sides (fusion test, no hardware)
+            views = [(0.6, 1.55, 1.3), (1.9, 0.4, 1.2), (-0.7, 0.4, 1.2)]
+            for k, spec in enumerate(s for s in specs if s["camera"].lower().startswith("synthetic")):
+                sc = SyntheticScene(raw=self.scene.raw).view_from(views[k % len(views)], t0=self.scene.t0)
+                src = PacedSource(sc.read, min(self.fps_spin.value(), 30))
+                spec = dict(spec, focal_px=spec.get("focal_px") or (None if self.scene.raw else sc.K[0, 0]))
+                try:
+                    extras.append(mc.ExtraCamera(spec, self.cfg, self.smooth_slider.value() / 100,
+                                                 self.ar_adaptive.isChecked(), log, source=src).open().start())
+                except Exception as e:              # noqa: BLE001
+                    src.release()
+                    self.log_msg(f"Extra camera '{spec['name']}' not used: {e}")
+            if len(extras) < len(specs):
+                self.log_msg("Synthetic mode: only 'synthetic' extra cameras are used.")
+        else:
+            QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                extras = mc.open_extras(specs, self.cfg, self.smooth_slider.value() / 100,
+                                        self.ar_adaptive.isChecked(), log, exclude_index=primary_idx)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        if not extras:
+            self.extra_status.setText("none running (see the log)")
+            return None
+        for e in extras:
+            lbl = QtWidgets.QLabel(e.name)
+            lbl.setFixedSize(160, 90)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("background:#111; color:#888;")
+            lbl.setToolTip(f"extra camera '{e.name}'")
+            self.extra_thumb_row.addWidget(lbl)
+            self.extra_thumbs.append((e, lbl))
+        if not self.cfg.get("floor_tags"):
+            self.log_msg("Extra cameras wait for the arena: they locate themselves against the 4 pivots "
+                         "once the arena is set up with the main camera.")
+        self.log_msg(f"Extra cameras running: {', '.join(e.name for e in extras)}. They must stay still. "
+                     "Each one places itself with the pivots it sees and learns its lens and pose from the "
+                     "main camera whenever a robot pauses (or a tag is moved) where both cameras see it.")
+        return mc.CameraRig(extras, main_name="main")
+
+    def _fill_extra_pick(self, devices):
+        """Connected cameras for the extra-camera picker; preselect one that is neither the main camera
+        type (Sony / capture card) nor a built-in webcam (e.g. the GO 3S)."""
+        self.extra_pick.clear()
+        best = -1
+        for idx, name in devices:
+            kind = m.classify_camera(name)
+            self.extra_pick.addItem(f"{idx}: {name}", name)
+            if best < 0 and kind == "other":
+                best = self.extra_pick.count() - 1
+        if best >= 0:
+            self.extra_pick.setCurrentIndex(best)
+
+    def _add_extra_camera(self):
+        """Append the picked camera to the extra-camera specs (by device NAME: survives re-plugging)."""
+        name = self.extra_pick.currentData()
+        if not name:
+            return
+        specs = [s.strip() for s in self.extra_edit.text().split(";") if s.strip()]
+        if any(f"camera={name}" in s or s == name for s in specs):
+            self.log_msg(f"'{name}' is already an extra camera.")
+            return
+        short = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ").strip() or "extra"
+        specs.append(f"name={short},camera={name}")
+        self.extra_edit.setText(" ; ".join(specs))
+        self.log_msg(f"Extra camera '{name}' added: it is used from the next Start"
+                     + (" (stop and start again)." if self.worker else "."))
+
+    def _clear_extra_thumbs(self):
+        for _, lbl in self.extra_thumbs:
+            self.extra_thumb_row.removeWidget(lbl)
+            lbl.deleteLater()
+        self.extra_thumbs = []
+
     def _with_browse(self, edit, filt):
         w = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(w)
@@ -1467,6 +1668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         labels = {"sony": "Sony", "capture": "capture card", "skip": "webcam/virtual", "other": "camera"}
         for idx, name in devices:
             self.cam_combo.addItem(f"{idx}: {name}  ({labels[m.classify_camera(name)]})", idx)
+        self._fill_extra_pick(devices)
 
         choice, reason = None, ""
         if prefer.lower() not in ("auto", "sony"):
@@ -1588,6 +1790,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                decimate=self.decim_spin.value())
 
     def start(self):
+        primary_idx = None
         try:
             mode = self.src_combo.currentText()
             if mode == "Synthetic":
@@ -1611,6 +1814,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if not spec:
                         raise RuntimeError("Choose a camera in the Camera list first.")
                     idx, name = m.resolve_camera(spec, self.conn_combo.currentData())
+                    primary_idx = idx
                     backend = self.backend_combo.currentData()
                     self.source = m.CameraStream(idx, w, h, self.fps_spin.value(), m.backend_id(backend))
                     if backend == "msmf":
@@ -1706,6 +1910,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_stops()
         if self.det_chk.isChecked():          # on by default; kept across Stop / Start
             self.toggle_detection(True)
+        self.worker.rig = self._start_extras(mode, primary_idx)
         self.worker.start()
         self.start_btn.setText("Stop")
         self.src_combo.setEnabled(False)
@@ -1720,7 +1925,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker:
             self.worker.requestInterruption()
             self.worker.wait(2000)
+            if self.worker.rig:
+                self.worker.rig.stop()
             self.worker = None
+        self._clear_extra_thumbs()
         if self.source:
             self.source.release()
             self.source = None
@@ -1762,6 +1970,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smooth_label.setText(f"{v / 100:.2f}")
         if self.mapper:
             self.mapper.smoother.alpha = v / 100
+        for e in (self.worker.rig.extras if self.worker and self.worker.rig else []):
+            e.mapper.smoother.alpha = v / 100
 
     def _lock_toggled(self, on):
         if not self.mapper:
@@ -1918,6 +2128,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mapper.floor.auto_lock = on
         if self.worker and self.worker.pending_floor is not None:
             self.worker.pending_floor.auto_lock = on
+        for e in (self.worker.rig.extras if self.worker and self.worker.rig else []):
+            e.auto_lock = on
+            if e.floor is not None:
+                e.floor.auto_lock = on
 
     def _arena_params_changed(self, *_):
         if not (self.worker and self.cfg and self.cfg.get("arena")):
@@ -2000,6 +2214,9 @@ class MainWindow(QtWidgets.QMainWindow):
             amap = self._make_amap(floor)
         self.worker.pending_floor = floor
         self.worker.pending_amap = amap
+        if self.worker.rig:
+            # the extra cameras re-locate themselves against the new pivot positions
+            self.worker.rig.set_floor_tags(self.cfg["floor_tags"])
         self.lock_chk.blockSignals(True)
         self.lock_chk.setChecked(locked)
         self.lock_chk.blockSignals(False)
@@ -2508,6 +2725,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.map.addItem(it)
                 self.floor_items.append(it)
 
+    def _ui_tick_extra(self):
+        """True about 5x per second (extra-camera status and thumbnails)."""
+        self._extra_tick = getattr(self, "_extra_tick", 0) + 1
+        return self._extra_tick % 6 == 0
+
     def _refresh_panels(self):
         r = self.latest
         if r is None or not self.worker:
@@ -2570,6 +2792,22 @@ class MainWindow(QtWidgets.QMainWindow):
                             f"map/A* {r.get('planner_ms', 0):5.0f} ms (own thread) | "
                             f"shown {1000 * (now - r['wall']):4.0f} ms after processing | "
                             f"tags {r['n_tags']} | {fl} | {cam_s}{rec}")
+        rig = self.worker.rig
+        if rig:
+            if r.get("main_camera_silent"):
+                self.status.setText("MAIN CAMERA SILENT: robot poses come from the extra cameras only | "
+                                    + self.status.text())
+            if self._ui_tick_extra():
+                self.extra_status.setText(rig.status_text(now))
+                for e, lbl in self.extra_thumbs:
+                    th = e.thumb
+                    if th is None:
+                        continue
+                    rgb = np.ascontiguousarray(cv2.cvtColor(th, cv2.COLOR_BGR2RGB))
+                    hh, ww = rgb.shape[:2]
+                    qimg = QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy()
+                    lbl.setPixmap(QtGui.QPixmap.fromImage(qimg).scaled(
+                        lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
 
         # camera on map
         if cam and r.get("_floor"):
@@ -2650,6 +2888,8 @@ class MainWindow(QtWidgets.QMainWindow):
             meth = o.get("method", "")
             name = o["name"] + (" [plane]" if meth == "plane" else " [3D]" if meth.startswith("pose")
                                 else " [vision]" if meth == "detect" else "")
+            if o.get("cams") and (o.get("n_cams", 1) > 1 or o["cams"] != ["main"]):
+                name += f" ({'+'.join(o['cams'])})"     # which cameras this pose is fused from
             vals = [str(tid), name, fmt(o["x"], 4), fmt(o["y"], 4), fmt(o["z"], 4),
                     fmt(o.get("yaw_deg"), 1), fmt(o.get("tilt_deg"), 1), fmt(sd[0], 1), fmt(sd[1], 1),
                     fmt(sd[2], 1), str(int(hz)), fmt(o["reproj_px"], 2), fmt(err, 1)]
@@ -2701,6 +2941,12 @@ def main():
     ap.add_argument("--antcolony", metavar="HOST[:PORT]",
                     help="send tags + detected objects to the AntColony coordinator on that computer "
                          "(port 9100 by default), e.g. --antcolony 127.0.0.1")
+    ap.add_argument("--extra-camera", action="append", metavar="SPEC",
+                    help="another camera to fuse, e.g. 'name=go3s,camera=Insta360,fps=30' (repeat for more; "
+                         "see multi_camera.py). Overrides cameras.json")
+    ap.add_argument("--cameras", metavar="JSON",
+                    help=f"extra cameras from this file (default: {mc.DEFAULT_CAMERAS_FILE} in the working "
+                         "folder, if present)")
     ap.add_argument("--path", nargs=2, type=int, metavar=("START_TAG", "GOAL_TAG"),
                     help="plan the A* path from START_TAG to GOAL_TAG as soon as the floor is ready, "
                          "e.g. --path 28 50")

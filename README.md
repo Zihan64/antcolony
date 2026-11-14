@@ -1,4 +1,4 @@
-# AntColony: Multi-Robot Floor Clearing
+﻿# AntColony: Multi-Robot Floor Clearing
 
 An overhead camera with AprilTags provides localization, and a single host coordinates three robots: dozer C sweeps far-away debris toward the bin, and arm robots A and B pick the debris up and drop it into the bin.
 
@@ -108,6 +108,48 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 - `approach` + grab has only been run on carpet once (car A, missed) and never on car B on carpet; `agent.py` → `hw_masterpi.py` → `vlm_grab.py` as one chain has never run on a real car.
 - The driving controller's gains (`control` in `config.json`) have only ever run in the simulator.
 - The tracker's own "UDP out" (single-robot path following) crashes its worker thread once an object is detected (`json.dumps(..., default=float)` on a numpy outline). `--antcolony` does not use it; leave "UDP out" empty.
+
+## Multiple overhead cameras (2026-11-14)
+
+One camera is a single point of failure: if it stalls or is unplugged, the coordinator gets no robot poses. The tracker can now fuse **extra cameras** (`cam_control/multi_camera.py`). Each extra camera locates the tags against the **same 4 pivots** on its own thread, so no camera-to-camera calibration is needed. Every tag's pose is fused across the cameras that see it, weighted by how precisely each camera located it, and a camera that disagrees is voted out. While the main camera is silent, the extras alone keep sending robot poses.
+
+```bash
+python cam_control/run_tracker.py --antcolony 127.0.0.1 --extra-camera "name=go3s,camera=Insta360,fps=30"
+# or: copy cam_control/cameras.example.json to cameras.json next to arena.json (loaded automatically)
+# or: GUI Run tab > Extra cameras: pick the camera, Add, then Start
+python cam_control/apriltag_tracker_gui.py --synthetic --extra-camera synthetic --autostart   # demo, no hardware
+```
+
+- Set up the arena with the main camera first; the extras then locate themselves and must stay fixed (adaptive lock re-locks a camera that gets bumped).
+- **Cross-calibration from the main camera.** Each extra camera also learns its lens **and** pose from the main camera. Whenever a flat tag (a robot, or any tag on the floor) stands still where both cameras see it, its 4 corners as the main camera places them are paired with the extra camera's pixels. Six or more such spots spread over the view fit focal, k1, k2 and k3 plus the pose, so a wide or fisheye lens like the GO 3S works without a chessboard and without any pivot in view. To speed it up, let the robot pause at several places, or walk a printed tag around the floor and pause about 1 s at each spot. The lens is saved in `camera_lens.json` (per camera name and resolution); on the next start only the pose is re-learned (2 spots, or the pivots in view). Each camera's floor-fit error now also widens its uncertainty in the fusion, so a poorly fitted camera cannot outvote a good one.
+- Untagged objects (ids 1000+) still come only from the main camera's floor map; extras fuse **tags** (robots, bin).
+- The datagram to the coordinator gains `"cameras": {name: [x, y, z]}`, and `tag_info[id]` gains `"cams"` (which cameras) and `"sigma"` (fused 1-sigma, m). `"camera"` stays the main camera (the coordinator's shadow masking for untagged objects). The coordinator needs no change.
+- Tests: `python cam_control/test_crosscal.py`: a strongly distorted (k1 −0.32), upside-down second camera that sees only 2 pivots. With the pivots alone its robot error was 66 mm. After learning from the main camera: focal 643 px (640 true), k1 −0.32, camera position within 3 mm, robot error 4.8 mm median from that camera alone. The restart reused the saved lens and placed the camera on the first frame. `python cam_control/test_multi_camera.py` (synthetic arena seen from 2–3 sides). Measured there: median robot error 6.9 mm (main only) → 3.4 mm (fused). A camera's own bad frames (up to 56 mm off) and an injected 20 cm outlier are voted out. With the main camera silent, the extra alone gave 11–13 mm. An extra camera without calibration fits its focal length from the pivots (999.7 px vs 1000 px true).
+- **CPU cost (measured).** Tag detection is CPU-bound: two cameras slow each other down just as much in separate processes as in threads. On the Core Ultra 7 256V laptop running on battery, the main camera went from 15–19 fps alone to 11–13 fps with one extra camera. Extras are therefore capped (`max_fps`, default 10). Run the tracker computer on mains power.
+
+### Insta360 GO 3S as an extra camera
+
+| Link | Real time? | Use it? |
+| --- | --- | --- |
+| **USB webcam mode** (camera in the Action Pod, Pod's USB-C to the PC with a data cable, choose "Webcam" on the camera) | Yes: a standard UVC camera, about 1920×1080 at 30 fps | **Yes**: `camera=Insta360` |
+| Bluetooth LE 5.0 | No: control/status only; Insta360 states preview over Bluetooth is reduced quality, and BLE carries ~100 kB/s vs ~500–1000 kB/s for 1080p30 H.264 | No (test it with `camera_check.py ble`) |
+| Wi-Fi (phone app preview) | Proprietary protocol; live streaming is not a listed GO 3S feature | No documented way into OpenCV |
+
+**Wireless (2026-11-14).** Measured on our unit: with the camera taken out of the Action Pod, the Pod's USB-C offers only a vendor/debug interface (`Class FF/42/01`, WinUSB) and no video interface. The detached camera talks to the Pod over Bluetooth only, and Insta360 says that preview is reduced quality. Realistic wireless paths, best first:
+
+1. **Camera's own Wi-Fi, preview protocol** (`cam_control/insta360_wifi.py`): TCP 6666, H.265/H.264 preview. This protocol was reverse engineered by others for the ONE RS and GO Ultra; it is **not verified on the GO 3S**. Join the camera's Wi-Fi network, then run `python cam_control/insta360_wifi.py probe`; it reports which step fails. If the probe passes, use `camera=insta-wifi` as an extra camera, or "Wi-Fi: Insta360" in `insta360_monitor.py`. Tested against a fake camera speaking the protocol: 1280×720 at 29 fps, about 72 ms relay + decode, tags located within about 5 mm through the codec. The PC loses its other Wi-Fi while joined, so use a second adapter (USB dongle or Ethernet) for the robots' network.
+2. **Raspberry Pi bridge**: camera docked in the Pod in webcam mode, USB into a Pi on a power bank, and the Pi streams over the robots' Wi-Fi (for example `mediamtx`, or `ustreamer --device /dev/video0 --host 0.0.0.0`). Add it as `camera=rtsp://<pi>:8554/...` or `camera=http://<pi>:8080/stream`, or as "Network stream URL..." in the monitor. Webcam mode and streaming are standard; this path has not been run here yet.
+3. Phone app preview mirrored to the PC: about 0.3–0.5 s of delay plus UI overlays. Demo only.
+4. Bluetooth: not usable for video (see above).
+
+The camera does not charge in webcam mode, so plan for battery life or a powered hub. Its wide lens has strong distortion; the cross-calibration above learns it from the main camera (a chessboard `calib=` still works and is used as is). **Run on our setup (2026-11-14):** docked GO 3S as webcam `GO 3S` (index 2), 1920×1080 at about 30 fps, hung upside down above the arena next to the Sony (index 1). The first open after plugging in can give black frames for about 30 s. Detecting at full resolution matters: at decimate 2 it found 1 of 3 tags, at 1.0 it found pivots 29, 30, 31 and the robot. It saw the robot where the Sony could not (far end, tilted tag). **Arena setup is needed again first**: the pivots were moved since `arena.json` was saved (Sony measures 30→31 as 1.1 m, the file says 1.73 m), so every camera rejects the floor until "Arena setup" is rerun with all 4 pivots in the Sony's view. Check the camera before relying on it:
+
+```bash
+python cam_control/camera_check.py list                       # is it there, which modes
+python cam_control/camera_check.py bench   --camera Insta360  # delivered resolution / fps / stalls / tag size in px
+python cam_control/camera_check.py latency --camera Insta360  # glass-to-glass delay (point it at the flashing screen)
+pip install bleak && python cam_control/camera_check.py ble   # Bluetooth: find, connect, list services, measure throughput
+```
 
 ## Current robot deployment (2026-11-14)
 
@@ -235,6 +277,8 @@ antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
+cam_control/multi_camera.py   extra cameras: per-camera floor pose against the pivots, cross-calibration from the main camera, fused tag poses, fallback
+cam_control/camera_check.py   camera list / bench / latency test / Bluetooth LE probe (Insta360 GO 3S)
 antcolony/sim.py          simulator (plays both camera and robots)
 robot/agent.py            on-robot service (watchdog, skills, telemetry)
 robot/hw_masterpi.py      arm robot: adapter for masterpi_lite + vlm_grab.py
