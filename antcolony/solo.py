@@ -99,7 +99,7 @@ def main():
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--robot", required=True)
     ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
-    ap.add_argument("--steps", default="grab,carry,drop", help="any of grab, carry, drop, home, status - in this order")
+    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, grab, carry, drop, home, status - in this order")
     ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
     ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
@@ -157,6 +157,9 @@ def main():
             say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
             if not ok:
                 sys.exit(4)
+        elif step == "back":
+            say(f"backing up {a.back_cm:.0f} cm")
+            link.back_up(a.back_cm)
         elif step == "home":
             ok, detail, secs = link.skill("home", {}, 15)
             say(f"home: {'ok' if ok else 'FAILED'} - {detail}")
