@@ -88,6 +88,26 @@ PY
 jog <robot IP> 0.3 0 0     # forward; then -0.3 0 0 back, 0 0 0.5 turn left, 0 0 -0.5 turn right, 0 0.3 0 strafe left
 ```
 
+## Arm robot hardware (A, B: Hiwonder MasterPi, Raspberry Pi 5 version)
+
+From the vendor's spec sheet:
+
+| Item | Value |
+| --- | --- |
+| Size (L × W × H) | 185 × 162 × 347 mm (arm column ≈ 220 mm) |
+| Weight | 1100 g |
+| Drive | 4 TT motors with mecanum wheels (can strafe) |
+| Arm | 4 DOF + gripper, no wrist rotation; LD-1501MG digital servos + LFD-01M micro servo |
+| Camera | 480p, on the arm |
+| Compute | Raspberry Pi 5 + MasterPi expansion board |
+| Link | Wi-Fi / Ethernet |
+| Battery | about 60 min of continuous use |
+
+What this means for `config.json`:
+- `radius` 0.15 m covers the body: half the footprint diagonal is ≈ 0.123 m, so there is ≈ 2.7 cm of margin.
+- `base_fwd` (body center → arm rotation axis, default 0.055 m) is **not** on the spec sheet and should be measured on each robot.
+- Battery: one charge is roughly one hour of driving. Charge between judging rounds and keep spare packs if you have them.
+
 ## Dozer setup (Freenove FNK0043 4WD car + Pi 5)
 
 You do not need Freenove's own server code; `hw_freenove.py` drives the expansion board directly over I2C.
