@@ -7,9 +7,12 @@ forward round anything tall in the way, put it down.
     python -m antcolony.solo --robot B --steps status         # battery, sonar, holding - nothing moves
 
 The car's agent.py must be running, and (for grab) the VLM server. Put the object 25-40 cm in
-front of the car. A missed grab is tried again, at most --tries times (default 5). If the
-carry fails (blocked on both sides) the car keeps holding the object: put it down with
-`--steps drop` once there is room in front of it.
+front of the car. A missed grab is tried again, at most --tries times (default 5); before each
+new try the car backs up --back-cm (default 18), because after a miss it stands right over the
+object and its camera no longer sees it (2026-11-14: without this, tries 2-5 looked past the
+block at the obstacle behind it). With something else in view, name the object (--label "red
+block") instead of the default "any". If the carry fails (blocked on both sides) the car keeps
+holding the object: put it down with `--steps drop` once there is room in front of it.
 
 What "round anything in the way" means is in robot/hw_masterpi.py, carry(): front sonar only,
 things about 10 cm tall or more, the side the car slides to must be free.
@@ -29,7 +32,7 @@ class Link:
     """Skills to one robot's agent, telemetry back."""
 
     def __init__(self, name, addr):
-        self.name, self.addr = name, addr
+        self.name, self.addr, self.ip = name, addr, socket.gethostbyname(addr[0])
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -45,11 +48,11 @@ class Link:
         t_end = time.monotonic() + secs
         while time.monotonic() < t_end:
             try:
-                data, _ = self.rx.recvfrom(65535)
+                data, src = self.rx.recvfrom(65535)
                 m = json.loads(data.decode())
             except (socket.timeout, ValueError):
                 continue
-            if isinstance(m, dict) and m.get("name") == self.name:
+            if isinstance(m, dict) and m.get("name") == self.name and src[0] == self.ip:     # not another car's
                 self.telem = m
         return self.telem
 
@@ -60,6 +63,12 @@ class Link:
             self.send({"type": "vel", "vx": 0, "vy": 0, "w": 0, "dur": 0.1})
             self.pump(0.2)
         return self.telem
+
+    def back_up(self, cm, cm_per_pulse=5.7, secs=0.33):
+        """Straight back in short pulses (the way the car came is free). Counted, not measured."""
+        for _ in range(max(1, round(cm / cm_per_pulse))):
+            self.send({"type": "vel", "vx": -0.05, "vy": 0, "w": 0, "dur": secs})
+            self.pump(secs + 0.3)
 
     def skill(self, name, args, timeout):
         """Run one skill to its end. -> (ok, detail, seconds)."""
@@ -93,6 +102,8 @@ def main():
     ap.add_argument("--steps", default="grab,carry,drop", help="any of grab, carry, drop, home, status - in this order")
     ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
+    ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
+    ap.add_argument("--obj-height", type=float, help="cm, if the object is a block of known height (skips the shape guess)")
     ap.add_argument("--dist-cm", type=float, default=20, help="how far to carry it forward")
     ap.add_argument("--side", choices=["left", "right"], help="which way to try first round an obstacle (default left)")
     ap.add_argument("--carry", default="{}", help='more carry settings as JSON, e.g. \'{"margin_cm": 18, "cm_s": 15}\'')
@@ -112,12 +123,20 @@ def main():
         if step == "status":
             continue
         if step == "grab":
+            gargs, backed = {"label": a.label}, 0.0
+            if a.obj_height:
+                gargs["obj_height"] = a.obj_height
             for i in range(1, a.tries + 1):
                 say(f"grab, try {i} of {a.tries} ...")
-                ok, detail, secs = link.skill("grab", {"label": a.label}, 150)
+                ok, detail, secs = link.skill("grab", gargs, 150)
                 say(f"  {'ok' if ok else 'missed'} - {detail}  ({secs:.0f} s)")
                 if ok:
                     break
+                stood = "nothing moved" in detail or "not found" in detail      # the car did not drive up to anything
+                if i < a.tries and a.back_cm > 0 and (not stood or backed < 2 * a.back_cm):
+                    say(f"  backing up {a.back_cm:.0f} cm to see the object again")
+                    link.back_up(a.back_cm)
+                    backed = backed + a.back_cm if stood else a.back_cm
             else:
                 say(f"GIVES UP after {a.tries} tries")
                 sys.exit(2)

@@ -148,6 +148,8 @@ class MasterPi:
         script = "grab_runner.py" if os.path.isfile(runner) and os.path.getsize(runner) > 100 else "vlm_grab.py"
         cmd = [sys.executable, os.path.join(HERE, script), "approach", label,
                "--min-speed", str(args.get("min_speed", self.min_duty))]
+        if args.get("obj_height"):               # a known block: skips vlm_grab's "is this a block at all?" guess,
+            cmd += ["--obj-height", str(args["obj_height"])]     # which coloured light can fool (2026-11-14)
         with self.lock:
             self._close()                        # vlm_grab.py opens the serial port itself
             try:
@@ -163,6 +165,12 @@ class MasterPi:
                 self._open()
                 self.car.stop()                  # a killed vlm_grab.py (timeout / cancel) leaves the motors as they were
         last = out[-1] if out else ""
+        try:                                     # everything vlm_grab printed: the agent log keeps only the last line
+            with open(os.path.join(HERE, "grab.log"), "a", encoding="utf-8") as f:
+                f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')}  {' '.join(cmd[1:])}  -> exit {p.returncode}\n"
+                        + "\n".join(out) + "\n")
+        except OSError:
+            pass
         # exit 0 + a final "done..." line = holding; exit 2 = jaws closed on nothing; 1 = not seen / not reached
         ok = p.returncode == 0 and last.startswith("done")
         self.holding = ok
