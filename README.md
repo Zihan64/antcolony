@@ -48,11 +48,39 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
    | `hyatt` | 172.20.1.113 | 172.20.1.120 | not set |
    | `school` | not set | not set | not set |
 2. **Tracker**: add the 5 lines described at the top of `tracker_bridge/world_pub.py` to publish tags and objects to UDP 9100. Requirements are in the next section.
-3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `masterpi_lite/` (same level as `vlm_grab.py`) and run
+3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `~/Desktop/"Master Pi5"/masterpi_lite/` (same level as `vlm_grab.py`) and run
    `python3 agent.py --name A --min-duty 30` (30 on carpet, 18 on smooth floors). For **dozer C**, see the separate section below.
 4. **Calibration** (one minute per robot; put only one robot in the middle of the arena at a time, with 50 cm clear on all sides):
    `python -m antcolony.calibrate --robot A`; the result is saved to `calib/A.json`. It automatically computes the tag heading offset, the tag-to-turning-center offset, and the signs for left/right turning and strafing, so no measuring is needed.
 5. **Run**: `python -m antcolony.coordinator`; the dashboard is at `http://<host IP>:8080`. Ctrl+C stops all robots.
+
+## Current robot deployment (2026-11-14)
+
+| Robot | Host | User | Code folder | Bench test |
+| --- | --- | --- | --- | --- |
+| A (arm) | catguard-a | zxz5500 | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
+| B (arm) | catguard-b | mitra | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
+| C (dozer) | — | — | — | not set up yet |
+
+Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
+- `chassis.py`: `mirror_lr` in `motor_directions.json` (left/right motor wiring swapped);
+- `arm.py`: `ports` in `arm_directions.json` (servo 3 is plugged into port 2).
+
+The originals are saved next to them as `chassis.py.orig` / `arm.py.orig`. A currently uses B's `vision_calib.json`; recalibrate A's camera if its grasps are off.
+
+Bench-testing a robot's drive directions from a laptop (wheels off the ground, agent running without `--hw mock`):
+
+```bash
+jog(){ python3 - "$@" <<'PY'
+import socket,json,time,sys
+ip,vx,vy,w=sys.argv[1],*map(float,sys.argv[2:5])
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+for _ in range(10):
+    s.sendto(json.dumps({"type":"vel","vx":vx,"vy":vy,"w":w,"dur":0.4,"guard":False}).encode(),(ip,9200)); time.sleep(0.2)
+PY
+}
+jog <robot IP> 0.3 0 0     # forward; then -0.3 0 0 back, 0 0 0.5 turn left, 0 0 -0.5 turn right, 0 0.3 0 strafe left
+```
 
 ## Dozer setup (Freenove FNK0043 4WD car + Pi 5)
 
