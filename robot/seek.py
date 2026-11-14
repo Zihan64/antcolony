@@ -287,9 +287,8 @@ LOOK = {3: 565, 4: 2271, 5: 1627, 6: 1500}    # vlm_grab.LOOK_PULSES: the pose t
 
 
 class EdgeEye:
-    """Camera in the calibrated LOOK pose. edge() -> cm from the arm base to the nearest
-    carpet-to-white edge straight ahead, or "none" (only carpet in view: too far) or "close"
-    (white right at the bottom of the picture: too near). Saves dock.jpg with the edge drawn."""
+    """Camera in the calibrated LOOK pose. edge() -> what measure() says about the white thing in
+    front of the car. Saves dock.jpg with the edge drawn."""
 
     def __init__(self, hw):
         import json
@@ -308,7 +307,7 @@ class EdgeEye:
             self.cap.read()
 
     def edge(self):
-        cv2, np = self.cv2, self.np
+        cv2 = self.cv2
         frame = None
         for _ in range(10):
             ok, f = self.cap.read()
@@ -316,48 +315,65 @@ class EdgeEye:
                 frame = f
         if frame is None:
             raise RuntimeError("camera: no picture (USB cable?)")
-        h, w = frame.shape[:2]
-        out = white_edge(cv2, np, frame)
-        if isinstance(out, int):
-            y_cm = float(cv2.perspectiveTransform(np.array([[[w / 2.0, float(out)]]]), self.H)[0, 0, 1])
-            cv2.line(frame, (0, out), (w, out), (0, 255, 0), 2)
-            cv2.putText(frame, f"{y_cm:.1f} cm", (8, max(20, out - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            out = y_cm
+        m = measure(cv2, self.np, frame, self.H)
+        if m.get("row") is not None:
+            cv2.line(frame, (0, m["row"]), (frame.shape[1], m["row"]), (0, 255, 0), 2)
+        cv2.putText(frame, " ".join(f"{k}={v if not isinstance(v, float) else round(v, 1)}" for k, v in m.items() if k != "row"),
+                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.imwrite(os.path.join(HERE, "dock.jpg"), frame)
-        return out
+        return m
 
     def close(self):
         self.cap.release()
 
 
-def white_edge(cv2, np, frame):
-    """Row (px) of the nearest carpet-to-white edge in the middle of the picture, or "none" / "close".
-    White here = clearly brighter than the rest of the strip, not coloured, and SMOOTH: brightness
-    alone does not do it - the light stripes of a patterned carpet are as bright as a white wall in
-    shadow (2026-11-14), but carpet pile is speckled and a tray wall is not."""
+def white_mask(cv2, np, frame):
+    """Pixels of a white, SMOOTH surface. Brightness alone does not do it - the light stripes of a
+    patterned carpet are as bright as a white wall in shadow (2026-11-14) - but carpet pile is
+    speckled (mean |pixel - 9x9 blur| around 10) and a tray wall is not (around 1)."""
+    hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    smooth = cv2.blur(np.abs(gray - cv2.blur(gray, (9, 9))), (15, 15)) < 3.0
+    val = hsv[:, :, 2].astype(np.float32)
+    ref = float(np.median(val[~smooth])) if (~smooth).mean() > 0.05 else 0.0       # the carpet's brightness
+    return smooth & (hsv[:, :, 1] < 90) & (val > ref + 25)
+
+
+def measure(cv2, np, frame, H):
+    """Where is the white tray in the look-down picture? ->
+      {"state": "none"}                         nothing white in view (too far)
+      {"state": "side", "side": +1 | -1}        white only to the left (+1) / right (-1) of the car's line
+      {"state": "close"}                        white right at the bottom of the picture (too near)
+      {"state": "edge", "y": cm, "deep": bool, "side": ..., "row": px}
+          nearest carpet-to-white edge on the car's centre line, `y` cm ahead of the arm base;
+          deep = it stays white for 10 cm beyond that edge (room to drop into)."""
     h, w = frame.shape[:2]
-    strip = frame[:, w // 2 - 70: w // 2 + 70]
-    hsv = cv2.cvtColor(cv2.GaussianBlur(strip, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    val, sat = np.median(hsv[:, :, 2], axis=1), np.median(hsv[:, :, 1], axis=1)
-    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    rough = np.abs(gray - cv2.blur(gray, (9, 9))).mean(axis=1)             # speckle per row
-    smooth = rough < max(2.5, 0.45 * float(np.median(rough)))
-    if smooth.sum() < 12:
-        return "none"
-    thr = float(np.median(val[~smooth])) + 25 if (~smooth).sum() >= 12 else 0.0   # brighter than the carpet rows
-    white = smooth & (sat < 90) & (val > thr)
-    if white.mean() > 0.9:
-        return "close"
-    for r in range(h - 1, 12, -1):                        # from the car outwards: first white stretch
-        if white[r - 11: r + 1].sum() >= 10:
-            return "close" if r >= h - 6 else r
-    return "none"
+    m = white_mask(cv2, np, frame)
+    if m.mean() < 0.015:
+        return {"state": "none"}
+    side = 1 if m[:, : w // 2].sum() > m[:, w // 2:].sum() else -1
+    row = m[:, w // 2 - 70: w // 2 + 70].mean(axis=1) > 0.6
+    edge = None
+    for r in range(h - 1, 12, -1):                        # from the car outwards: the first white stretch
+        if row[r - 11: r + 1].sum() >= 10:
+            edge = r
+            break
+    if edge is None:
+        return {"state": "side", "side": side}
+    if edge >= h - 6:
+        return {"state": "close", "side": side}
+    to_cm = lambda v: float(cv2.perspectiveTransform(np.array([[[w / 2.0, float(v)]]]), H)[0, 0, 1])
+    y = to_cm(edge)
+    far = next((r for r in range(edge, -1, -1) if to_cm(r) >= y + 10), 0)          # row 10 cm beyond the edge
+    return {"state": "edge", "y": y, "deep": bool(row[far: edge + 1].mean() >= 0.85), "side": side, "row": edge}
 
 
 def dock(hw, args, cancel, eye=None, carry_pose=None):
-    """Creep until the near edge of the white tray is `edge_cm` in front of the arm base. -> (ok, detail)."""
+    """Creep until the near edge of the white tray is `edge_cm` in front of the arm base, sliding
+    sideways first if the tray is off to one side (2026-11-14: the car arrived 7 deg off and
+    crept past the tray's corner). -> (ok, detail)."""
     want, tol = float(args.get("edge_cm", 12)), float(args.get("tol_cm", 1.5))
-    cm_s, u = float(args.get("cm_s", 17)), float(args.get("u", 0.05))
+    cm_s, side_cm_s, u = float(args.get("cm_s", 17)), float(args.get("side_cm_s", 15)), float(args.get("u", 0.05))
     say = lambda msg: print(f"  dock: {msg}", flush=True)
     made = eye is None
     if made:
@@ -370,28 +386,37 @@ def dock(hw, args, cancel, eye=None, carry_pose=None):
         (carry_pose or hw.carry_pose)()
         return ok, detail
 
+    def slide(side, cm):
+        say(f"the tray is to the {'left' if side > 0 else 'right'} - sliding {cm:.0f} cm that way")
+        hw.pulse(0.0, side * u, cm / side_cm_s, cancel)
+
     try:
-        blind = 0
-        for i in range(int(args.get("max_moves", 14))):
+        blind = slides = 0
+        for i in range(int(args.get("max_moves", 20))):
             if cancel.is_set():
                 return finish(False, "cancelled")
-            y = eye.edge()
-            if y == "none":
+            m = eye.edge()
+            if m["state"] == "none":
                 blind += 1
                 if blind > int(args.get("max_blind", 5)):
                     return finish(False, "no white edge in front of the car")
-                say("no white edge in the picture yet - forward 5 cm")
+                say("nothing white in the picture yet - forward 5 cm")
                 hw.pulse(u, 0.0, 5.0 / cm_s, cancel)
-                continue
-            if y == "close":
+            elif m["state"] == "side" or (m["state"] == "edge" and not m["deep"] and slides < 8):
+                slides += 1
+                if slides > 8:
+                    return finish(False, "the tray stays to one side of the car")
+                slide(m["side"], 4.0 if m["state"] == "side" else 3.0)
+            elif m["state"] == "close":
                 say("white right under the camera - back 2.5 cm")
                 hw.pulse(-u, 0.0, 2.5 / cm_s, cancel)
-                continue
-            err = y - want
-            say(f"edge {y:.1f} cm ahead (want {want:.0f})")
-            if abs(err) <= tol:
-                return finish(True, f"docked: edge {y:.1f} cm in front of the arm base")
-            hw.pulse(math.copysign(u, err), 0.0, min(0.33, max(0.10, 0.8 * abs(err) / cm_s)), cancel)
+            else:
+                err = m["y"] - want
+                say(f"edge {m['y']:.1f} cm ahead (want {want:.0f})")
+                if abs(err) <= tol:
+                    return finish(True, f"docked: edge {m['y']:.1f} cm in front of the arm base"
+                                        + ("" if m["deep"] else " (not much tray behind it)"))
+                hw.pulse(math.copysign(u, err), 0.0, min(0.33, max(0.10, 0.8 * abs(err) / cm_s)), cancel)
         return finish(False, "could not settle at the edge")
     except Exception as e:
         return finish(False, f"{type(e).__name__}: {e}")

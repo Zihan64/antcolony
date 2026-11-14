@@ -42,7 +42,7 @@ class FakeCar(hw_masterpi.MasterPi):
         self.box, self.th = box, math.radians(heading)            # heading 0 = facing +y
         self.x = self.y = 0.0
         self.turn_rate, self.turn_sign, self.sonar_sees, self.miss_every = math.radians(turn_deg_s), turn_sign, sonar_sees, miss_every
-        self.v, self.w, self.hit, self.looks, self.posed = 0.0, 0.0, False, 0, 0
+        self.v, self.w, self.vs, self.hit, self.looks, self.posed = 0.0, 0.0, 0.0, False, 0, 0
         self.cancel, self.cancel_at = threading.Event(), cancel_at
         self.sonar_sees_set = True
 
@@ -56,18 +56,19 @@ class FakeCar(hw_masterpi.MasterPi):
 
     def set_velocity(self, vx, vy, w):
         self.v = math.copysign(17.0, vx) if abs(vx) > 0.02 else 0.0
+        self.vs = math.copysign(15.0, vy) if abs(vy) > 0.02 else 0.0     # sliding left (+) / right
         self.w = math.copysign(self.turn_rate, w) * self.turn_sign if abs(w) > 0.02 else 0.0
 
     def stop(self):
-        self.v = self.w = 0.0
+        self.v = self.w = self.vs = 0.0
 
     def move(self, h):
         self.th += self.w * h
-        self.x += -math.sin(self.th) * self.v * h
-        self.y += math.cos(self.th) * self.v * h
+        self.x += -math.sin(self.th) * self.v * h - math.cos(self.th) * self.vs * h
+        self.y += math.cos(self.th) * self.v * h - math.sin(self.th) * self.vs * h
         b, d = self.rel()
-        if d is not None and d < (-2 if self.box[1] < 60 and self.box[0] == 0 and not self.sonar_sees_set else 6):
-            self.hit = True                                       # (dock cases creep right up to the edge on purpose)
+        if d is not None and self.sonar_sees_set and d < 6:      # (dock cases creep right up to the edge on purpose)
+            self.hit = True
         if self.cancel_at is not None and math.hypot(self.x, self.y) >= self.cancel_at:
             self.cancel.set()
 
@@ -136,13 +137,22 @@ class FakeEdge:
 
     def edge(self):
         self.n += 1
-        d = self.car.rel()[1] + 6.0 + (self.noise if self.n % 2 else -self.noise)      # arm base is 6 cm behind the sonar
-        return "none" if d > 23 else "close" if d < 7 else d
+        c = self.car
+        d = (c.box[1] - BOX_W / 2 - c.y) + 6.0 + (self.noise if self.n % 2 else -self.noise)   # arm base 6 cm behind the sonar
+        lat = c.x - c.box[0]                              # tray centre, cm to the LEFT of the car's line
+        side = 1 if lat > 0 else -1
+        if d > 23 or abs(lat) > BOX_W / 2 + 9:
+            return {"state": "none"}
+        if abs(lat) > BOX_W / 2 - 2:
+            return {"state": "side", "side": side}
+        if d < 7:
+            return {"state": "close", "side": side}
+        return {"state": "edge", "y": d, "deep": abs(lat) < BOX_W / 2 - 5, "side": side}
 
 
-def run_dock(start_cm, noise=0.0, **kw):
+def run_dock(start_cm, noise=0.0, off=0.0, **kw):
     clock = Clock()
-    car = FakeCar((0, start_cm + BOX_W / 2), **kw)
+    car = FakeCar((off, start_cm + BOX_W / 2), **kw)
     car.sonar_sees_set = False
     clock.car = car
     hw_masterpi.time = seek.time = clock
@@ -153,9 +163,11 @@ def run_dock(start_cm, noise=0.0, **kw):
     return car, ok, detail
 
 
-DOCK = [("dock from 30 cm (edge not in the look-down picture yet)", 30, 0.0), ("dock from 14 cm", 14, 0.0),
-        ("dock from 4 cm (too close: backs up)", 0.5, 0.0), ("dock with +-1 cm measuring noise", 22, 1.0),
-        ("dock: nothing white within reach - gives up without bumping anything", 90, 0.0)]
+DOCK = [("dock from 30 cm (edge not in the look-down picture yet)", 30, 0.0, 0), ("dock from 14 cm", 14, 0.0, 0),
+        ("dock from 4 cm (too close: backs up)", 0.5, 0.0, 0), ("dock with +-1 cm measuring noise", 22, 1.0, 0),
+        ("dock: tray 15 cm to the right of the car's line (slides over first)", 12, 0.0, 15),
+        ("dock: tray 9 cm to the left, only its edge region under the camera", 20, 0.0, -9),
+        ("dock: nothing white within reach - gives up without bumping anything", 90, 0.0, 0)]
 
 
 if __name__ == "__main__":
@@ -173,12 +185,12 @@ if __name__ == "__main__":
         where = "" if d is None else f", box face {d:.0f} cm away, {b:+.0f} deg"
         print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  "
               f"[{car.looks} looks{where}{', BUMPED the box' if car.hit else ''}]")
-    for name, start, noise in DOCK:
+    for name, start, noise, off in DOCK:
         if verbose:
             print(f"--- {name}")
-        car, ok, detail = run_dock(start, noise)
-        edge = car.rel()[1] + 6.0
-        good = ((ok and 10 <= edge <= 14) if start < 60 else (not ok and edge > 40)) and car.posed == 1
+        car, ok, detail = run_dock(start, noise, off)
+        edge, lat = (car.box[1] - BOX_W / 2 - car.y) + 6.0, abs(car.x - car.box[0])
+        good = ((ok and 10 <= edge <= 14 and lat < BOX_W / 2 - 4) if start < 60 else (not ok and edge > 40)) and car.posed == 1
         bad += not good
         print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  [edge really {edge:.1f} cm from the arm base]")
     print(f"\n{len(CASES) + len(DOCK) - bad}/{len(CASES) + len(DOCK)} cases ok")
