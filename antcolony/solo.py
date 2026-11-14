@@ -103,7 +103,7 @@ def main():
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--robot", required=True)
     ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
-    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, grab, carry, seek, look, drop, home, status - in this order")
+    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, find, grab, carry, seek, look, dock, drop, home, status - in this order")
     ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
     ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
@@ -114,6 +114,9 @@ def main():
     ap.add_argument("--target", default="white box", help="seek / look: what to drive up to (English)")
     ap.add_argument("--stop-cm", type=float, default=22, help="seek: stop when the front sonar reads this")
     ap.add_argument("--seek", default="{}", help="more seek settings as JSON")
+    ap.add_argument("--find-bottom", type=float, default=0.40,
+                    help="find: drive towards the object until its lower edge is this far down the picture (0-1)")
+    ap.add_argument("--dock", default="{}", help='dock settings as JSON, e.g. \'{"edge_cm": 9}\'')
     ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base")
     ap.add_argument("--drop-z", type=float, default=4, help="cm above the floor")
     a = ap.parse_args()
@@ -158,10 +161,24 @@ def main():
             if not ok:
                 say("still holding the object - when there is room in front: --steps drop")
                 sys.exit(3)
+        elif step == "find":                     # turn to the object to grab (found by its colour) and drive up close
+            say(f"find: '{a.label}' ...")
+            ok, detail, secs = link.skill("seek", {"target": a.label, "detector": "colour", "bottom_stop": a.find_bottom,
+                                                   "stop_cm": 12}, 390)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                sys.exit(6)
+        elif step == "dock":
+            say("dock: creeping up to the tray's edge ...")
+            ok, detail, secs = link.skill("dock", json.loads(a.dock), 120)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say("not docked - the car keeps what it holds")
+                sys.exit(7)
         elif step in ("seek", "look"):
             args = dict(json.loads(a.seek), target=a.target, stop_cm=a.stop_cm, look_only=step == "look")
             say(f"{'looking for' if step == 'look' else 'seek:'} '{a.target}' ...")
-            ok, detail, secs = link.skill("seek", args, float(args.get("timeout", 240)) + 30)
+            ok, detail, secs = link.skill("seek", args, float(args.get("timeout", 360)) + 30)
             say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
             if not ok and step == "seek":
                 say("did not get there - the car keeps what it holds (--steps drop to put it down)")

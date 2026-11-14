@@ -144,6 +144,13 @@ No tracker and no coordinator: `python -m antcolony.solo --robot B` sends one ar
 
 Limits, all from the hardware: the sonar only sees things about 10 cm tall or more, straight ahead (a second block lying on the floor is not seen); there is no sensor to the sides, so the side the car slides to must be free; the 20 cm are counted from drive pulses, not measured (expect ±20 %; `cm_s` / `side_cm_s` in the skill arguments set the assumed speeds, `--carry '{"cm_s": 15}'`).
 
+**Find the block, find the tray, put it in** (same evening, car B): `--steps find,grab` then `--steps seek,dock,drop --target "white tray" --seek '{"img_tokens": 576, "view": "far"}' --drop-y 21 --drop-z 10`.
+- `find` = `seek` with `{"detector": "colour", "bottom_stop": 0.4}`: a 3 cm block across the room is ~30 px and the VLM does not see it at any picture size, but a vivid colour blob is found at once (no false hit in 19 saved photos). The car turns to it and drives until its lower edge is 40 % down the picture; `grab` (VLM) takes over from there.
+- `seek` with `"view": "far"`: a nearly level camera view for the search (the lower view shows only ~1.5 m of floor; a tray 2 m away was never in it), and the lower view for a second turn if the first shows nothing (a tray right in front of the car is below the level view). Blurred photos are retaken (Laplacian variance < 200), scan steps are ~20° nominal (car B really turns ~1.5x the first guess). "white tray" is the name the VLM recognises for the shallow white box; "white basket / box / bin / container" all returned nothing on the same photo.
+- Arrival at a low tray is decided by the picture alone (box ≥ 75 % wide, or lower edge at the bottom and ≥ 40 % wide): the sonar does not see a 5 cm rim and may read the furniture behind it.
+- `dock`: arm in vlm_grab's calibrated LOOK pose, the nearest carpet-to-white edge straight ahead is measured in cm (white = brighter than the carpet rows, not coloured, and smooth - the light stripes of the patterned carpet are as bright as white in shadow), the car creeps until it is 12 cm in front of the arm base; `drop` at y 21, z 10 then lets go ~9 cm inside the rim.
+- Result: block found by colour 27° to the left and grabbed on the first try; tray found, docked at 13 cm, block in the tray (photo). The tray search took four attempts and 3.5 min on the last one (38 looks): this part is slow and still fragile.
+
 `tests/test_carry.py` runs the skill on a fake floor (16 cases: boxes ahead, a box reaching far to one side, a wall right across, real speeds 30 % off, narrow / wide sonar beam, no sonar, cancel): the car never touches an obstacle. On the real car (B) the plain 20 cm carry has run; the sidestep has not been triggered there yet.
 
 **Bring it to a landmark** (`robot/seek.py`, skill `seek`): `python -m antcolony.solo --robot B --steps grab,seek,drop --label "red block" --obj-height 3 --target "white box"`. The arm is raised so the camera looks out across the floor (the gripper is not touched), the laptop VLM boxes the target in one photo (~3 s); not in the picture → the car turns left about 30° and looks again (at most one full turn); off centre → a short turn towards it (the turn rate, and its sign, are learned from how far the target moved in the picture); centred → forward in pulses, sonar read before each one, until the sonar reads `--stop-cm` 22 or less, looking again every 30 cm. If the sonar never sees the target the picture stops the car (target fills most of the width). `--steps look --target "white box"` takes one photo and says where the target is (only the arm moves). Every photo is kept on the car as `seek_01.jpg` ….
@@ -279,7 +286,7 @@ antcolony/solo.py         one arm car alone: grab -> carry round obstacles / see
 robot/detector.py         car: object finder, laptop VLM or local YOLO (detector.json)
 robot/grab_runner.py      car: vlm_grab.py with that object finder
 robot/landmarks.py        car: AprilTags in the car's own camera (distance, direction)
-robot/seek.py             car: skill 'seek' - find a named landmark with camera + VLM, drive up to it
+robot/seek.py             car: skills 'seek' (find a named thing with camera + VLM or by colour, drive up to it) and 'dock' (creep up to a low white tray)
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
 antcolony/sim.py          simulator (plays both camera and robots)

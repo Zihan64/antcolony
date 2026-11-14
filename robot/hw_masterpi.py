@@ -130,6 +130,9 @@ class MasterPi:
         if name == "seek":                       # find a named landmark with the camera + VLM, drive up to it
             import seek
             return seek.run(self, args, cancel)
+        if name == "dock":                       # the last cm up to a low white tray (camera, calibrated look pose)
+            import seek
+            return seek.dock(self, args, cancel)
         if name == "open":
             with self.lock:
                 self.arm.open(600)
