@@ -20,15 +20,15 @@ Overhead tracker (existing: AprilTag + YOLOE)
    robot/agent.py (one per robot) ── calls masterpi_lite and vlm_grab.py (existing)
 ```
 
-## Status (2026-11-13)
+## Status (2026-11-14)
 
 | Component | Status |
 | --- | --- |
 | Coordination, path planning, three-robot state machines, traffic rules, calibration tool | Working in the built-in simulator: in the default mode all 8 random layouts are fully cleared with zero robot-robot contact |
 | UDP messaging, dashboard | Verified with the simulator process and coordinator process running separately |
-| `robot/agent.py` | Working with fake hardware (`--hw mock`) |
+| `robot/agent.py` | Working with fake hardware (`--hw mock`); on car C with `--hw freenove` (sonar stop tested on the floor) |
 | `robot/hw_masterpi.py` | Wheel directions and reachability checked against your `chassis.py` / `arm.py` using a fake serial port; **never run on a real robot** |
-| `robot/hw_freenove.py` (dozer) | Channel logic checked against Freenove's official `motor.py` using a fake I2C bus; **never run on a real robot** |
+| `robot/hw_freenove.py` (dozer) | Run on car C (2026-11-14): wheel directions, drive, battery, front sonar stop (35 cm) tested on the floor |
 | `tracker_bridge/world_pub.py` | Only the helper functions are tested; you need to wire it into the tracker |
 | VLM triage (`triage.py`) | Not tested against a real VLM server; off by default |
 
@@ -64,8 +64,8 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
 
 | Robot | Host | User | Code folder | Bench test |
 | --- | --- | --- | --- | --- |
-| A (arm) | catguard-a | zxz5500 | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
-| B (arm) | catguard-b | mitra | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
+| A (arm) | catguard-a (172.20.1.113) | zxz5500 | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct; VLM on the Mac: 2.37 s per new photo |
+| B (arm) | catguard-b (172.20.1.120) | mitra | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct; VLM on the Mac: 2.57 s per new photo |
 | C (dozer) | WhiteSky (172.20.1.136) | szk13579 | `~/antcolony/` | wheels, drive, sonar stop (35 cm) tested on the floor; camera (Camera Module 3 Wide) and pan/tilt servos (PCA9685 ch 8/9) work; blade not mounted yet |
 
 Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
@@ -73,6 +73,21 @@ Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied fr
 - `arm.py`: `ports` in `arm_directions.json` (servo 3 is plugged into port 2).
 
 The originals are saved next to them as `chassis.py.orig` / `arm.py.orig`. A currently uses B's `vision_calib.json`; recalibrate A's camera if its grasps are off.
+Checked 2026-11-14 by comparing checksums: A's code equals B's (19 identical files), apart from the per-robot files above and these two patches (A's `.orig` files equal B's current `chassis.py` / `arm.py`).
+
+### Arm robots' VLM (2026-11-14)
+
+The on-Pi VLM took 20–28 s per photo, so both arm robots now ask a VLM server on a laptop. `vlm_grab.py` and `vlm.py` are unchanged; only `masterpi_lite/masterpi_lite/vlm_server.json` was changed on each car (the old file is kept as `vlm_server.json.before_hyatt`):
+
+```json
+{"url": "http://172.20.1.112:8090", "img_tokens": 256}
+```
+
+- Server: `llama-server` (llama.cpp) with `ggml-org/Qwen2.5-VL-3B-Instruct-GGUF` Q4_K_M + its Q8_0 mmproj on the MacBook Air M4 at `172.20.1.112:8090` (hotel network). Use llama-server, not Ollama: Ollama upscales small photos to ~1000 image tokens (7 s per photo) and its pixel boxes then refer to the upscaled picture.
+- `img_tokens 256` instead of 400: 0.6 s faster per photo, same detections, boxes within 5 px. Measured from the cars: ~2.4–2.6 s per new photo (image encoding + prefill ~1.4 s, ~41 answer tokens ~0.9 s, Wi-Fi ~0.07 s).
+- With two cars on one server, start it with `-np 1` (queue): two simultaneous requests are answered at 2.5 s and 4.1 s; with the default 4 slots both take 5.4–6.4 s.
+- When the network changes (own router), update `url` on both cars to the laptop's new IP. The laptop must stay awake and keep that IP.
+- Full measurements, the photo test set and the benchmark scripts: branch `bench`, `bench/TIMING.md`.
 
 Bench-testing a robot's drive directions from a laptop (wheels off the ground, agent running without `--hw mock`):
 
