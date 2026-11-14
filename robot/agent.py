@@ -12,8 +12,9 @@ Protocol (JSON datagrams, coordinator -> UDP 9200, telemetry -> coordinator UDP 
   {"type":"vel","vx":..,"vy":..,"w":..,"dur":0.2,"guard":true}
         normalised -1..1 (forward, left, counter-clockwise). Runs for `dur` seconds (default and
         maximum = the 0.4 s watchdog), then the car stops by itself. Ignored while a skill runs.
-  {"type":"skill","id":17,"name":"grab","args":{...}}     names: grab, drop, carry, home, open, stop
+  {"type":"skill","id":17,"name":"grab","args":{...}}     names: grab, drop, carry, seek, home, open, stop
         carry (arm cars): {"dist_cm": 20} forward with the object, round tall things (front sonar)
+        seek (arm cars): {"target": "white box", "stop_cm": 22} find it with the camera + VLM, drive up to it
         Re-sending the same id is harmless. A new id cancels a running skill.
   telemetry, 10 Hz: {"type":"telem","name":"A","batt_mv":7900,"sonar_cm":35.0,
                      "skill":{"id":17,"state":"running|ok|fail","detail":".."},"holding":false}

@@ -77,6 +77,12 @@ class MasterPi:
             self.arm.gripper(True)
         time.sleep(0.5)
 
+    def carry_pose(self, ms=1200):
+        """Arm to the compact driving pose; the gripper is left as it is (open or holding)."""
+        with self.lock:
+            self.arm.move_to(*CARRY, pitch=-90, pitch_min=-90, pitch_max=0, ms=ms)
+        time.sleep(ms / 1000.0 + 0.1)
+
     # ---------------------------------------------------------------------- driving
     def set_velocity(self, vx, vy, w):
         """Normalised (forward, left, counter-clockwise) -> duty / direction / rate.
@@ -121,6 +127,9 @@ class MasterPi:
             return self.drop(args)
         if name == "carry":
             return self.carry(args, cancel)
+        if name == "seek":                       # find a named landmark with the camera + VLM, drive up to it
+            import seek
+            return seek.run(self, args, cancel)
         if name == "open":
             with self.lock:
                 self.arm.open(600)

@@ -5,6 +5,10 @@ forward round anything tall in the way, put it down.
     python -m antcolony.solo --robot B --steps carry,drop     # it already holds something
     python -m antcolony.solo --robot B --dist-cm 30 --side right
     python -m antcolony.solo --robot B --steps status         # battery, sonar, holding - nothing moves
+    python -m antcolony.solo --robot B --steps grab,seek,drop --target "white box"
+                                                              # bring it to a landmark: find the white box with the
+                                                              # camera + VLM, drive up to it, put the object down there
+    python -m antcolony.solo --robot B --steps look --target "white box"    # one photo: where is it? (only the arm moves)
 
 The car's agent.py must be running, and (for grab) the VLM server. Put the object 25-40 cm in
 front of the car. A missed grab is tried again, at most --tries times (default 5); before each
@@ -99,7 +103,7 @@ def main():
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--robot", required=True)
     ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
-    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, grab, carry, drop, home, status - in this order")
+    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, grab, carry, seek, look, drop, home, status - in this order")
     ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
     ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
@@ -107,6 +111,9 @@ def main():
     ap.add_argument("--dist-cm", type=float, default=20, help="how far to carry it forward")
     ap.add_argument("--side", choices=["left", "right"], help="which way to try first round an obstacle (default left)")
     ap.add_argument("--carry", default="{}", help='more carry settings as JSON, e.g. \'{"margin_cm": 18, "cm_s": 15}\'')
+    ap.add_argument("--target", default="white box", help="seek / look: what to drive up to (English)")
+    ap.add_argument("--stop-cm", type=float, default=22, help="seek: stop when the front sonar reads this")
+    ap.add_argument("--seek", default="{}", help="more seek settings as JSON")
     ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base")
     ap.add_argument("--drop-z", type=float, default=4, help="cm above the floor")
     a = ap.parse_args()
@@ -151,6 +158,14 @@ def main():
             if not ok:
                 say("still holding the object - when there is room in front: --steps drop")
                 sys.exit(3)
+        elif step in ("seek", "look"):
+            args = dict(json.loads(a.seek), target=a.target, stop_cm=a.stop_cm, look_only=step == "look")
+            say(f"{'looking for' if step == 'look' else 'seek:'} '{a.target}' ...")
+            ok, detail, secs = link.skill("seek", args, float(args.get("timeout", 240)) + 30)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok and step == "seek":
+                say("did not get there - the car keeps what it holds (--steps drop to put it down)")
+                sys.exit(5)
         elif step == "drop":
             say("drop ...")
             ok, detail, secs = link.skill("drop", {"y_cm": a.drop_y, "z_cm": a.drop_z}, 20)

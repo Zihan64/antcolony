@@ -144,7 +144,11 @@ No tracker and no coordinator: `python -m antcolony.solo --robot B` sends one ar
 
 Limits, all from the hardware: the sonar only sees things about 10 cm tall or more, straight ahead (a second block lying on the floor is not seen); there is no sensor to the sides, so the side the car slides to must be free; the 20 cm are counted from drive pulses, not measured (expect ±20 %; `cm_s` / `side_cm_s` in the skill arguments set the assumed speeds, `--carry '{"cm_s": 15}'`).
 
-`tests/test_carry.py` runs the skill on a fake floor (16 cases: boxes ahead, a box reaching far to one side, a wall right across, real speeds 30 % off, narrow / wide sonar beam, no sonar, cancel): the car never touches an obstacle. Not yet run on a real car.
+`tests/test_carry.py` runs the skill on a fake floor (16 cases: boxes ahead, a box reaching far to one side, a wall right across, real speeds 30 % off, narrow / wide sonar beam, no sonar, cancel): the car never touches an obstacle. On the real car (B) the plain 20 cm carry has run; the sidestep has not been triggered there yet.
+
+**Bring it to a landmark** (`robot/seek.py`, skill `seek`): `python -m antcolony.solo --robot B --steps grab,seek,drop --label "red block" --obj-height 3 --target "white box"`. The arm is raised so the camera looks out across the floor (the gripper is not touched), the laptop VLM boxes the target in one photo (~3 s); not in the picture → the car turns left about 30° and looks again (at most one full turn); off centre → a short turn towards it (the turn rate, and its sign, are learned from how far the target moved in the picture); centred → forward in pulses, sonar read before each one, until the sonar reads `--stop-cm` 22 or less, looking again every 30 cm. If the sonar never sees the target the picture stops the car (target fills most of the width). `--steps look --target "white box"` takes one photo and says where the target is (only the arm moves). Every photo is kept on the car as `seek_01.jpg` ….
+
+First real run, car B, 2026-11-14 evening: block grabbed on the first try, white box (an ordinary product carton, about 1.2 m away, behind the car) found on look 9, reached at sonar 19 cm after 60 cm of driving, block put down a few cm in front of it; 49 s for the search and drive. What it showed: (1) the VLM took a printed AprilTag sheet lying on the floor for the "white box" twice and the car drove 30 cm towards it before the next look corrected it — the sonar stop is what keeps a flat false target from counting as "reached"; (2) vlm_grab's far driving view only shows about 1 m of floor, a landmark needs the raised view; (3) one photo taken right after a turn was blurred (longer settle time since). `tests/test_seek.py`: 14 cases on a fake floor (box ahead / to the side / behind, turn rate half or double the guess, turn direction reversed, sonar blind, VLM misses, no box at all).
 
 ## Current robot deployment (2026-11-14)
 
@@ -271,10 +275,11 @@ antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
 antcolony/jog.py          one short move of one robot, measured by the tracker
-antcolony/solo.py         one arm car alone: grab -> carry round obstacles -> drop (no tracker)
+antcolony/solo.py         one arm car alone: grab -> carry round obstacles / seek a landmark -> drop (no tracker)
 robot/detector.py         car: object finder, laptop VLM or local YOLO (detector.json)
 robot/grab_runner.py      car: vlm_grab.py with that object finder
 robot/landmarks.py        car: AprilTags in the car's own camera (distance, direction)
+robot/seek.py             car: skill 'seek' - find a named landmark with camera + VLM, drive up to it
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
 antcolony/sim.py          simulator (plays both camera and robots)
@@ -285,6 +290,7 @@ tracker_bridge/world_pub.py  tracker → coordinator publisher
 tests/test_sim.py         end-to-end test
 tests/test_edge.py        end-to-end test of the edge task (one block each, 5 tries, give up)
 tests/test_carry.py       the carry skill (sonar obstacle avoidance) on a fake floor
+tests/test_seek.py        the seek skill (find a landmark, turn, drive up) on a fake floor
 ```
 
 ## Messages (each is one JSON object over UDP)
