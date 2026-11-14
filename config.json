@@ -6,7 +6,7 @@
   "world_port": 9100,
   "network": "hyatt",
   "networks": {
-    "hyatt":  {"A": "172.20.1.113", "B": "172.20.1.120", "C": null},
+    "hyatt":  {"A": "172.20.1.113", "B": "172.20.1.120", "C": "172.20.1.136"},
     "school": {"A": null, "B": null, "C": null}
   },
   "bin": {"tag": 60, "pose": [0.90, 1.50, -90], "th_off_deg": 0, "radius": 0.15,

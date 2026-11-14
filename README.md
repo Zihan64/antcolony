@@ -51,7 +51,7 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
 
    | Profile | A | B | C |
    | --- | --- | --- | --- |
-   | `hyatt` | 172.20.1.113 | 172.20.1.120 | not set |
+   | `hyatt` | 172.20.1.113 | 172.20.1.120 | 172.20.1.136 |
    | `school` | not set | not set | not set |
 2. **Tracker**: add the 5 lines described at the top of `tracker_bridge/world_pub.py` to publish tags and objects to UDP 9100. Requirements are in the next section.
 3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `~/Desktop/"Master Pi5"/masterpi_lite/` (same level as `vlm_grab.py`) and run
