@@ -67,7 +67,7 @@ Task: a few blocks of different colours on the floor; arm cars **A and B each br
 ```
 Computer 1 (VLM)                    Computer 2 (overhead camera)                 cars A, B
 llama-server :8090  ◄── HTTP ───────────────────────────────────────────────── vlm_grab.py (last 30 cm + grab)
-                                    apriltag_tracker_gui.py --antcolony 127.0.0.1
+                                    run_tracker.py --antcolony 127.0.0.1   (starts apriltag_tracker_gui.py)
                                          │ UDP 9100 (tags, objects, floor tags)
                                          ▼
                                     python -m antcolony.coordinator ── UDP 9200 ──► agent.py
@@ -83,7 +83,7 @@ The coordinator can run on either computer; on the camera computer the tag data 
 1. **Network.** All four devices on the same LAN. Put the cars' IPs into the `lan` profile under `networks` in `config.json` and set `"network": "lan"` (or run with `ANTCOLONY_NET=lan`).
 2. **VLM (computer 1).** `llama-server` with `--host 0.0.0.0 --port 8090 -np 1` (see "Arm robots' VLM"). On **each car** set `masterpi_lite/masterpi_lite/vlm_server.json` to `{"url": "http://<computer 1's new IP>:8090", "img_tokens": 256}` — the old hotel address no longer works on the new LAN.
 3. **Tags.** Put the tag id that is on each car into `robots.A.tag` / `robots.B.tag` in `config.json` (defaults 10 and 11). In the tracker's `arena.json` give each car's tag its height so it is located precisely: `"objects": {"10": {"name": "car A", "height_m": 0.17}, "11": {"name": "car B", "height_m": 0.17}}` (tag face above the floor, measure it).
-4. **Tracker (computer 2).** `python cam_control/apriltag_tracker_gui.py --antcolony 127.0.0.1` (plus your usual camera options), set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects.
+4. **Tracker (computer 2).** `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
 5. **Cars.** Copy the current `robot/agent.py` and `robot/hw_masterpi.py` next to `vlm_grab.py`, then on each car: `python3 agent.py --name A --min-duty 30` (`--name B` on B; 30 on carpet).
 6. **Drive calibration**, one car at a time, alone in the middle with ~50 cm free: `python -m antcolony.calibrate --robot A --u 0.3` (then B). The default `--u 0.6` makes larger test moves than a 1.5 × 1.2 m arena may allow; start with 0.3 and raise it if the tool says the car barely moved (not tried on the real cars yet). Saves `calib/A.json`.
 7. **Check.** `python -m antcolony.check --overlay profiles/edge2.json --vlm http://<computer 1>:8090` — nothing moves; it lists what is missing (tracker data, a car's tag, calibration, agent, VLM, objects too big or already at the edge).
