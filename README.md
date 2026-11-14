@@ -40,7 +40,13 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
 
 ## Bringing up the real robots
 
-1. **Host**: `pip install numpy`, then set the arena bounds, bin, tag IDs, and the three robots' IPs in `config.json` to the real values.
+1. **Host**: `pip install numpy`, then set the arena bounds, bin, tag IDs, and the robots' IPs in `config.json` to the real values.
+   Robot IPs change with the network, so they live in named profiles under `networks` in `config.json`. `"network"` picks the active one (currently `hyatt`); you can also override it per run with `ANTCOLONY_NET=school python -m antcolony.coordinator`. A `null` IP falls back to that robot's own `addr`. The coordinator prints the active profile at startup.
+
+   | Profile | A | B | C |
+   | --- | --- | --- | --- |
+   | `hyatt` | 172.20.1.113 | 172.20.1.120 | not set |
+   | `school` | not set | not set | not set |
 2. **Tracker**: add the 5 lines described at the top of `tracker_bridge/world_pub.py` to publish tags and objects to UDP 9100. Requirements are in the next section.
 3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `masterpi_lite/` (same level as `vlm_grab.py`) and run
    `python3 agent.py --name A --min-duty 30` (30 on carpet, 18 on smooth floors). For **dozer C**, see the separate section below.

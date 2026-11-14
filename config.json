@@ -4,6 +4,11 @@
   "cell": 0.03,
   "wall_margin": 0.05,
   "world_port": 9100,
+  "network": "hyatt",
+  "networks": {
+    "hyatt":  {"A": "172.20.1.113", "B": "172.20.1.120", "C": null},
+    "school": {"A": null, "B": null, "C": null}
+  },
   "bin": {"tag": 60, "pose": [0.90, 1.50, -90], "th_off_deg": 0, "radius": 0.15,
           "floor_entry": false, "mouth_half_deg": 70, "gate_dist": 0.40,
           "drop_dist": 0.27, "zone": 0.72, "stage_r": 0.45},

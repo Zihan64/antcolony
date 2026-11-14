@@ -65,10 +65,30 @@ def dec(b):
         return None
 
 
+def apply_network(cfg):
+    """Override robot IPs from the active network profile.
+
+    The profile is cfg["network"], or the ANTCOLONY_NET environment variable if set.
+    A null IP in the profile keeps the robot's own "addr" from config.json.
+    """
+    net = os.environ.get("ANTCOLONY_NET") or cfg.get("network")
+    if not net:
+        return None
+    profiles = cfg.get("networks", {})
+    if net not in profiles:
+        raise SystemExit(f"unknown network profile {net!r}; known: {', '.join(profiles) or 'none'}")
+    for name, ip in profiles[net].items():
+        if ip and name in cfg["robots"]:
+            cfg["robots"][name]["addr"] = [ip, cfg["robots"][name]["addr"][1]]
+    print(f"[config] network profile: {net}")
+    return net
+
+
 def load_config(path):
     """config.json + per-robot calibration from calib/<name>.json next to it."""
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
+    apply_network(cfg)
     cdir = os.path.join(os.path.dirname(os.path.abspath(path)), "calib")
     for name, rc in cfg["robots"].items():
         p = os.path.join(cdir, name + ".json")
