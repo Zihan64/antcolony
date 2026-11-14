@@ -1,0 +1,269 @@
+{
+ "_about": "Photos taken by car B's arm camera (640x480, LOOK/DRIVE poses) on 2026-11-12/13 while running vlm_grab.py. Annotated copies (detect.jpg, drive_det.jpg, *_det.jpg) were left out because they have boxes drawn on them. 'objects' = what a correct detector should report; [] = nothing to pick up. 'edge' = the object is cut off by the picture border. 'old_run' = VLM timings logged by the run that took the photo, matched by timestamp; one run takes several photos and makes several VLM calls, so a time belongs to the run, not exactly to that photo. calib*, now, vlm-test, look_empty: no VLM call logged.",
+ "B_look.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, LOOK pose",
+  "old_run": {
+   "taken": "2026-11-13 00:22",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    2.5,
+    3.4,
+    3.5
+   ]
+  }
+ },
+ "B_hover.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, arm hovering, block near bottom edge",
+  "edge": true,
+  "old_run": {
+   "taken": "2026-11-13 00:14",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    3.6
+   ]
+  }
+ },
+ "B_miss.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, LOOK pose after a missed grab",
+  "old_run": {
+   "taken": "2026-11-13 00:14",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    3.6
+   ]
+  }
+ },
+ "B_down.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, block mostly cut off at bottom",
+  "edge": true,
+  "old_run": {
+   "taken": "2026-11-13 00:14",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    3.6
+   ]
+  }
+ },
+ "B_drive.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, DRIVE pose (camera ahead)",
+  "old_run": {
+   "taken": "2026-11-13 00:21",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    2.5,
+    3.4,
+    3.5
+   ]
+  }
+ },
+ "B_drive_end.jpg": {
+  "objects": [
+   "blue block"
+  ],
+  "scene": "table, DRIVE pose, end of approach",
+  "old_run": {
+   "taken": "2026-11-13 00:21",
+   "vlm_server": "Mac llama-server at 192.168.50.173, Qwen2.5-VL 3B, img_tokens 400",
+   "vlm_seconds_in_that_run": [
+    2.5,
+    3.4,
+    3.5
+   ]
+  }
+ },
+ "B_fwd565.jpg": {
+  "objects": [
+   "green block"
+  ],
+  "scene": "table, LOOK pose",
+  "old_run": {
+   "taken": "2026-11-12 02:34",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    27.6,
+    28.2
+   ]
+  }
+ },
+ "B_fwd650.jpg": {
+  "objects": [
+   "green block"
+  ],
+  "scene": "table",
+  "old_run": {
+   "taken": "2026-11-12 02:34",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    27.6,
+    28.2
+   ]
+  }
+ },
+ "B_fwd800.jpg": {
+  "objects": [
+   "green block"
+  ],
+  "scene": "table, block at bottom edge",
+  "edge": true,
+  "old_run": {
+   "taken": "2026-11-12 02:34",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    27.6,
+    28.2
+   ]
+  }
+ },
+ "B_now.jpg": {
+  "objects": [
+   "teal block"
+  ],
+  "scene": "CARPET, block at bottom edge",
+  "edge": true
+ },
+ "B_calib1.jpg": {
+  "objects": [
+   "blue block",
+   "small card"
+  ],
+  "scene": "table, card on block at left edge",
+  "edge": true
+ },
+ "B_calib2.jpg": {
+  "objects": [
+   "small card"
+  ],
+  "scene": "table, flat calibration card"
+ },
+ "B_calib3.jpg": {
+  "objects": [
+   "small card"
+  ],
+  "scene": "table, flat calibration card"
+ },
+ "B_calib4.jpg": {
+  "objects": [
+   "small card"
+  ],
+  "scene": "table, flat calibration card"
+ },
+ "B_calib5.jpg": {
+  "objects": [
+   "small card"
+  ],
+  "scene": "table, flat calibration card"
+ },
+ "B_vlm-test-640.jpg": {
+  "objects": [
+   "red block"
+  ],
+  "scene": "blue table, phone photo resized (480x640 portrait)"
+ },
+ "B_fwd-5.jpg": {
+  "objects": [],
+  "scene": "empty table",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd-20.jpg": {
+  "objects": [],
+  "scene": "empty table",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd-35.jpg": {
+  "objects": [],
+  "scene": "empty table",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_look_empty_1112.jpg": {
+  "objects": [],
+  "scene": "empty table"
+ },
+ "B_fwd900.jpg": {
+  "objects": [],
+  "scene": "table edge, monitor and desk in background (nothing to pick up)",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd950.jpg": {
+  "objects": [],
+  "scene": "table edge, monitor and desk in background (nothing to pick up)",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd_10cm.jpg": {
+  "objects": [],
+  "scene": "table edge, monitor and desk in background (nothing to pick up)",
+  "old_run": {
+   "taken": "2026-11-12 02:33",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd1200.jpg": {
+  "objects": [],
+  "scene": "desk, monitor, shelf (nothing to pick up)",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ },
+ "B_fwd1500.jpg": {
+  "objects": [],
+  "scene": "room, monitor, shelf (nothing to pick up)",
+  "old_run": {
+   "taken": "2026-11-12 02:32",
+   "vlm_server": "car B's Pi, llama-server Qwen2.5-VL 3B (local)",
+   "vlm_seconds_in_that_run": [
+    21.6
+   ]
+  }
+ }
+}
