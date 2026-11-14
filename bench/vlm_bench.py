@@ -4,7 +4,8 @@
 Runs every photo in bench/photos/ (see manifest.json) through one or more Ollama models with
 the SAME prompt the cars use (masterpi_lite/vlm.py on the robots), and reports per model:
   * load:      first call, model cold (seconds)
-  * latency:   median / p90 per photo once warm (seconds)
+  * latency:   median / p90 per NEW photo once the model is loaded (seconds; repeats of the
+               same photo hit Ollama's cache and are not counted)
   * hit rate:  photos with an object where the model reported >= 1 box
   * false pos: empty photos where the model still reported a box
 Annotated copies go to bench/results/<model>/ so you can check by eye that the boxes sit on
@@ -26,6 +27,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import statistics
 import time
@@ -70,6 +72,20 @@ def parse_boxes(text):
     items = [{"bbox_2d": i} if isinstance(i, list) else i for i in items]
     return [i for i in items if isinstance(i, dict) and len(i.get("bbox_2d", [])) == 4]
 # -----------------------------------------------------------------------------------------
+
+
+def smart_resize(w, h, min_pixels, max_pixels, factor=28):
+    """Qwen2.5-VL's resize (as in its HF processor): the size the model really sees.
+    Ollama uses min_pixels = 28*28*1024 = 802816, so a 640x480 photo is UPSCALED to
+    1036x784 and pixel boxes refer to that (measured 2026-11-14, Ollama 0.40.13)."""
+    hb, wb = max(factor, round(h / factor) * factor), max(factor, round(w / factor) * factor)
+    if hb * wb > max_pixels:
+        beta = math.sqrt(h * w / max_pixels)
+        hb, wb = math.floor(h / beta / factor) * factor, math.floor(w / beta / factor) * factor
+    elif hb * wb < min_pixels:
+        beta = math.sqrt(min_pixels / (h * w))
+        hb, wb = math.ceil(h * beta / factor) * factor, math.ceil(w * beta / factor) * factor
+    return wb, hb
 
 
 def coord_mode(model, boxes, sw, sh, forced):
@@ -122,17 +138,24 @@ def run_model(a, model, photos, manifest):
         w, h = img.size
         sw, sh = model_size(w, h, a.img_tokens)
         buf = io.BytesIO()
-        img.resize((sw, sh), Image.LANCZOS).save(buf, "JPEG", quality=92)
+        small = img.resize((sw, sh), Image.LANCZOS)
+        # one random corner pixel: a picture Ollama has never seen, so its cache cannot answer
+        small.putpixel((0, 0), tuple(random.randrange(256) for _ in range(3)))
+        small.save(buf, "JPEG", quality=92)
+        if i == 0:                               # model load: a throw-away call on a blank picture
+            blank = io.BytesIO()
+            Image.new("RGB", (sw, sh), "gray").save(blank, "JPEG")
+            load_s = chat(a.url, model, blank.getvalue(), prompt, a.max_tokens)[1]
+        # 1st call = a NEW picture (what a car sends every time); later ones hit Ollama's cache
         times = []
-        for k in range(a.repeat + (1 if i == 0 else 0)):
+        for k in range(a.repeat):
             text, dt = chat(a.url, model, buf.getvalue(), prompt, a.max_tokens)
-            if i == 0 and k == 0:
-                load_s = dt                      # first call: model load + first answer
-                continue
             times.append(dt)
-        lat.extend(times)
+        lat.append(times[0])
         raw = parse_boxes(text)
         mode = coord_mode(model, raw, sw, sh, a.coords)
+        if mode == "pixel":                      # pixels of the picture the model really saw
+            sw, sh = smart_resize(sw, sh, a.min_pixels, a.max_pixels)
         kept, dropped = [], []
         for it in raw:
             box = to_image_px(it["bbox_2d"], mode, w, h, sw, sh)
@@ -147,7 +170,7 @@ def run_model(a, model, photos, manifest):
             expected = [o for o in expected if a.target.split()[-1] in o]
         verdict = "?" if expected is None else (
             ("hit" if kept else "MISS") if expected else ("ok" if not kept else "FALSE+"))
-        rows.append(dict(photo=name, s=statistics.median(times), n=len(kept), verdict=verdict,
+        rows.append(dict(photo=name, s=times[0], cached_s=times[1:], n=len(kept), verdict=verdict,
                          mode=mode, text=" ".join(text.split())[:160]))
         draw = ImageDraw.Draw(img)
         for box, label in kept:
@@ -155,9 +178,9 @@ def run_model(a, model, photos, manifest):
             draw.text((box[0] + 3, max(0, box[1] - 12)), label, fill=(0, 255, 0))
         for box, label in dropped:
             draw.rectangle(box, outline=(255, 140, 0), width=1)
-        draw.text((5, 5), f"{model}  {statistics.median(times):.2f}s  {verdict}", fill=(255, 255, 0))
+        draw.text((5, 5), f"{model}  {times[0]:.2f}s  {verdict}", fill=(255, 255, 0))
         img.save(os.path.join(out_dir, name))
-        print(f"  {name:24s} {statistics.median(times):6.2f}s  {verdict:6s} boxes={len(kept)}  {rows[-1]['text'][:70]}")
+        print(f"  {name:24s} {times[0]:6.2f}s  {verdict:6s} boxes={len(kept)}  {rows[-1]['text'][:70]}")
     pos = [r for r in rows if r["verdict"] in ("hit", "MISS")]
     neg = [r for r in rows if r["verdict"] in ("ok", "FALSE+")]
     lat.sort()
@@ -180,7 +203,10 @@ def main():
     ap.add_argument("--target", default="any", help='"any" (what the cars use) or an object name')
     ap.add_argument("--img-tokens", type=int, default=400, help="same as the cars' vlm_server.json")
     ap.add_argument("--max-tokens", type=int, default=200)
-    ap.add_argument("--repeat", type=int, default=1, help="timed runs per photo (median is reported)")
+    ap.add_argument("--repeat", type=int, default=1, help="calls per photo; only the 1st (uncached) is timed")
+    ap.add_argument("--min-pixels", type=int, default=28 * 28 * 1024,
+                    help="server-side resize floor for pixel-coord models (Ollama qwen2.5vl: 802816; llama-server: set to its --image-min-tokens * 784)")
+    ap.add_argument("--max-pixels", type=int, default=28 * 28 * 16384)
     ap.add_argument("--coords", default="auto", choices=["auto", "pixel", "rel1000", "norm"])
     ap.add_argument("--only", nargs="*", help="only these photo names")
     a = ap.parse_args()
