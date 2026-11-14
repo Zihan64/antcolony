@@ -16,8 +16,19 @@
     "_y_z": "drop skill: reach 16 cm ahead of the arm base, fingertips 4 cm above the floor, then open"
   },
 
+  "lost": {
+    "_why": "tags on the rear deck vanish while a car faces the slanted camera (2026-11-14); turning a little shows them again",
+    "wait_s": 1.0, "w": 0.4, "pulse_s": 0.25, "every_s": 1.2, "max_pulses": 12,
+    "cone_deg": 40,
+    "search_unseen": true,
+    "_search_unseen": "a car whose agent answers but whose tag was never seen turns on the spot too (put down facing the camera)",
+    "_cone_deg": "a car facing within this of the camera is assumed unseen: it lines up / puts down facing elsewhere and drives towards the camera in reverse"
+  },
+
   "pick": {
     "max_tries": 5,
+    "blind_grab_m": 0.6,
+    "_blind_grab_m": "tag lost with the object less than this far ahead: the car's own camera does the rest",
     "give_up": "park",
     "_give_up": "park = after max_tries misses in a row the car stops for good; next = it may take another object",
     "grab_timeout": 130

@@ -10,8 +10,12 @@ Checks, in an arena the size of the real one (1.55 x 1.19 m, paper tags at the c
      at a slant and each car hides a strip of floor behind it; `bump_s` shows how long);
   2. every grab misses: each car tries exactly 5 times, then gives up; nothing is delivered;
   3. poor grasping (35 % hold): a car that succeeds needed at most 5 tries, a car that gave up
-     tried exactly 5 times.
+     tried exactly 5 times;
+  4. like the real setup on 2026-11-14: a car's tag is hidden from the slanted camera whenever the
+     car faces within 35 deg of it - both cars must still deliver (they line up / put down facing
+     elsewhere, drive towards the camera in reverse, and turn on the spot when unseen).
 """
+import math
 import os
 import sys
 
@@ -25,7 +29,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 ARENA = {"xmin": 0.0, "xmax": 1.55, "ymin": 0.0, "ymax": 1.19}
 
 
-def run(seed, p_grasp, n_objects=4, verbose=False, max_t=900.0):
+def run(seed, p_grasp, n_objects=4, verbose=False, max_t=900.0, occlude_deg=0.0):
     cfg = load_config(os.path.join(ROOT, "config.json"), os.path.join(ROOT, "profiles", "edge2.json"))
     cfg["arena"].update(ARENA)
     sim = SimWorld(cfg, seed, n_objects, quirks=True, p_grasp=p_grasp, big_frac=0.0, floor_tags=True)
@@ -36,6 +40,7 @@ def run(seed, p_grasp, n_objects=4, verbose=False, max_t=900.0):
         cfg["robots"][name].update(calibrate(bus, name, cfg, wait=sim.advance, log=lambda *_: None))
         r.x, r.y = r.start
     sim.solo = None
+    sim.occlude = math.radians(occlude_deg)          # calibration above ran with the tags in view
     sim.advance(1.0)
     co = Coordinator(cfg, bus, quiet=not verbose)
     t_start, n = sim.t, 0
@@ -75,4 +80,6 @@ if __name__ == "__main__":
                 lambda r: all((r["delivered"][n] == 1 and r["grabs"][n] <= 5) or
                               (r["gave_up"][n] and r["grabs"][n] == 5 and r["delivered"][n] == 0)
                               for n in r["delivered"]) and r["edge_ok"])
+    ok &= check("4. tags hidden while a car faces the camera (+-35 deg)", [run(s, 0.75, verbose=v, occlude_deg=35) for s in seeds],
+                lambda r: all(n == 1 for n in r["delivered"].values()) and r["at_edge"] >= 2 and r["edge_ok"])
     sys.exit(0 if ok else 1)

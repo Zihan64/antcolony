@@ -141,7 +141,9 @@ class MasterPi:
         if not self.use_arm:
             return False, "no arm"
         label = args.get("label") or "any"
-        cmd = [sys.executable, os.path.join(HERE, "vlm_grab.py"), "approach", label,
+        # grab_runner.py = vlm_grab.py with the object finder from detector.json (VLM or local YOLO)
+        script = "grab_runner.py" if os.path.isfile(os.path.join(HERE, "grab_runner.py")) else "vlm_grab.py"
+        cmd = [sys.executable, os.path.join(HERE, script), "approach", label,
                "--min-speed", str(args.get("min_speed", self.min_duty))]
         with self.lock:
             self._close()                        # vlm_grab.py opens the serial port itself

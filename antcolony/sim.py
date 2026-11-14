@@ -61,7 +61,7 @@ class SimObj:
 
 class SimWorld:
     def __init__(self, cfg, seed=0, n_objects=6, quirks=False, p_grasp=0.75, big_frac=0.35, latency=0.15,
-                 floor_tags=False):
+                 floor_tags=False, occlude_deg=0.0):
         self.cfg, self.rng, self.t, self.dt = cfg, random.Random(seed), 0.0, 0.02
         self.p_grasp, self.latency = p_grasp, latency
         a, n = cfg["arena"], len(cfg["robots"])
@@ -76,6 +76,10 @@ class SimWorld:
         self.floor = {"29": [a["xmin"], a["ymin"]], "32": [a["xmax"], a["ymin"]],
                       "31": [a["xmax"], a["ymax"]], "30": [a["xmin"], a["ymax"]]} if floor_tags else None
         self.grabs = {name: 0 for name in self.robots}                       # grab attempts per robot
+        # like the real cars: the tag on the rear deck is hidden by the arm column while the car's
+        # front points within occlude_deg of the (slanted) camera
+        self.occlude = math.radians(occlude_deg)
+        self.cam = ((a["xmin"] + a["xmax"]) / 2, a["ymin"] - 1.2, 1.8)
         self.objs = []
         while len(self.objs) < n_objects:
             m = cfg.get("field_margin", 0.30)            # debris only inside the taped field, never against the edge
@@ -284,6 +288,8 @@ class SimWorld:
     def snapshot(self):
         g, tags = self.rng.gauss, {}
         for r in self.robots.values():
+            if self.occlude and abs(wrap(r.th - math.atan2(self.cam[1] - r.y, self.cam[0] - r.x))) < self.occlude:
+                continue                                           # arm column between the tag and the camera
             tx, ty = to_world(r.pose, *r.q["tag_off"])
             h = r.q["th_sign"] * wrap(r.th - r.q["th_off"])
             tags[str(r.rc["tag"])] = [tx + g(0, 0.003), ty + g(0, 0.003), wrap(h + g(0, 0.01))]
@@ -299,8 +305,7 @@ class SimWorld:
         snap = {"t": self.t, "tags": tags, "objects": objs}
         if self.floor:
             snap["floor"], snap["corners"] = self.floor, [29, 32, 31, 30]
-            a = self.cfg["arena"]                          # camera on a stand beside the arena, looking in
-            snap["camera"] = [(a["xmin"] + a["xmax"]) / 2, a["ymin"] - 1.2, 1.8]
+            snap["camera"] = list(self.cam)                # camera on a stand beside the arena, looking in
         return snap
 
     def delayed(self):

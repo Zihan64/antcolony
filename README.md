@@ -119,6 +119,23 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 - The driving controller's gains (`control` in `config.json`) have only ever run in the simulator.
 - The tracker's own "UDP out" (single-robot path following) crashes its worker thread once an object is detected (`json.dumps(..., default=float)` on a numpy outline). `--antcolony` does not use it; leave "UDP out" empty.
 
+## Onboard vision, with AprilTag as a helper (2026-11-14)
+
+Goal: the cars find and grab objects with their own cameras; the overhead tracker (AprilTags) helps when it can see them, and the system no longer stops when it cannot.
+
+**1. Switchable object finder on the car** (`robot/detector.py`, `robot/grab_runner.py`). `hw_masterpi.py` now starts `grab_runner.py`, which is `vlm_grab.py` unchanged except that "find the objects in this photo" comes from `detector.json`: the laptop VLM (default, also when there is no `detector.json`) or a local YOLO model on the car (see `robot/detector.example.json`). The YOLO runs with ultralytics, onnxruntime or OpenCV's `cv2.dnn` (already on the cars, nothing to install). Tested: the real `vlm_grab.py find --dry-run` on a photo with both backends; the three engines give identical boxes; the module runs on the cars' OpenCV 4.10. Not tested yet: a trained model, speed on the Pi.
+
+To use your own YOLO: train, `yolo export model=best.pt format=onnx imgsz=416 opset=12`, copy the `.onnx` to `models/` next to `vlm_grab.py`, write `detector.json`, check with `python3 detector.py --camera` (nothing moves). Photos for training are best taken with the cars' own camera, on the arena carpet, from the car's height.
+
+**2. Tags seen by the car itself** (`robot/landmarks.py`): finds tag36h11 tags in the car's camera image and gives distance and direction, e.g. a tag on the bin, so a car can find the bin without the tracker. `python3 landmarks.py watch` (nothing moves). On synthetic photos: distance within 2 %, direction within 0.2 deg from 0.4 to 2.5 m. A 10 cm tag is ~24 px at 2 m and was missed once there: **use a 15–20 cm tag on the bin**. Run `calib-fx` once per car (focal length; until then it is guessed). Not yet used by any driving code.
+
+**3. Coordinator: a hidden tag no longer stops a car** (`lost` and `pick.blind_grab_m` in `profiles/edge2.json`). Cause found on the real cars: the tag on the rear deck is hidden by the arm column whenever the car faces the slanted camera. Now
+- the car lines up to grab and puts things down facing away from the camera where it can, and drives towards the camera **in reverse** (`lost.cone_deg` 40);
+- a car that is unseen (also one put down facing the camera at the start) turns on the spot in short pulses until its tag shows again (at most one turn);
+- a car that loses its tag on the last 60 cm to its object hands over to its own camera (`vlm_grab approach`).
+
+In the simulator with tags hidden within ±35 deg of facing the camera: without this 1 of 8 layouts finished, with it 8 of 8, as fast as with no hiding (`tests/test_edge.py` check 4). Raising the tags above the arm (12–15 cm) is still the better fix; this keeps the cars going until then.
+
 ## Current robot deployment (2026-11-14)
 
 | Robot | Host | User | Code folder | Bench test |
@@ -244,6 +261,9 @@ antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
 antcolony/jog.py          one short move of one robot, measured by the tracker
+robot/detector.py         car: object finder, laptop VLM or local YOLO (detector.json)
+robot/grab_runner.py      car: vlm_grab.py with that object finder
+robot/landmarks.py        car: AprilTags in the car's own camera (distance, direction)
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
 antcolony/sim.py          simulator (plays both camera and robots)
