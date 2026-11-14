@@ -11,10 +11,11 @@ of the GUI's code (so the GUI can keep changing without merge conflicts):
 `python -m antcolony.coordinator`; the port defaults to 9100. Every other option is passed on to
 the GUI unchanged.
 
-How: the GUI's Worker thread emits result_ready(result) once per processed frame. This script
-connects antcolony_pub.WorldPub to that signal (directly, in the worker thread), so the
-coordinator gets the robots' tags, the detected objects and the floor tags. While the arena is
-not set up yet it gets a heartbeat twice a second instead.
+How: once per processed frame the GUI's Worker thread calls its _fast_control(result, now)
+(versions before 2026-11-14 06:00 instead emit result_ready(result)). This script wraps that
+call (or connects to that signal), on the tracking thread, and hands the result to
+antcolony_pub.WorldPub: the coordinator gets the robots' tags, the detected objects and the
+floor tags. While the arena is not set up yet it gets a heartbeat twice a second instead.
 
 The console says what is going on:  "AntColony: attached ..." once Start is pressed, then every
 10 s how many datagrams went out and whether the floor is valid.
@@ -50,6 +51,9 @@ def attach(gui, pub, log=print):
     """Make every Worker the GUI creates publish its results through `pub`."""
     from PyQt6.QtCore import Qt
 
+    # GUI since the planner thread was split off: result_ready is no longer emitted; the full
+    # per-frame result goes through Worker._fast_control(r, now) on the tracking thread
+    per_frame_call = hasattr(gui.Worker, "_fast_control")
     orig_init = gui.Worker.__init__
 
     def init(self, *a, **k):
@@ -76,10 +80,23 @@ def attach(gui, pub, log=print):
                     log(f"AntColony: {e!r}")
 
         self._antcolony_send = send             # keep it alive as long as the worker
-        self.result_ready.connect(send, Qt.ConnectionType.DirectConnection)
+        if not per_frame_call:                  # old GUI: the per-frame signal
+            self.result_ready.connect(send, Qt.ConnectionType.DirectConnection)
         log(f"AntColony: attached - sending tags + objects to {pub.addr[0]}:{pub.addr[1]}")
 
     gui.Worker.__init__ = init
+
+    if per_frame_call:
+        orig_fast = gui.Worker._fast_control
+
+        def fast_control(self, r, now):
+            out = orig_fast(self, r, now)
+            send = getattr(self, "_antcolony_send", None)
+            if send is not None:
+                send(r)
+            return out
+
+        gui.Worker._fast_control = fast_control
 
 
 def main():

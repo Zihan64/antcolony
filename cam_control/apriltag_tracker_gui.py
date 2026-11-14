@@ -773,6 +773,9 @@ class Worker(QtCore.QThread):
                     self._planner_ev.set()
                 r["objects"].extend(self._app_objs)       # newest objects from the planner
                 self._fast_control(r, now)
+                if self.world_pub is not None:            # --antcolony: tags + objects -> the coordinator
+                    self.world_pub.publish(r, floor, self.amap.arena.get("corner_ids") if self.amap is not None
+                                           else (self.mapper.cfg.get("arena") or {}).get("corner_ids"))
                 self.results.append(r)
                 if self.results_free:
                     self.results_free = False
