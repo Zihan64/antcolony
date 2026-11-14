@@ -730,22 +730,26 @@ class TagDetector:
     Each family has an ID offset so all markers share one ID space, e.g. AprilTag 36h11
     native 0..86 -> 0..86 and ArUco DICT_4X4_50 native 0..14 -> 87..101.
 
-    Small and far tags (AprilTag family). A camera looking across the floor sees distant tags
-    at a grazing angle: an 88 mm tag 3 m away is only ~20 px tall. The fast pass decimates the
-    image (quad_decimate) for speed, which shrinks such a tag below what the quad detector can
-    segment on a textured floor, so it is missed. Two extra stages recover them cheaply:
-      * discovery: a background thread runs a full-resolution pass (no decimation) on the
-        newest frame about once per second (one CPU thread) and reports every tag it finds;
-      * tracking: every frame, each known tag the fast pass missed is re-detected in a small
-        crop around its last position, upscaled so the tag is ~60 px, at full resolution.
-    A tag is discovered once and then followed by the cheap crop tracker every frame.
+    Real-time tracking (realtime=True, pupil engine). A full-frame AprilTag pass costs ~20 ms at
+    1280x720 and grows with resolution; finding a known tag again in a small crop around where
+    it is expected costs ~1 ms. So the per-frame call only does the crops:
+      * every frame, each known tag is re-detected in a crop around its predicted position (last
+        position + velocity x time since), upscaled so the tag is ~60 px, at full resolution;
+      * a background thread scans the newest frame continuously (decimated full-frame pass) to
+        find tags that are new or were lost, and about once per second also at full resolution
+        (small / far tags: an 88 mm tag 3 m away is only ~20 px tall at a grazing angle, which a
+        decimated pass misses on a textured floor). Whatever it finds is tracked from the next
+        frame on.
+    `skip` lets the caller leave out tags it does not need this frame (the pivots while the floor
+    pose is locked). realtime=False: the classic full-frame pass every frame, crops only for the
+    tags it missed.
     """
 
-    TRACK_S = 1.5           # keep re-detecting a lost tag in its crop for this long
+    TRACK_S = 1.0           # keep looking for a lost tag in its crop for this long
     ROI_TARGET_PX = 60.0    # upscale crops so a tag's short side is about this many pixels
 
     def __init__(self, family="tag36h11", engine="auto", detect_scale=1.0,
-                 nthreads=4, decimate=1.5, min_margin=20.0, families=None, discover_hz=1.0):
+                 nthreads=4, decimate=1.5, min_margin=20.0, families=None, discover_hz=1.0, realtime=True):
         self.scale = float(detect_scale)
         self.min_margin = min_margin
         self.families = normalize_families(families, family)
@@ -754,10 +758,9 @@ class TagDetector:
         self._april = None
         self._arucos = []
         self._pupil = self._pupil_fine = None
-        self._known = {}        # global id -> (corners, time) of the last sighting (any stage)
+        self._known = {}        # global id -> (corners, time, velocity px/s) of the last sighting
         self._known_lock = threading.Lock()
-        self._disc = None       # background discovery state
-        self.stats = {"fast": 0, "roi": 0, "discovered": 0}
+        self.stats = {"tracked": 0, "scan_found": 0, "scan_ms": 0.0}
         for f in self.families:
             if is_apriltag_family(f["name"]):
                 self._april = f
@@ -778,7 +781,20 @@ class TagDetector:
                                                 quad_decimate=1.0, refine_edges=1)
                     self._pupil_disc = Detector(families=self._april["name"], nthreads=1,
                                                 quad_decimate=1.0, refine_edges=1)
-                    _PUPIL_KEEPALIVE.extend([self._pupil, self._pupil_fine, self._pupil_disc])
+                    self._pupil_scan = Detector(families=self._april["name"], nthreads=max(1, nthreads // 2),
+                                                quad_decimate=decimate, refine_edges=1)
+                    # one crop detector per worker: crops of several tags are searched in parallel
+                    # (pupil_apriltags releases the GIL while detecting)
+                    import queue
+                    from concurrent.futures import ThreadPoolExecutor
+                    self._fine_free = queue.Queue()
+                    self._fine_free.put(self._pupil_fine)
+                    for _ in range(max(1, nthreads) - 1):
+                        d_ = Detector(families=self._april["name"], nthreads=1, quad_decimate=1.0, refine_edges=1)
+                        _PUPIL_KEEPALIVE.append(d_)
+                        self._fine_free.put(d_)
+                    self._crop_pool = ThreadPoolExecutor(max_workers=max(1, nthreads))
+                    _PUPIL_KEEPALIVE.extend([self._pupil, self._pupil_fine, self._pupil_disc, self._pupil_scan])
                     self.engine = "pupil"
                 except ImportError:
                     if engine == "pupil":
@@ -788,6 +804,9 @@ class TagDetector:
                 self.engine = "opencv-aruco"
             parts.append(f"{self._april['name']} ({self.engine})")
         parts += [f["name"] for f, _ in self._arucos]
+        self.realtime = bool(realtime and self._april and self.engine == "pupil")
+        if self.realtime:
+            parts[0] += ", real-time crop tracking"
         self.description = " + ".join(parts)
 
         # Global ID ranges owned by each ArUco family, so a stray AprilTag ID can't collide.
@@ -795,10 +814,19 @@ class TagDetector:
         for f, _ in self._arucos:
             lo, hi = f["ids"] if f["ids"] else (0, 999)
             self._aruco_ranges.append((f["offset"] + lo, f["offset"] + hi))
-        if self._april and self.engine == "pupil" and discover_hz > 0:
-            self._disc = {"frame": None, "event": threading.Event(), "period": 1.0 / discover_hz,
-                          "running": True}
-            threading.Thread(target=self._discover_loop, daemon=True).start()
+        # Two background threads, each on the newest frame: the decimated full-frame scan (fast,
+        # finds new tags within a frame or two) and the slow full-resolution discovery (small /
+        # far tags, ~1 Hz). Separate, so the slow one never delays the fast one.
+        self._scans = []
+        if self._april and self.engine == "pupil":
+            if self.realtime:
+                self._scans.append({"frame": None, "event": threading.Event(), "running": True,
+                                    "det": self._pupil_scan, "period": 0.0})
+            if discover_hz > 0:
+                self._scans.append({"frame": None, "event": threading.Event(), "running": True,
+                                    "det": self._pupil_disc, "period": 1.0 / discover_hz})
+            for st in self._scans:
+                threading.Thread(target=self._scan_loop, args=(st,), daemon=True).start()
 
     @staticmethod
     def _accept(f, native):
@@ -826,84 +854,101 @@ class TagDetector:
             out.append((gid, c))
         return out
 
-    # ---- small / far tags: background discovery + per-frame crop tracking
-    def _discover_loop(self):
-        st = self._disc
+    # ---- tag memory (position + velocity), shared by the per-frame tracker and the scan thread
+    def _remember(self, found, t):
+        with self._known_lock:
+            for gid, c in found:
+                prev = self._known.get(gid)
+                if prev is not None and prev[1] >= t:
+                    continue                                   # already have something newer
+                v = np.zeros(2, np.float32)
+                if prev is not None and 0 < t - prev[1] < 0.3:
+                    v = (c.mean(0) - prev[0].mean(0)) / (t - prev[1])
+                    v = 0.6 * v + 0.4 * prev[2]
+                self._known[gid] = (c, t, v.astype(np.float32))
+
+    def _scan_loop(self, st):
+        """Background: one full-frame pass on the newest frame, then at most every st["period"] s."""
         while st["running"]:
             st["event"].wait(0.5)
             st["event"].clear()
             item, st["frame"] = st["frame"], None
             if item is None or not st["running"]:
                 continue
+            img, stamp = item
             t0 = time.perf_counter()
             try:
-                found = self._april_raw(item[0], self._pupil_disc)
+                found = self._april_raw(img, st["det"])
             except Exception:
                 continue
-            with self._known_lock:
-                for gid, c in found:
-                    prev = self._known.get(gid)
-                    if prev is None or prev[1] < item[1]:
-                        self._known[gid] = (c, item[1])
-                self.stats["discovered"] = len(found)
-            # keep the CPU for the main loop: run at most every `period` seconds
+            self._remember(found, stamp)
+            if st["det"] is getattr(self, "_pupil_scan", None):
+                self.stats["scan_found"] = len(found)
+                self.stats["scan_ms"] = (time.perf_counter() - t0) * 1e3
             time.sleep(max(0.0, st["period"] - (time.perf_counter() - t0)))
 
     def close(self):
-        if self._disc:
-            self._disc["running"] = False
-            self._disc["event"].set()
+        for st in self._scans:
+            st["running"] = False
+            st["event"].set()
 
-    def _track_lost(self, gray, have, now, hints=None):
-        """Re-detect, in small upscaled crops, known tags that the fast pass did not find.
+    def _track(self, gray, have, now, hints=None, skip=()):
+        """Re-detect known tags in small upscaled crops around their predicted positions.
         hints {id: expected image corners}: tags whose position is known anyway (the pivot tags,
-        projected with the floor pose) are searched for even if never seen in this session."""
+        projected with the floor pose) are searched for even if not seen yet in this session."""
         H, W = gray.shape[:2]
         with self._known_lock:
-            known = [(g, c) for g, (c, t) in self._known.items() if g not in have and now - t <= self.TRACK_S]
-            for g in [g for g, (c, t) in self._known.items() if now - t > self.TRACK_S]:
+            for g in [g for g, k in self._known.items() if now - k[1] > self.TRACK_S]:
                 del self._known[g]
-        listed = {g for g, _ in known}
+            known = [(g, c, t, v) for g, (c, t, v) in self._known.items() if g not in have and g not in skip]
+        listed = {k[0] for k in known}
         for g, c in (hints or {}).items():
             c = np.asarray(c, np.float32)
-            if g not in have and g not in listed and np.isfinite(c).all()                     and (c[:, 0].max() > 0) and (c[:, 1].max() > 0) and (c[:, 0].min() < W) and (c[:, 1].min() < H):
-                known.append((g, c))
-        out = []
-        for gid, c in known:
+            if g not in have and g not in listed and g not in skip and np.isfinite(c).all():
+                known.append((g, c, now, np.zeros(2, np.float32)))
+        jobs = []
+        for gid, c, t, v in known:
+            if gid in have:
+                continue
+            dt = min(now - t, 0.25)
+            c = c + v * dt                                     # where it should be now
             lo, hi = c.min(0), c.max(0)
-            pad = max(0.75 * float(np.max(hi - lo)), 20.0)        # room for motion since last seen
-            x0, y0 = (int(v) for v in np.maximum(np.floor(lo - pad), 0))
-            x1, y1 = (int(v) for v in np.minimum(np.ceil(hi + pad), [W, H]))
+            if hi[0] < 0 or hi[1] < 0 or lo[0] >= W or lo[1] >= H:
+                continue
+            # room for the tag's size, prediction error and one more frame of motion
+            pad = max(0.75 * float(np.max(hi - lo)), 20.0) + 0.5 * float(np.linalg.norm(v)) * (dt + 0.05)
+            x0, y0 = (int(q) for q in np.maximum(np.floor(lo - pad), 0))
+            x1, y1 = (int(q) for q in np.minimum(np.ceil(hi + pad), [W, H]))
             if x1 - x0 < 12 or y1 - y0 < 12:
                 continue
             sides = np.linalg.norm(c - np.roll(c, -1, 0), axis=1)
             up = float(np.clip(self.ROI_TARGET_PX / max(sides.min(), 1.0), 1.0, 4.0))
+            jobs.append((x0, y0, x1, y1, up))
+
+        def run(job):
+            x0, y0, x1, y1, up = job
             crop = gray[y0:y1, x0:x1]
             if up > 1.0:
                 crop = cv2.resize(crop, None, fx=up, fy=up, interpolation=cv2.INTER_CUBIC)
-            for g, q in self._april_raw(np.ascontiguousarray(crop), self._pupil_fine):
-                if g in have:
-                    continue
-                # crop pixel -> image pixel (pixel centers: x_in = (x_out + 0.5) / up - 0.5)
-                out.append((g, ((q + 0.5) / up - 0.5 + [x0, y0]).astype(np.float32)))
-                have.add(g)
+            det = self._fine_free.get()
+            try:
+                found = self._april_raw(np.ascontiguousarray(crop), det)
+            finally:
+                self._fine_free.put(det)
+            # crop pixel -> image pixel (pixel centers: x_in = (x_out + 0.5) / up - 0.5)
+            return [(g, ((q + 0.5) / up - 0.5 + [x0, y0]).astype(np.float32)) for g, q in found]
+        results = list(self._crop_pool.map(run, jobs)) if len(jobs) > 1 else [run(j) for j in jobs]
+        out = []
+        for found in results:
+            for g, q in found:
+                if g not in have:
+                    out.append((g, q))
+                    have.add(g)
         return out
 
-    def detect(self, gray, hints=None):
-        now = time.perf_counter()
-        img = gray
-        if self.scale != 1.0:
-            img = cv2.resize(gray, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
-
-        out = []
-        if self._april:
-            out = self._april_raw(img)
-
+    def _detect_aruco(self, img, out):
         april_quads = [c for _, c in out]
-        if self.engine != "pupil":
-            # OpenCV-detected AprilTags need the same edge refinement as ArUco (pupil_apriltags
-            # already refines its own edges, and its corners tested better left as they are).
-            out = [(gid, refine_quad_edges(img, c)) for gid, c in out]
+        found = []
         for f, det in self._arucos:
             corners, ids, _ = det(img)
             if ids is None:
@@ -918,8 +963,40 @@ class TagDetector:
                     continue
                 gid = f["offset"] + native
                 self.info[gid] = (f["name"], native)
-                out.append((gid, refine_quad_edges(img, c)))
+                found.append((gid, refine_quad_edges(img, c)))
+        return found
 
+    def _feed_scan(self, gray, now):
+        img = None
+        for st in self._scans:
+            if st["frame"] is None:
+                img = np.ascontiguousarray(gray) if img is None else img
+                st["frame"] = (img, now)
+                st["event"].set()
+
+    def detect(self, gray, hints=None, skip=()):
+        now = time.perf_counter()
+        if self.realtime:
+            if not self._known and not hints:
+                # cold start (nothing known yet): one full pass right here instead of waiting
+                # for the background scan
+                self._remember(self._april_raw(gray, self._pupil), now)
+            out = self._track(gray, set(), now, hints, skip)
+            self.stats["tracked"] = len(out)
+            self._remember(out, now)
+            out += self._detect_aruco(gray, out)
+            self._feed_scan(gray, now)
+            return out
+
+        img = gray
+        if self.scale != 1.0:
+            img = cv2.resize(gray, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
+        out = self._april_raw(img) if self._april else []
+        if self.engine != "pupil":
+            # OpenCV-detected AprilTags need the same edge refinement as ArUco (pupil_apriltags
+            # already refines its own edges, and its corners tested better left as they are).
+            out = [(gid, refine_quad_edges(img, c)) for gid, c in out]
+        out += self._detect_aruco(img, out)
         if out and self.scale != 1.0:
             # Detect at low resolution for speed, then refine corners at full resolution.
             pts = np.concatenate([c for _, c in out]).reshape(-1, 1, 2) / self.scale
@@ -928,21 +1005,11 @@ class TagDetector:
             pts = cv2.cornerSubPix(gray, pts.astype(np.float32), (win, win), (-1, -1), crit)
             pts = pts.reshape(-1, 4, 2)
             out = [(tid, pts[k]) for k, (tid, _) in enumerate(out)]
-
         if self._april and self.engine == "pupil":
-            self.stats["fast"] = len(out)
-            extra = self._track_lost(gray, {g for g, _ in out}, now, hints)
-            self.stats["roi"] = len(extra)
-            out += extra
+            out += self._track(gray, {g for g, _ in out}, now, hints, skip)
             fam = self._april["name"]
-            with self._known_lock:
-                for gid, c in out:
-                    if self.info.get(gid, (None,))[0] == fam:     # crops only re-find AprilTags
-                        self._known[gid] = (c, now)
-            st = self._disc
-            if st is not None and st["frame"] is None:
-                st["frame"] = (np.ascontiguousarray(gray), now)
-                st["event"].set()
+            self._remember([(g, c) for g, c in out if self.info.get(g, (None,))[0] == fam], now)
+            self._feed_scan(gray, now)
         return out
 
     def label(self, gid):
@@ -1217,18 +1284,27 @@ class FloorModel:
 
 
 class Smoother:
-    """Exponential smoothing of world positions per tag id, reset on large jumps or dropouts."""
+    """Exponential smoothing of world positions per tag id, reset on large jumps or dropouts.
 
-    def __init__(self, alpha=0.5, reset_dist=0.15, timeout=0.5):
+    Adaptive, so a moving tag (a driving robot) is not dragged behind: a still tag gets the full
+    smoothing (alpha) against pixel noise, but the further the new position is from the smoothed
+    one, the more it is trusted, reaching 1 (no smoothing, no lag) at `follow_m` (2 cm). A fixed
+    alpha of 0.5 lags a moving tag by about one frame interval, plus jitter filtering on top."""
+
+    def __init__(self, alpha=0.5, reset_dist=0.15, timeout=0.5, noise_m=0.003, follow_m=0.02):
         self.alpha, self.reset_dist, self.timeout = alpha, reset_dist, timeout
+        self.noise_m, self.follow_m = noise_m, follow_m
         self.state = {}
 
     def __call__(self, tid, p, now):
         prev = self.state.get(tid)
-        if prev is None or now - prev[1] > self.timeout or np.linalg.norm(p - prev[0]) > self.reset_dist:
+        d = None if prev is None else float(np.linalg.norm(p - prev[0]))
+        if prev is None or now - prev[1] > self.timeout or d > self.reset_dist:
             s = p
         else:
-            s = self.alpha * p + (1 - self.alpha) * prev[0]
+            k = float(np.clip((d - self.noise_m) / (self.follow_m - self.noise_m), 0.0, 1.0))
+            a = self.alpha + (1.0 - self.alpha) * k
+            s = a * p + (1 - a) * prev[0]
         self.state[tid] = (s, now)
         return s
 
@@ -1358,11 +1434,14 @@ def save_survey(path, cfg, floor_tags, report):
 # --------------------------------------------------------------------------
 
 class Mapper:
+    pivot_check_every = 5      # with a locked floor pose, look at the pivot tags every N frames
+
     def __init__(self, cfg, K, D, detector, smoothing=0.5, max_reproj_px=4.0):
         self.cfg, self.K, self.D, self.detector = cfg, K, D, detector
         self.floor = FloorModel(cfg["floor_tags"], self.tag_size, max_reproj_px)
         self.smoother = Smoother(alpha=smoothing)
         self.prev_rot = {}   # tid -> (R_cam_tag, time), for resolving pose flips
+        self.heights = {}    # tid -> {"h": learned height above the floor, "n": frames it looked flat}
 
     def tag_size(self, tid):
         return self.cfg["tag_sizes"].get(tid, self.cfg["tag_size"])
@@ -1435,15 +1514,22 @@ class Mapper:
         now = time.perf_counter() if now is None else now
         t0 = time.perf_counter()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        hints = None
-        if self.floor.valid:
-            # pivot tags sit at known floor positions: if the fast pass misses one (small, blurred,
+        self._n = getattr(self, "_n", 0) + 1
+        hints, skip = None, ()
+        pivots = [t for t in self.floor.world_corners if t not in self.floor.learned]
+        if self.floor.valid and self.floor.locked and self._n % self.pivot_check_every:
+            # Floor pose locked (fixed camera): the pivots are not needed every frame. They are
+            # re-checked every few frames (camera bumped?), which keeps the per-frame work on
+            # the tags that move.
+            skip = set(pivots)
+        elif self.floor.valid:
+            # pivot tags sit at known floor positions: if one was not found yet (small, blurred,
             # partly shaded), look for it in an upscaled crop where the floor pose says it is
-            hints = {tid: self.floor.world_to_pixel(c, self.K, self.D)
-                     for tid, c in self.floor.world_corners.items() if tid not in self.floor.learned}
+            hints = {tid: self.floor.world_to_pixel(self.floor.world_corners[tid], self.K, self.D)
+                     for tid in pivots}
         try:
-            dets = self.detector.detect(gray, hints)
-        except TypeError:          # a detector without hint support
+            dets = self.detector.detect(gray, hints, skip)
+        except TypeError:          # a detector without hint / skip support
             dets = self.detector.detect(gray)
         t_det = time.perf_counter()
 
@@ -1495,8 +1581,25 @@ class Mapper:
                 # planar flip ambiguity are poorly defined for a small far tag), so stay with the
                 # plane, which is far more precise. (Before, -0.13 m read as "not on the floor"
                 # and the robot / goal tags fell back to the 3D pose, several cm off.)
-                if z_pose - plane_h > tol:
-                    plane_h, above = None, round(z_pose, 3)
+                # Raised tags (on a car, on a box): learn the tag's height from its 3D pose and then
+                # locate it on the plane at THAT height, which is as precise as a floor tag and
+                # stable. (Switching between "floor plane" and "3D pose" from frame to frame made a
+                # tag 11 cm up on a car jump by ~10 cm: the floor plane puts it where its camera
+                # ray hits the floor.) Hysteresis: back to the floor only after 10 flat-looking frames.
+                st = self.heights.get(tid)
+                if st is None:
+                    if z_pose - plane_h > tol:
+                        st = self.heights[tid] = {"h": z_pose, "n": 0}
+                elif abs(z_pose - plane_h) < abs(z_pose - st["h"]):
+                    st["n"] += 1
+                    if st["n"] >= 10:
+                        del self.heights[tid]
+                        st = None
+                else:
+                    st["n"] = 0
+                    st["h"] += 0.05 * (z_pose - st["h"])     # slow average: 3D height is noisy
+                if st is not None:
+                    plane_h, above = st["h"], round(st["h"], 3)
             plane = self.locate_on_plane(corners, plane_h, offset) if floor_ok and plane_h is not None else None
             if plane is not None:
                 p_w = self.smoother(tid, plane[0], now)

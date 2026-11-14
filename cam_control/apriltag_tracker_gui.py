@@ -301,7 +301,8 @@ class SyntheticScene:
 class Worker(QtCore.QThread):
     frame_ready = pyqtSignal(QtGui.QImage, float)
     arena_ready = pyqtSignal(QtGui.QImage, float, dict)
-    result_ready = pyqtSignal(dict)
+    result_ready = pyqtSignal(dict)    # kept for scripts; the GUI uses results_ready (below)
+    results_ready = pyqtSignal()       # "new results in worker.results": at most one pending at a time
     failed = pyqtSignal(str)
 
     def __init__(self, source, mapper, max_display_w=1280):
@@ -312,6 +313,11 @@ class Worker(QtCore.QThread):
         self.pending_floor = None
         self.show_grid = True
         self.pins = []
+        # Results for the GUI. One Qt signal per frame queued up whenever the GUI thread was
+        # slower than the camera, and everything shown fell further and further behind (seconds).
+        # Now: a bounded buffer plus one wake-up at a time; the GUI drains whatever is there.
+        self.results = deque(maxlen=250)
+        self.results_free = True
         self.display_free = True
         self.last_frame = None
         self.rec_lock = threading.Lock()
@@ -332,7 +338,7 @@ class Worker(QtCore.QThread):
         self._plan = None
         self.objdet = None             # object_detector.ObjectDetector (optional YOLO proposals)
         self.appearance = False        # objects = floor that does not look like floor (no model)
-        self.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=3)
+        self.app_tracker = od.FloorTracker(gate_m=0.15, ttl=0.4, min_hits=2)
         self._app_objs = []
         self.tracker = od.FloorTracker()
         self.det_obstacles = True
@@ -401,8 +407,62 @@ class Worker(QtCore.QThread):
                 if o.get("method") == "detect":
                     o["obstacle"] = False
 
+    # ---------------- planner thread: map, objects, A*, arena picture ----------------
+    def _planner_loop(self):
+        """Runs _arena_step on the newest frame handed over by the tracking loop. The map fusion,
+        object detection, A* and the arena picture take tens of ms; on the tracking thread they
+        stalled tag tracking (a few Hz while the map was active). Here they run at their own
+        pace and never delay the robot's pose or its steering command."""
+        while not self._planner_stop:
+            if not self._planner_ev.wait(0.2):
+                continue
+            self._planner_ev.clear()
+            item, self._planner_in = self._planner_in, None
+            if item is None:
+                continue
+            try:
+                t0 = time.perf_counter()
+                self._arena_step(*item)
+                self.planner_ms = (time.perf_counter() - t0) * 1e3
+            except Exception:
+                self.failed.emit(traceback.format_exc())
+                return
+
+    @staticmethod
+    def _json(v):
+        return v.tolist() if hasattr(v, "tolist") else float(v)
+
+    def _fast_control(self, r, now):
+        """Every frame, on the tracking thread: the steering command from the robot's newest pose
+        and the newest plan, sent at once (UDP). Control latency is one camera frame, not one
+        planning cycle; the plan itself is refreshed by the planner thread."""
+        if self.amap is None:
+            return
+        a = self.amap.arena
+        objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world"}
+        robot = objs.get(self.pair[0] if self.pair else a.get("robot_id"))
+        plan = self._plan
+        cmd = None
+        if robot is not None and plan and plan.get("status") == "ok":
+            leg = plan["legs"][0]["waypoints"] if plan.get("legs") else plan["waypoints"]
+            cmd = am.pure_pursuit((robot["x"], robot["y"]), robot.get("yaw_deg", 0.0), leg)
+        r["command"] = cmd
+        if self.udp:
+            last = self.arena_last or {}
+            msg = {"t": r["t"], "frame": "arena", "latency_ms": r.get("latency_ms"),
+                   "objects": [{k: v for k, v in o.items() if k not in ("footprint_poly", "box", "contact")}
+                               for o in m.public(r)["objects"]],
+                   "camera": r["camera"],
+                   "robot": None if robot is None else {k: robot[k] for k in ("x", "y", "z", "yaw_deg")},
+                   "goal": last.get("goal"), "pair": last.get("pair"), "stops": last.get("stops"),
+                   "path": last.get("plan"), "command": cmd}
+            try:
+                self.udp[0].sendto(json.dumps(msg, default=self._json).encode(), self.udp[1])
+            except (OSError, TypeError, ValueError):
+                pass
+
     def _arena_step(self, raw, r, now):
-        """Global floor map: fuse this frame, learn anchors, plan, publish, draw."""
+        """Global floor map: fuse this frame, objects, plan, draw (planner thread)."""
         gm, floor, cfg = self.amap, self.mapper.floor, self.mapper.cfg
         K, D = self.mapper.K, self.mapper.D
         a = gm.arena
@@ -434,12 +494,18 @@ class Worker(QtCore.QThread):
                          "start_seen": sid in objs, "goal_seen": gid in objs,
                          "start_age_s": None if not s_ else round(now - s_[1], 2),
                          "goal_age_s": None if not g_ else round(now - g_[1], 2)}
-        clear = []
+        clear, attach = [], []
         if robot is not None:
-            rad, hgt = self.robot_body
-            hgt = robot["z"] + 0.01 if hgt is None else hgt
-            clear.append(am.ArenaMap.body_outline(robot["x"], robot["y"], rad + 0.01, max(hgt, 0.0),
-                                                  floor.camera_position))
+            # the robot's body (configured radius, height from its tag) is never an obstacle, and
+            # anything the camera sees attached to it (arm, wheels, cables, the tag's border) is
+            # the robot too: such blobs are removed from the map instead of becoming objects
+            rad = float(a.get("robot_radius_m", self.robot_body[0]))
+            hgt = robot["z"] + 0.01 if self.robot_body[1] is None else self.robot_body[1]
+            body = am.ArenaMap.body_outline(robot["x"], robot["y"], rad + 0.01, max(hgt, 0.0),
+                                            floor.camera_position)
+            clear.append(body)
+            attach.append(am.ArenaMap.body_outline(robot["x"], robot["y"], rad + 0.05, max(hgt, 0.0),
+                                                   floor.camera_position))
         if pair and goal is not None:
             g_obj = self._pair_last[pair[1]][0]
             spec = cfg.get("objects", {}).get(pair[1], {})
@@ -472,9 +538,9 @@ class Worker(QtCore.QThread):
         # Fuse into the map at most ~10x per second; tag tracking keeps running every frame.
         fuse_ok = floor.locked or not floor.auto_lock   # pause while the camera is moving
         info["map_paused"] = not fuse_ok
-        if fuse_ok and (cap or now - getattr(self, "_fuse_t", 0) >= 0.1):
+        if fuse_ok and (cap or now - getattr(self, "_fuse_t", 0) >= 0.05):
             gm.update(raw, floor, K, D, now, clear_polys=clear, max_range=float(a["max_range_m"]),
-                      min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap)
+                      min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap, attach_polys=attach)
             self._fuse_t = now
             if self.appearance:
                 found = gm.objects_in_view()
@@ -534,7 +600,7 @@ class Worker(QtCore.QThread):
             (self.auto_replan and now - self._last_plan_t > self.replan_period))
         if replan:
             self._pair_key = key
-        draw = self.arena_free and now - getattr(self, "_draw_t", 0) > 0.2
+        draw = self.arena_free and now - getattr(self, "_draw_t", 0) > 0.1
         foot = blocked = None
         cell = gm.plan_resolution()
         if replan or draw:
@@ -585,15 +651,6 @@ class Worker(QtCore.QThread):
                              "obstacle_m2": round(float(gm.obstacles().sum()) * gm.res ** 2, 3),
                              "anchors": sorted(floor.world_corners), "locked": floor.locked}})
         self.arena_last = info
-        if self.udp:
-            try:
-                msg = {"t": r["t"], "frame": "arena", "objects": m.public(r)["objects"],
-                       "camera": r["camera"], "robot": info["robot"], "goal": goal,
-                       "pair": pair_info, "stops": stop_info,
-                       "path": info["plan"], "command": cmd}
-                self.udp[0].sendto(json.dumps(msg, default=float).encode(), self.udp[1])
-            except OSError:
-                pass
 
         if not draw:
             if info["events"] or info.get("background_captured"):
@@ -654,6 +711,10 @@ class Worker(QtCore.QThread):
         self.arena_ready.emit(qimg, s_, info)
 
     def run(self):
+        self._planner_in, self._planner_ev, self._planner_stop = None, threading.Event(), False
+        self.planner_ms = 0.0
+        planner = threading.Thread(target=self._planner_loop, daemon=True)
+        planner.start()
         try:
             fid, n, t_fps, fps = 0, 0, time.perf_counter(), 0.0
             while not self.isInterruptionRequested():
@@ -665,7 +726,10 @@ class Worker(QtCore.QThread):
                     continue
                 meta = getattr(self.source, "last_meta", None)
                 if self.pending_detector is not None:
-                    _DETECTOR_KEEPALIVE.append(self.mapper.detector)
+                    old = self.mapper.detector
+                    _DETECTOR_KEEPALIVE.append(old)
+                    if hasattr(old, "close"):
+                        old.close()                   # stop its background scan thread
                     self.mapper.detector, self.pending_detector = self.pending_detector, None
                 if self.pending_floor is not None:
                     self.mapper.floor, self.pending_floor = self.pending_floor, None
@@ -687,10 +751,18 @@ class Worker(QtCore.QThread):
                 r.update(latency_ms=(now - stamp) * 1e3, proc_fps=fps, grab_fps=self.source.grab_fps,
                          truth=meta, wall=now)
                 r["_floor"] = (floor.R.copy(), floor.t.copy()) if floor.valid else None
+                r["planner_ms"] = self.planner_ms
                 self._record(r)
                 if raw is not None and self.amap is not None:
-                    self._arena_step(raw, r, now)
-                self.result_ready.emit(r)
+                    # hand the newest frame to the planner thread (it skips frames it cannot keep up with)
+                    self._planner_in = (raw, dict(r, objects=list(r["objects"])), now)
+                    self._planner_ev.set()
+                r["objects"].extend(self._app_objs)       # newest objects from the planner
+                self._fast_control(r, now)
+                self.results.append(r)
+                if self.results_free:
+                    self.results_free = False
+                    self.results_ready.emit()
 
                 if self.display_free:
                     self.display_free = False
@@ -759,6 +831,11 @@ class Worker(QtCore.QThread):
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:
+            self._planner_stop = True
+            self._planner_ev.set()
+            planner.join(timeout=2.0)
+            if hasattr(self.mapper.detector, "close"):
+                self.mapper.detector.close()
             self.stop_recording()
             if self.objdet is not None:
                 self.objdet.stop()
@@ -842,10 +919,14 @@ class TagStats:
         self.last = (wall, o)
 
     def window(self, now, seconds):
-        if not self.hist:
-            return np.empty((0, 7))
-        a = np.asarray(self.hist)
-        return a[a[:, 0] >= now - seconds]
+        """Samples of the last `seconds` (walks back from the newest: cost ~ samples in the window,
+        not the whole 3000-sample history, which every refresh used to convert for every id)."""
+        out = []
+        for row in reversed(self.hist):
+            if row[0] < now - seconds:
+                break
+            out.append(row)
+        return np.asarray(out[::-1]) if out else np.empty((0, 7))
 
 
 def pixel_to_floor(Rt, K, D, u, v):
@@ -880,7 +961,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.arena_setup = None
         self.fitted = False
         self._build_ui()
-        self.ui_timer = QtCore.QTimer(self, interval=66, timeout=self._refresh_panels)
+        self.ui_timer = QtCore.QTimer(self, interval=33, timeout=self._refresh_panels)
         self.ui_timer.start()
 
     # ---------------- layout ----------------
@@ -1238,7 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.ctrl_tabs.addTab(scroll, title)
-        self.ctrl_tabs.setFixedWidth(340)
+        self.ctrl_tabs.setMinimumWidth(220)          # resizable: drag the splitter handle
 
         # Video
         self.video = VideoView()
@@ -1316,11 +1397,16 @@ class MainWindow(QtWidgets.QMainWindow):
         center.addWidget(self.table)
         center.setSizes([700, 220])
 
-        root = QtWidgets.QWidget()
-        hl = QtWidgets.QHBoxLayout(root)
-        hl.setContentsMargins(4, 4, 4, 4)
-        hl.addWidget(self.ctrl_tabs)
-        hl.addWidget(center, 1)
+        # every panel boundary is draggable: controls | video | map / arena, plot, table
+        root = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
+        root.addWidget(self.ctrl_tabs)
+        root.addWidget(center)
+        root.setStretchFactor(1, 1)
+        root.setSizes([340, 1360])
+        for sp in (root, center, top, right):
+            sp.setHandleWidth(7)
+            sp.setChildrenCollapsible(True)        # drag a panel fully closed to hide it
+        root.setContentsMargins(4, 4, 4, 4)
         self.setCentralWidget(root)
 
         self.status = QtWidgets.QLabel("Stopped")
@@ -1584,7 +1670,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = Worker(self.source, self.mapper)
         self.worker.show_grid = self.grid_chk.isChecked()
         self.worker.frame_ready.connect(self._on_frame)
-        self.worker.result_ready.connect(self._on_result)
+        self.worker.results_ready.connect(self._drain_results)
         self.worker.failed.connect(self._on_failed)
         self.worker.arena_ready.connect(self._on_arena)
         self._plane_mode_changed()
@@ -1766,9 +1852,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.ar_floor_chk.isChecked() and self.ar_robot_h.value() > 0:
                 spec["height_m"] = self.ar_robot_h.value()
             else:
-                # height unknown: a robot's tag is usually raised, so use its 3D pose instead of
-                # snapping it to the floor (enter the height for millimeter plane precision)
-                spec["height_m"] = None
+                # height unknown ("auto"): the mapper learns the tag's height from its 3D pose and
+                # then locates it on the plane at that height (precise and steady while driving)
+                spec.pop("height_m", None)
 
     def apply_tape(self):
         if not getattr(self, "_arena_samples", None):
@@ -1833,6 +1919,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg["arena"] = self._arena_ui_to_settings(self.cfg.get("arena"))
         a = self.cfg["arena"]
         self.arena_setup = {"end": time.perf_counter() + 2.0, "samples": []}
+        self.mapper.pivot_check_every = 1          # the setup averages the pivots over every frame
         self.ar_setup_btn.setEnabled(False)
         self.log_msg(f"Arena setup: collecting 2 s with corner tags {a['corner_ids']}"
                      + (", with your tape distances" if (a.get("tape_m") or (a["width_m"] and a["height_m"]))
@@ -1841,6 +1928,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _finish_arena_setup(self):
         st, self.arena_setup = self.arena_setup, None
+        self.mapper.pivot_check_every = m.Mapper.pivot_check_every
         self.ar_setup_btn.setEnabled(True)
         self._arena_samples = st["samples"]
         self._compute_arena(st["samples"])
@@ -2042,7 +2130,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.det_status.setText("off")
             return
         self.cfg.setdefault("arena", {})["appearance_z"] = self.det_app_z.value()
-        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=3)
+        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=0.4, min_hits=2)
         self.log_msg("Object detection on: anything on the floor that does not look like the floor becomes "
                      "an object and an obstacle (compared with the rest of the floor in each frame).")
         if not self.worker.amap:
@@ -2266,8 +2354,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker:
             self.worker.display_free = True
 
+    def _recent_tags(self, r, window=0.6):
+        """Tags seen within the last `window` seconds (with a locked floor the pivot tags are only
+        looked at every few frames, so 'in this frame' would flicker)."""
+        now = time.perf_counter()
+        seen_t = self.__dict__.setdefault("_tag_seen_t", {})
+        for g, _ in r.get("_dets", []):
+            seen_t[g] = now
+        return {g for g, t in seen_t.items() if now - t <= window}
+
+    def _drain_results(self):
+        """All results the worker produced since the last call (bounded, so a busy GUI can
+        never build up a backlog: what is shown is at most one GUI cycle old)."""
+        w = self.worker
+        if w is None:
+            return
+        w.results_free = True            # first: a result arriving while we drain wakes us again
+        batch = []
+        while True:
+            try:
+                batch.append(w.results.popleft())
+            except IndexError:
+                break
+        for r in batch:
+            self._on_result(r)
+
     def _on_result(self, r):
         self.latest = r
+        self._recent = self._recent_tags(r)
         # Saved arena present but its floor fit keeps getting rejected (different lens, zoom,
         # resolution, or a camera-only arena): explain once and rebuild it from the live view.
         if (self.worker and self.worker.amap is not None and not r["floor_valid"]
@@ -2285,7 +2399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._reject_streak = 0
         if (self.worker and self.arena_setup is None and not getattr(self, "_auto_arena_tried", False)):
-            ids = {g for g, _ in r.get("_dets", [])}
+            ids = self._recent
             need = set((self.cfg.get("arena") or {}).get("corner_ids", []))
             self._corner_streak = getattr(self, "_corner_streak", 0) + 1 if need and need <= ids else 0
             if self._corner_streak >= 10:
@@ -2400,7 +2514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # pivot tags: how many are in view, plane state
         piv = sorted((self.cfg.get("arena") or {}).get("corner_ids") or [])
         if piv:
-            seen = {g for g, _ in r.get("_dets", [])}
+            seen = getattr(self, "_recent", set())
             n_in = sum(1 for t in piv if t in seen)
             state = (("plane locked" if r["floor_locked"] else "plane ok") if r["floor_valid"]
                      else "no plane yet")
@@ -2426,6 +2540,8 @@ class MainWindow(QtWidgets.QMainWindow):
         rec = "  ● REC" if self.rec_btn.isChecked() else ""
         self.status.setText(f"proc {r['proc_fps']:4.1f} fps | source {r['grab_fps']:4.1f} fps | "
                             f"detect {r['timing_ms']['detect']:5.1f} ms | latency {r['latency_ms']:5.1f} ms | "
+                            f"map/A* {r.get('planner_ms', 0):5.0f} ms (own thread) | "
+                            f"shown {1000 * (now - r['wall']):4.0f} ms after processing | "
                             f"tags {r['n_tags']} | {fl} | {cam_s}{rec}")
 
         # camera on map
@@ -2437,6 +2553,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if n > 1e-6:
                 f = fwd[:2] / n * 0.3
                 self.cam_heading.setData([cam["x"], cam["x"] + f[0]], [cam["y"], cam["y"] + f[1]])
+
+        # forget ids not seen for a while (detected objects get new ids all the time: keeping them
+        # made every refresh slower and slower during a session)
+        for tid in [t for t, st in self.stats.items()
+                    if st.last and now - st.last[0] > (3.0 if t >= od.DET_ID_BASE else 30.0)]:
+            del self.stats[tid]
+            for d_ in (self.trails, self.labels):
+                it = d_.pop(tid, None)
+                if it is not None:
+                    self.map.removeItem(it)
+            if self.selected == tid:
+                self.selected = None
 
         # objects, trails, labels
         win = self.window_spin.value()
@@ -2451,8 +2579,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.labels[tid] = pg.TextItem(color=(0, 230, 0), anchor=(0, 1))
                 self.map.addItem(self.trails[tid])
                 self.map.addItem(self.labels[tid])
-            self.trails[tid].setData(a[:, 1], a[:, 2]) if len(a) else self.trails[tid].setData([], [])
             stale = age > 0.5
+            if tid >= od.DET_ID_BASE:
+                self.trails[tid].setData([], [])        # objects: no trail, just the label
+            elif len(a):
+                self.trails[tid].setData(a[:, 1], a[:, 2])
+            else:
+                self.trails[tid].setData([], [])
             self.labels[tid].setText(f"{o['name']} z={o['z']:.3f}" + (" (lost)" if stale else ""))
             self.labels[tid].setPos(o["x"], o["y"])
             if not stale:
@@ -2479,6 +2612,10 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.truth_scatter.setData([], [])
 
+        # table and time plot: ~8 Hz is plenty to read (the map above updates every tick, 30 Hz)
+        self._ui_tick = getattr(self, "_ui_tick", 0) + 1
+        if self._ui_tick % 4:
+            return
         # table
         self.table.setRowCount(len(rows))
         fmt = lambda v, p: "" if v is None or not np.isfinite(v) else f"{v:.{p}f}"

@@ -600,45 +600,67 @@ def _plane_geometry(shape, poly, floor, K, D, step, max_range, show_outside):
     return geo
 
 
+def _plane_layer(shape, poly, labels, color, geo):
+    """Pre-drawn overlay for one camera pose: (fill (box, mask) or None, layer BGR, line mask).
+    Drawing ~100 anti-aliased grid lines and labels costs ~10+ ms per frame; with a fixed camera
+    the overlay never changes, so it is drawn once and pasted onto each frame (~2-3 ms)."""
+    edge, edge_all, edge_any, lines, labels_, o, corner_px = geo
+    h, w = shape[:2]
+    layer = np.zeros((h, w, 3), np.uint8)
+    mask = np.zeros((h, w), np.uint8)
+
+    def paint(dst, real):
+        c = (lambda col: col) if real else (lambda col: 255)
+        for pl, inside, major in lines:
+            if inside:
+                col, th = ((255, 255, 255), 2) if major else ((210, 210, 210), 1)
+            else:
+                col, th = ((140, 200, 200), 2) if major else ((120, 150, 150), 1)
+            cv2.polylines(dst, [pl], False, c(col), th, cv2.LINE_AA)
+        for txt, org in labels_:
+            cv2.putText(dst, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.45, c((0, 0, 0)), 3, cv2.LINE_AA)
+            cv2.putText(dst, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.45, c((255, 255, 255)), 1, cv2.LINE_AA)
+        if edge_any:
+            cv2.polylines(dst, [edge], True, c(color), 3, cv2.LINE_AA)
+        for k, col in ((1, (0, 0, 255)), (2, (0, 200, 0)), (3, (255, 80, 0))):
+            cv2.arrowedLine(dst, tuple(o[0]), tuple(o[k]), c(col), 3, cv2.LINE_AA, tipLength=0.2)
+        for (x, y), lab, q in zip(poly, labels, corner_px):
+            txt = f"{lab} ({x:.3f}, {y:.3f})"
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            org = (int(q[0]) - tw // 2, int(q[1]) + 30)
+            cv2.rectangle(dst, (org[0] - 3, org[1] - th - 4), (org[0] + tw + 3, org[1] + 5), c((0, 0, 0)), -1)
+            cv2.putText(dst, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, c(color), 2, cv2.LINE_AA)
+    paint(layer, True)
+    paint(mask, False)
+    fill = None
+    if edge_all:
+        fm = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(fm, [edge], 255)
+        fill = (fm, np.full((h, w, 3), color, np.uint8))
+    return fill, layer, mask
+
+
 def draw_plane(frame, corners_xy, labels, floor, K, D, step=0.1, color=(0, 220, 255),
                max_range=4.0, show_outside=True):
     """Draw the floor plane on the camera image: the arena between the corner tags (filled,
     bright grid) and, beyond it, the rest of the visible floor out to max_range (dim grid).
     Major lines every 0.5 m are labelled. Lines are sampled densely and projected with the lens
-    model, so they follow distortion and stop at the horizon / image edge. The projected
-    geometry is cached while the pose is unchanged (a locked camera costs ~nothing)."""
+    model, so they follow distortion and stop at the horizon / image edge. Geometry and the
+    drawn overlay are cached while the pose is unchanged (a locked camera costs ~2-3 ms)."""
     if not floor.valid:
         return
     poly = np.asarray(corners_xy, np.float64)
-    edge, edge_all, edge_any, lines, labels_, o, corner_px = _plane_geometry(
-        frame.shape, poly, floor, K, D, step, max_range, show_outside)
-    if edge_all:
-        x0, y0 = np.maximum(edge.min(0), 0)
-        x1, y1 = np.minimum(edge.max(0) + 1, [frame.shape[1], frame.shape[0]])
-        if x1 > x0 and y1 > y0:
-            roi = frame[y0:y1, x0:x1]
-            over = roi.copy()
-            cv2.fillPoly(over, [edge - [x0, y0]], color)
-            cv2.addWeighted(over, 0.18, roi, 0.82, 0, roi)
-    for pl, inside, major in lines:
-        if inside:
-            col, th = ((255, 255, 255), 2) if major else ((210, 210, 210), 1)
-        else:
-            col, th = ((140, 200, 200), 2) if major else ((120, 150, 150), 1)
-        cv2.polylines(frame, [pl], False, col, th, cv2.LINE_AA)
-    for txt, org in labels_:
-        cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    if edge_any:
-        cv2.polylines(frame, [edge], True, color, 3, cv2.LINE_AA)
-    for k, col in ((1, (0, 0, 255)), (2, (0, 200, 0)), (3, (255, 80, 0))):
-        cv2.arrowedLine(frame, tuple(o[0]), tuple(o[k]), col, 3, cv2.LINE_AA, tipLength=0.2)
-    for (x, y), lab, q in zip(poly, labels, corner_px):
-        txt = f"{lab} ({x:.3f}, {y:.3f})"
-        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        org = (int(q[0]) - tw // 2, int(q[1]) + 30)
-        cv2.rectangle(frame, (org[0] - 3, org[1] - th - 4), (org[0] + tw + 3, org[1] + 5), (0, 0, 0), -1)
-        cv2.putText(frame, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+    geo = _plane_geometry(frame.shape, poly, floor, K, D, step, max_range, show_outside)
+    lkey = (_PLANE_CACHE.get("key"), tuple(labels), tuple(color))
+    if _PLANE_CACHE.get("layer_key") != lkey:
+        _PLANE_CACHE["layer"] = _plane_layer(frame.shape, poly, labels, color, geo)
+        _PLANE_CACHE["layer_key"] = lkey
+    fill, layer, mask = _PLANE_CACHE["layer"]
+    # OpenCV masked copies (C, in place): numpy's boolean-mask copy over a full frame took ~10 ms
+    if fill is not None:
+        fm, tint = fill
+        cv2.copyTo(cv2.addWeighted(frame, 0.82, tint, 0.18, 0), fm, frame)
+    cv2.copyTo(layer, mask, frame)
 
 
 # --------------------------------------------------------------------------
@@ -808,12 +830,14 @@ class GlobalMap:
         if not res:
             res = self.auto_resolution(floor, K, D) if floor is not None and floor.valid else 0.005
             if floor is not None and floor.valid and K is not None:
-                # keep the visible part of the grid around a million cells (fast fusion)
+                # keep the visible part of the grid around 400k cells so a map update (fusion +
+                # object detection) stays well under 100 ms; obstacles are still mapped finer
+                # than the 1 cm A* grid
                 h_, w_ = int(round(K[1, 2] * 2)), int(round(K[0, 2] * 2))
                 box = self.visible_window(floor, K, D, (h_, w_), float(arena.get("max_range_m", 4.0)))
                 if box is not None:
                     area = (box[2] - box[0]) * (box[3] - box[1])
-                    res = max(res, math.ceil(math.sqrt(area / 1.0e6) * 1000) / 1000)
+                    res = max(res, math.ceil(math.sqrt(area / 4.0e5) * 1000) / 1000)
         self.res = float(res)
         lo, hi = self.corners.min(0) - 0.2, self.corners.max(0) + 0.2
         self.x0, self.y0 = math.floor(lo[0] / 0.5) * 0.5, math.floor(lo[1] / 0.5) * 0.5
@@ -951,8 +975,10 @@ class GlobalMap:
         return cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32), (5, 5), 0)
 
     def update(self, frame, floor, K, D, now, clear_polys=(), max_range=4.0, min_px_per_cell=0.35,
-               capture_bg=False, adapt_rate=0.02):
-        """Fuse one camera frame into the map. Returns the current window's obstacle mask."""
+               capture_bg=False, adapt_rate=0.02, attach_polys=()):
+        """Fuse one camera frame into the map. Returns the current window's obstacle mask.
+        clear_polys: never obstacles (robot body, flat tags). attach_polys: any obstacle blob that
+        overlaps one of these belongs to it (the robot's arm, wheels...) and is removed as a whole."""
         if not floor.valid:
             self.view = None
             return None
@@ -1000,22 +1026,38 @@ class GlobalMap:
         if sources:
             raw = np.logical_or.reduce(sources).astype(np.uint8) * 255
             raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-            raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+            raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))   # small: keep gaps between blocks
             for poly in clear_polys:
                 pp = self.w2p(poly) - [c0, r0]
                 cv2.fillConvexPoly(raw, np.round(pp).astype(np.int32), 0)
             n, labl, stats, _ = cv2.connectedComponentsWithStats(raw, connectivity=8)
             keep = np.zeros(n, bool)
             keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+            attached = np.zeros(vis.shape, bool)
+            if attach_polys and n > 1:
+                am_ = np.zeros(vis.shape, np.uint8)
+                for poly in attach_polys:
+                    cv2.fillConvexPoly(am_, np.round(self.w2p(poly) - [c0, r0]).astype(np.int32), 1)
+                parts = np.unique(labl[am_ > 0])
+                parts = parts[parts > 0]
+                if len(parts):
+                    keep[parts] = False
+                    attached = np.isin(labl, parts)
             obst = keep[labl] & vis
             judged = vis if self.detect_appearance else (vis & bg_ok)
             free = judged & ~obst
-            lo += np.where(obst, np.float32(0.9), np.where(free, np.float32(-0.5), np.float32(0)))
-            np.clip(lo, -4, 4, out=lo)
+            # Evidence builds and clears in 1-2 updates so a moving object (a driving car) is shown
+            # where it is, without a ghost trail: +1.2 when seen (objects need > 1), -1.5 when the
+            # cell looks like floor again, capped at +3 (two free looks clear it).
+            lo += np.where(obst, np.float32(1.2), np.where(free, np.float32(-1.5), np.float32(0)))
+            np.clip(lo, -2, 3, out=lo)
             if self.bg_enabled:
                 # adapt the empty-floor reference to slow lighting changes, on confidently free cells only
-                ad = free & bg_ok & (lo < -2)
+                ad = free & bg_ok & (lo <= -2)
                 cv2.accumulateWeighted(lab, bg, adapt_rate, mask=ad.astype(np.uint8))
+            # blobs attached to the robot: clear their evidence, like the body itself
+            if attached.any():
+                lo[attached] = np.minimum(lo[attached], 0)
             # robot body, flat floor tags: never an obstacle
             if clear_polys:
                 cm = np.zeros(vis.shape, np.uint8)
@@ -1031,37 +1073,79 @@ class GlobalMap:
 
     def objects_in_view(self):
         """Obstacle blobs in the current view as objects: centroid, footprint polygon (world),
-        size. Blobs come from the fused obstacle evidence, so they are stable over frames."""
+        size. Blobs come from the fused obstacle evidence, so they are stable over frames.
+
+        Confident cells only (evidence > 1, i.e. seen as "not floor" in more than one update):
+        cells at an object's rim hover around 0 and made the outline breathe. Fragments closer
+        than ~2 cm are joined. A blob made of differently colored parts that touch (a wall of
+        blocks) is split into those parts (_split_by_color)."""
         if self.view is None:
             return []
         r0, r1, c0, c1, vis = self.view
-        # Confident cells only (evidence > 1, i.e. seen as "not floor" in several updates): cells at
-        # an object's rim hover around 0 and made the outline breathe. Fragments of one object
-        # closer than ~2 cm are joined, so it does not split into two boxes now and then.
         ob = ((self.logodds[r0:r1, c0:c1] > 1.0) & vis).astype(np.uint8)
-        k = max(3, int(round(0.02 / self.res)) | 1)
+        k = max(3, int(round(0.02 / self.res)) | 1)          # join fragments of one object first
         ob = cv2.morphologyEx(ob, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        cs, _ = cv2.findContours(ob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        lab = cv2.cvtColor(cv2.GaussianBlur(self.color[r0:r1, c0:c1], (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+        # Carve floor back out of the blobs. The floor test looks at ~2.5 cm windows, so its
+        # evidence spills ~1 cm onto the floor around an object and bridges small gaps (two
+        # blocks 3 cm apart became one). A cell whose OWN color is the floor's typical color and
+        # that is speckled like the floor is floor. Objects keep their own color and stay.
+        # Done after joining fragments, so a carved gap is not filled again.
+        L_ = lab[..., 0]
+        mu = cv2.blur(L_, (3, 3))
+        speck = np.sqrt(np.maximum(cv2.blur(L_ * L_, (3, 3)) - mu * mu, 0))
+        fl_ = (vis & (ob == 0)).ravel()
+        idx = np.flatnonzero(fl_)
+        if len(idx) > 500:
+            idx = idx[:: max(1, len(idx) // 6000)]
+            ma, mb = (float(np.median(lab[..., c].ravel()[idx])) for c in (1, 2))
+            ms = float(np.median(speck.ravel()[idx]))
+            floorish = ((np.abs(lab[..., 1] - ma) < 6) & (np.abs(lab[..., 2] - mb) < 8)
+                        & (speck > 0.4 * ms))
+            ob[floorish] = 0
         min_px = float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+        n, labl, stats, _ = cv2.connectedComponentsWithStats(ob, connectivity=8)
+        lab[..., 0] *= 0.5                                 # for the color split: shading counts half
         out = []
-        for c in cs:
-            if cv2.contourArea(c) < min_px:
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_AREA] < min_px:
                 continue
-            mo = cv2.moments(c)
-            if mo["m00"] <= 0:
-                continue
-            hull = cv2.convexHull(c).reshape(-1, 2).astype(np.float64)
-            world = np.column_stack([self.x0 + (c0 + hull[:, 0] + 0.5) * self.res,
-                                     self.y1 - (r0 + hull[:, 1] + 0.5) * self.res])
-            cx, cy = mo["m10"] / mo["m00"], mo["m01"] / mo["m00"]
-            (_, _), (w, h), _ = cv2.minAreaRect(c)
-            if min(w, h) * self.res < 0.015:       # a sliver along an edge, not an object
-                continue
-            out.append({"name": "object", "conf": 1.0, "box": None,
-                        "x": float(self.x0 + (c0 + cx + 0.5) * self.res),
-                        "y": float(self.y1 - (r0 + cy + 0.5) * self.res),
-                        "contact": None, "width_m": float(max(w, h) * self.res),
-                        "depth_m": float(min(w, h) * self.res), "height_m": 0.0, "footprint": world})
+            x, y, w, h = stats[i, :4]
+            sub = labl[y:y + h, x:x + w] == i
+            parts = [sub]
+            if stats[i, cv2.CC_STAT_AREA] >= 4 * min_px:
+                parts = []
+                for piece in _split_at_necks(sub, min_px, 0.03 / self.res):
+                    py, px = np.nonzero(piece)
+                    y0_, x0_ = py.min(), px.min()
+                    sl_ = (slice(y0_, py.max() + 1), slice(x0_, px.max() + 1))
+                    for q in _split_by_color(piece[sl_], lab[y:y + h, x:x + w][sl_], min_px,
+                                             min_side_px=0.03 / self.res):
+                        full = np.zeros(sub.shape, bool)
+                        full[sl_] = q
+                        parts.append(full)
+            for pm in parts:
+                cs, _ = cv2.findContours(pm.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not cs:
+                    continue
+                c = max(cs, key=cv2.contourArea)
+                if cv2.contourArea(c) < min_px:
+                    continue
+                mo = cv2.moments(c)
+                if mo["m00"] <= 0:
+                    continue
+                (_, _), (rw, rh), _ = cv2.minAreaRect(c)
+                if min(rw, rh) * self.res < 0.015:     # a sliver along an edge, not an object
+                    continue
+                hull = cv2.convexHull(c).reshape(-1, 2).astype(np.float64) + [x, y]
+                world = np.column_stack([self.x0 + (c0 + hull[:, 0] + 0.5) * self.res,
+                                         self.y1 - (r0 + hull[:, 1] + 0.5) * self.res])
+                cx, cy = mo["m10"] / mo["m00"] + x, mo["m01"] / mo["m00"] + y
+                out.append({"name": "object", "conf": 1.0, "box": None,
+                            "x": float(self.x0 + (c0 + cx + 0.5) * self.res),
+                            "y": float(self.y1 - (r0 + cy + 0.5) * self.res),
+                            "contact": None, "width_m": float(max(rw, rh) * self.res),
+                            "depth_m": float(min(rw, rh) * self.res), "height_m": 0.0, "footprint": world})
         return out
 
     def footprint_mask(self, objects, cfg, skip_ids=()):
@@ -1094,6 +1178,82 @@ class GlobalMap:
 # Objects by appearance (no model, no stored reference)
 # --------------------------------------------------------------------------
 
+def _split_at_necks(mask, min_px, neck_px):
+    """Split a blob where it narrows: objects a few cm apart get joined by a thin bridge (the
+    floor test looks at ~2.5 cm windows). Opening with a disk of diameter neck_px removes bridges
+    thinner than that; if the blob then falls apart into 2+ solid pieces, every cell goes to its
+    nearest piece. Thin things (cables) vanish entirely under the opening and stay whole."""
+    r = max(1, int(round(neck_px / 2)))
+    m8 = mask.astype(np.uint8)
+    core = cv2.morphologyEx(m8, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+    n, lab = cv2.connectedComponents(core, connectivity=8)
+    seeds = [j for j in range(1, n) if (lab == j).sum() >= 0.5 * min_px]
+    if len(seeds) < 2:
+        return [mask]
+    markers = np.zeros(mask.shape, np.int32)
+    for k, j in enumerate(seeds, 1):
+        markers[lab == j] = k
+    # nearest seed for every cell: distance transform labels the zero pixels' components
+    _, near = cv2.distanceTransformWithLabels((markers == 0).astype(np.uint8), cv2.DIST_L2, 5,
+                                              labelType=cv2.DIST_LABEL_CCOMP)
+    comp_to_seed = {}
+    for k in range(1, len(seeds) + 1):
+        ids = np.unique(near[markers == k])
+        for i_ in ids:
+            comp_to_seed[int(i_)] = k
+    assign = np.vectorize(lambda v: comp_to_seed.get(int(v), 0), otypes=[np.int32])(near)
+    parts = [mask & (assign == k) for k in range(1, len(seeds) + 1)]
+    return [p_ for p_ in parts if p_.sum() >= min_px] or [mask]
+
+
+def _split_by_color(mask, lab, min_px, min_delta=22.0, max_parts=5, min_side_px=0):
+    """Split one obstacle blob into differently colored parts that touch, e.g. a wall of colored
+    blocks seen as one blob. Repeatedly: 2-means on the cells' color (Lab, lightness halved); the
+    split is accepted only if the two colors clearly differ AND each color forms one compact
+    region per block (pieces of at least min_px cover >= 85 % of that color, at most 4 pieces). A
+    patterned object (a sofa, the robot) has its colors scattered in many small bits and stays whole.
+    Every part must also be at least min_side_px wide: the shaded side face of a box is a thin
+    strip next to its top, not a separate object.
+    Same-colored blocks touching each other cannot be told apart this way (no depth)."""
+    out, todo = [], [mask]
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    while todo:
+        m = todo.pop()
+        if len(out) + len(todo) + 1 >= max_parts or m.sum() < 2 * min_px:
+            out.append(m)
+            continue
+        X = lab[m].reshape(-1, 3).astype(np.float32)
+        _, lbl, ctr = cv2.kmeans(X, 2, None, crit, 2, cv2.KMEANS_PP_CENTERS)
+        if float(np.linalg.norm(ctr[0] - ctr[1])) < min_delta:
+            out.append(m)
+            continue
+        pieces, ok = [], True
+        for kk in (0, 1):
+            mk = np.zeros(m.shape, np.uint8)
+            mk[m] = (lbl.ravel() == kk)
+            mk = cv2.morphologyEx(mk, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            nk, lk, st, _ = cv2.connectedComponentsWithStats(mk, connectivity=8)
+            big = [j for j in range(1, nk) if st[j, cv2.CC_STAT_AREA] >= min_px]
+            if not big or len(big) > 4 or sum(st[j, cv2.CC_STAT_AREA] for j in big) < 0.85 * max(mk.sum(), 1):
+                ok = False
+                break
+            for j in big:
+                pc = lk == j
+                cs_, _ = cv2.findContours(pc.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if min(cv2.minAreaRect(max(cs_, key=cv2.contourArea))[1]) < min_side_px:
+                    ok = False
+                pieces.append(pc)
+            if not ok:
+                break
+        if ok and len(pieces) >= 2:
+            todo += pieces
+        else:
+            out.append(m)
+    return out
+
+
+# --------------------------------------------------------------------------
+
 _FEATURE_MIN_SPREAD = (2.0, 1.5, 1.5, 0.12)    # L, a, b, log edge energy: floor noise never below this
 _FEATURE_WEIGHT = (0.7, 1.0, 1.0, 1.0)         # lightness counts a bit less (shading, shadows)
 
@@ -1120,14 +1280,16 @@ def appearance_mask(rect, vis, ppc, res, z_thr=5.0, win_m=0.025):
     # color / lightness was within 2 (gray, black) of it.
     gx = cv2.Sobel(lab[..., 0], cv2.CV_32F, 1, 0)
     gy = cv2.Sobel(lab[..., 0], cv2.CV_32F, 0, 1)
-    stack = np.dstack([lab, cv2.magnitude(gx, gy)])
-    f = max(1, int(round(0.008 / res)))                    # downsample factor to ~8 mm cells
-    if f > 1:
-        size = (max(1, full_shape[1] // f), max(1, full_shape[0] // f))
-        stack = cv2.resize(stack, size, interpolation=cv2.INTER_AREA)
+    mag = cv2.magnitude(gx, gy)
+    scale = res / 0.008                                    # resample to 8 mm cells (any map resolution)
+    if scale < 0.95:
+        size = (max(1, int(round(full_shape[1] * scale))), max(1, int(round(full_shape[0] * scale))))
+        lab = cv2.resize(lab, size, interpolation=cv2.INTER_AREA)
+        mag = cv2.resize(mag, size, interpolation=cv2.INTER_AREA)
         vis = cv2.resize(vis.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
         ppc = cv2.resize(ppc, size, interpolation=cv2.INTER_AREA)
-        res = res * f
+        res = res * full_shape[1] / size[0]
+    stack = np.dstack([lab, mag])
     k = max(3, int(round(win_m / res)) | 1)
     # stay 2 windows away from the edge of the view: border cells mix in black / smeared pixels
     valid = cv2.erode(vis.astype(np.uint8), np.ones((2 * k + 1, 2 * k + 1), np.uint8)) > 0
@@ -1143,7 +1305,7 @@ def appearance_mask(rect, vis, ppc, res, z_thr=5.0, win_m=0.025):
         if sel.sum() < 100:
             continue
         idx = np.flatnonzero(sel)
-        sub = idx[:: max(1, len(idx) // 20000)]            # statistics from a subsample: fast
+        sub = idx[:: max(1, len(idx) // 6000)]             # statistics from a subsample: fast
         for j, (feat, wgt, lo_) in enumerate(zip(feats, _FEATURE_WEIGHT, _FEATURE_MIN_SPREAD)):
             v = feat.ravel()[sub]
             med = float(np.median(v))
@@ -1156,10 +1318,7 @@ def appearance_mask(rect, vis, ppc, res, z_thr=5.0, win_m=0.025):
             z[sel] = np.maximum(z[sel], wgt * d / mad)
     mask = (z > z_thr) & valid
     if mask.shape != full_shape:
-        up = cv2.resize(mask.astype(np.uint8), (full_shape[1] // f * f, full_shape[0] // f * f),
-                        interpolation=cv2.INTER_NEAREST)
-        mask = np.zeros(full_shape, bool)
-        mask[:up.shape[0], :up.shape[1]] = up > 0
+        mask = cv2.resize(mask.astype(np.uint8), (full_shape[1], full_shape[0]), interpolation=cv2.INTER_NEAREST) > 0
     return mask
 
 

@@ -370,8 +370,12 @@ class FloorTracker:
             else:
                 t = self.tracks[best]
                 a, sa = self.alpha, self.size_alpha
-                t["x"] += a * (cx - t["x"])
-                t["y"] += a * (cy - t["y"])
+                # adaptive: a still object is smoothed fully, a moving one (> 3 cm since the last
+                # update) is followed without lag
+                d = math.hypot(cx - t["x"], cy - t["y"])
+                ap = a + (1 - a) * min(1.0, max(0.0, (d - 0.005) / 0.025))
+                t["x"] += ap * (cx - t["x"])
+                t["y"] += ap * (cy - t["y"])
                 t["length"] += sa * (L - t["length"])
                 t["width"] += sa * (Wd - t["width"])
                 n = self._sym(t)                      # average n*angle on the circle
