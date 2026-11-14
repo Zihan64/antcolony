@@ -1,0 +1,156 @@
+{
+  "family": "tag36h11",
+  "tag_size": 0.1,
+  "floor_tags": {
+    "29": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw_deg": 175.632
+    },
+    "32": {
+      "x": 1.85972,
+      "y": -0.0,
+      "z": 0.0,
+      "yaw_deg": 175.465
+    },
+    "31": {
+      "x": 1.76975,
+      "y": 1.02123,
+      "z": 0.0,
+      "yaw_deg": 7.714
+    },
+    "30": {
+      "x": 0.04626,
+      "y": 0.99713,
+      "z": 0.0,
+      "yaw_deg": 169.957
+    }
+  },
+  "objects": {},
+  "tags_on_floor": true,
+  "arena": {
+    "corner_ids": [
+      29,
+      32,
+      31,
+      30
+    ],
+    "tape_m": null,
+    "width_m": null,
+    "height_m": null,
+    "focal_px": 1010.37,
+    "positions": null,
+    "margin_m": 0.0,
+    "max_range_m": 4.0,
+    "max_extent_m": 6.0,
+    "min_px_per_cell": 0.35,
+    "unknown_blocked": true,
+    "map_resolution_m": null,
+    "plan_resolution_m": 0.01,
+    "robot_id": null,
+    "robot_radius_m": 0.1,
+    "obstacle_threshold": 30,
+    "min_obstacle_area_m2": 0.0004,
+    "appearance_z": 5.0,
+    "route_switch_rel": 0.1,
+    "route_switch_m": 0.05,
+    "layout": {
+      "origin": 29,
+      "x": 32,
+      "y": 30,
+      "opposite": 31
+    },
+    "k1": 0.0,
+    "focal_at_px": [
+      1280,
+      720
+    ]
+  },
+  "tag_sizes": {},
+  "_arena_report": {
+    "layout": {
+      "origin": 29,
+      "x": 32,
+      "y": 30,
+      "opposite": 31
+    },
+    "corner_ids": [
+      29,
+      32,
+      31,
+      30
+    ],
+    "camera_distance_m": {
+      "32": 1.8597,
+      "30": 0.9982
+    },
+    "tape_m": {},
+    "fit_px_free": 0.531,
+    "focal_free_px": 1010.37,
+    "source": "printed tag sizes (no tape yet): enter tape distances 29->32 and 29->30 for a precise scale",
+    "tags": {
+      "29": {
+        "xy_m": [
+          0.0,
+          0.0
+        ],
+        "camera_saw_xy_m": [
+          0.0,
+          0.0
+        ],
+        "yaw_deg": 175.63
+      },
+      "32": {
+        "xy_m": [
+          1.8597,
+          -0.0
+        ],
+        "camera_saw_xy_m": [
+          1.8597,
+          -0.0
+        ],
+        "yaw_deg": 175.46
+      },
+      "31": {
+        "xy_m": [
+          1.7698,
+          1.0212
+        ],
+        "camera_saw_xy_m": [
+          1.7698,
+          1.0212
+        ],
+        "yaw_deg": 7.71
+      },
+      "30": {
+        "xy_m": [
+          0.0463,
+          0.9971
+        ],
+        "camera_saw_xy_m": [
+          0.0463,
+          0.9971
+        ],
+        "yaw_deg": 169.96
+      }
+    },
+    "warnings": [],
+    "fit_px": 0.531,
+    "focal_px": 1010.37,
+    "focal_estimated": true,
+    "k1": 0.0,
+    "camera_height_m": 1.8445,
+    "plane_rms_mm": 0.0,
+    "focal_estimate": {
+      "f_px": 1010.37,
+      "f_mm_full_frame": 28.34
+    },
+    "mm_per_camera_pixel": {
+      "c0": 2.66,
+      "c1": 2.16,
+      "c2": 3.75,
+      "c3": 3.77
+    }
+  }
+}
