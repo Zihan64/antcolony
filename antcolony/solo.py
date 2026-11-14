@@ -112,6 +112,7 @@ def main():
     ap.add_argument("--labels", help='several objects, one after the other: "red block,red block" or "red block,blue block". '
                                      "The steps run once per object; between two objects the car backs away from the tray")
     ap.add_argument("--away-cm", type=float, default=25, help="how far to back away from the tray before the next object")
+    ap.add_argument("--scan", choices=["left", "right"], help="find: which way to turn while searching (default left)")
     ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
     ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
     ap.add_argument("--obj-height", type=float, help="cm, if the object is a block of known height (skips the shape guess)")
@@ -186,8 +187,10 @@ def main():
                 sys.exit(3)
         elif step == "find":                     # turn to the object to grab (found by its colour) and drive up close
             say(f"find: '{a.label}' ...")
-            ok, detail, secs = link.skill("seek", {"target": a.label, "detector": "colour", "bottom_stop": a.find_bottom,
-                                                   "stop_cm": 12}, 390)
+            fargs = {"target": a.label, "detector": "colour", "bottom_stop": a.find_bottom, "stop_cm": 12}
+            if a.scan:
+                fargs["scan"] = a.scan
+            ok, detail, secs = link.skill("seek", fargs, 390)
             say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
             if not ok:
                 sys.exit(6)

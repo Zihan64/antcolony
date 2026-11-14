@@ -38,11 +38,11 @@ class Clock:
 
 
 class FakeCar(hw_masterpi.MasterPi):
-    def __init__(self, box, heading=0.0, turn_deg_s=140.0, turn_sign=1, sonar_sees=True, miss_every=0, cancel_at=None):
+    def __init__(self, box, heading=0.0, turn_deg_s=250.0, turn_sign=1, sonar_sees=True, miss_every=0, cancel_at=None):
         self.box, self.th = box, math.radians(heading)            # heading 0 = facing +y
         self.x = self.y = 0.0
         self.turn_rate, self.turn_sign, self.sonar_sees, self.miss_every = math.radians(turn_deg_s), turn_sign, sonar_sees, miss_every
-        self.v, self.w, self.vs, self.hit, self.looks, self.posed = 0.0, 0.0, 0.0, False, 0, 0
+        self.v, self.w, self.vs, self.hit, self.looks, self.posed, self.spin = 0.0, 0.0, 0.0, False, 0, 0, 0.0
         self.cancel, self.cancel_at = threading.Event(), cancel_at
         self.sonar_sees_set = True
         self.gives_dist, self.dist_err, self.closest = True, 1.0, 1e9
@@ -58,13 +58,18 @@ class FakeCar(hw_masterpi.MasterPi):
     def set_velocity(self, vx, vy, w):
         self.v = math.copysign(17.0, vx) if abs(vx) > 0.02 else 0.0
         self.vs = math.copysign(15.0, vy) if abs(vy) > 0.02 else 0.0     # sliding left (+) / right
-        self.w = math.copysign(self.turn_rate, w) * self.turn_sign if abs(w) > 0.02 else 0.0
+        w_new = math.copysign(self.turn_rate, w) * self.turn_sign if abs(w) > 0.02 else 0.0
+        if w_new and not self.w:
+            self.spin = 0.0                                       # a turn pulse starts: nothing moves for the first 0.12 s
+        self.w = w_new
 
     def stop(self):
         self.v = self.w = self.vs = 0.0
 
     def move(self, h):
-        self.th += self.w * h
+        if self.w:
+            self.spin += h
+        self.th += self.w * h if self.spin > 0.12 else 0.0
         self.x += -math.sin(self.th) * self.v * h - math.cos(self.th) * self.vs * h
         self.y += math.cos(self.th) * self.v * h - math.sin(self.th) * self.vs * h
         b, d = self.rel()
@@ -116,8 +121,8 @@ CASES = [
     ("box to the right, outside the picture", (60, 40), {}, {}, lambda c, ok: ok and near(c)),
     ("box behind the car", (10, -80), {}, {}, lambda c, ok: ok and near(c)),
     ("box already right in front (20 cm)", (0, 32), {}, {}, lambda c, ok: ok and near(c) and math.hypot(c.x, c.y) < 3),
-    ("the car turns half as fast as guessed", (-60, 60), {}, {"turn_deg_s": 55}, lambda c, ok: ok and near(c)),
-    ("the car turns twice as fast as guessed", (-60, 60), {}, {"turn_deg_s": 230}, lambda c, ok: ok and near(c)),
+    ("the car turns half as fast as guessed", (-60, 60), {}, {"turn_deg_s": 120}, lambda c, ok: ok and near(c)),
+    ("the car turns twice as fast as guessed", (-60, 60), {}, {"turn_deg_s": 450}, lambda c, ok: ok and near(c)),
     ("the car turns the other way round", (-50, 60), {}, {"turn_sign": -1}, lambda c, ok: ok and near(c)),
     ("the sonar never sees the box: stops by the picture", (0, 80), {}, {"sonar_sees": False}, lambda c, ok: ok and near(c, 8, 40)),
     ("the VLM misses the box every third look", (-30, 90), {}, {"miss_every": 3}, lambda c, ok: ok and near(c)),

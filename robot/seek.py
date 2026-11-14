@@ -7,7 +7,7 @@ drop. No tracker. The loop is look - move - look:
 
   look    arm raised so the camera looks out across the floor (VIEW; the gripper servo is not
           touched: what it holds stays held), one photo, the VLM on the laptop boxes the target (~3 s)
-  not seen    turn left about 20-30 deg and look again (gives up after a full turn per camera view)
+  not seen    turn left about 30 deg and look again (gives up after a full turn per camera view)
   off centre  turn towards it (short timed pulse; the turn rate - and its sign - are learned
           from how far the target moved in the picture)
   centred     drive forward in short pulses, reading the front sonar at rest before each one,
@@ -70,12 +70,19 @@ HUES = {"red": [(0, 9), (171, 180)], "orange": [(8, 22)], "yellow": [(20, 35)], 
         "blue": [(90, 130)], "purple": [(125, 155)], "pink": [(150, 172)]}     # OpenCV hue, 0..180
 
 
+def vivid_mask(hsv):
+    """Strongly coloured pixels: saturated, or - for a light block in bright light - less saturated but
+    very bright (2026-11-14: a sky-blue block read S 113, V 247 and was missed at S > 140; the carpet's
+    teal stripes and a blue-white bottle have the same hue but V under 175)."""
+    return ((hsv[:, :, 1] > 140) & (hsv[:, :, 2] > 110)) | ((hsv[:, :, 1] > 90) & (hsv[:, :, 2] > 200))
+
+
 def colour_blob(cv2, np, frame, name):
     """Biggest vivid blob of the colour named in `name` ("red block"; no colour word = any vivid
     colour). -> (x1, y1, x2, y2) or None. Carpet, wood, paper and white things are not vivid.
     A blob with white all round it is skipped: that is an object already lying in the tray."""
     hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    vivid = (hsv[:, :, 1] > 140) & (hsv[:, :, 2] > 110)
+    vivid = vivid_mask(hsv)
     rng = next((v for k, v in HUES.items() if k in name.lower()), None)
     if rng:
         hue = np.zeros(vivid.shape, bool)
@@ -102,6 +109,28 @@ def colour_blob(cv2, np, frame, name):
 
 IN_TRAY = 0.35                                # share of smooth, uncoloured surface around a coloured blob that means "it lies
                                               # in the tray" (photos 2026-11-14: in the tray 0.75-0.82, on the carpet 0.00-0.04)
+
+
+def colour_name(hue):
+    """OpenCV hue (0..180) -> the colour word used in HUES."""
+    return next((k for k, v in HUES.items() if any(lo <= hue <= hi for lo, hi in v)), "coloured")
+
+
+def vivid_blobs(cv2, np, frame):
+    """Every vivid thing in the picture that is not lying in the tray: [{"colour", "box", "area"}], biggest first."""
+    hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0), cv2.COLOR_BGR2HSV)
+    m = cv2.morphologyEx(vivid_mask(hsv).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    out = []
+    for i in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[i])
+        if not 40 <= area <= 0.25 * m.size:
+            continue
+        name = colour_name(float(np.median(hsv[:, :, 0][lab == i])))
+        if colour_blob(cv2, np, frame[max(0, y - h): y + 2 * h, max(0, x - w): x + 2 * w], name) is None:
+            continue                                      # white all round it: already in the tray
+        out.append({"colour": name, "box": (x, y, x + w, y + h), "area": area})
+    return sorted(out, key=lambda b: -b["area"])
 
 
 def open_cam(cv2):
@@ -188,6 +217,32 @@ class Eye:
         self.cv2.imwrite(os.path.join(HERE, f"seek_{self.n:02d}.jpg"), frame)       # every look, for afterwards
         return out
 
+    def survey(self):
+        """One sharp photo, every vivid thing in it: [{"colour", "bearing", "dist", "px"}]. Saved like see()."""
+        frame = None
+        for attempt in range(4):
+            for _ in range(10 if attempt == 0 else 5):
+                ok, f = self.cap.read()
+                if ok:
+                    frame = f
+            if frame is None:
+                raise RuntimeError("camera: no picture (USB cable?)")
+            if self.cv2.Laplacian(self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY), self.cv2.CV_64F).var() >= 200:
+                break
+            time.sleep(0.4)
+        h, w = frame.shape[:2]
+        fx, out = (w / 2) / math.tan(math.radians(HFOV_DEG / 2)), []
+        for b in vivid_blobs(self.cv2, self.np, frame):
+            x1, y1, x2, y2 = b["box"]
+            out.append({"colour": b["colour"], "bearing": math.degrees(math.atan((w / 2 - (x1 + x2) / 2) / fx)),
+                        "dist": floor_cm(self.geom, y2, h) if self.geom else None, "px": (x2 - x1, y2 - y1)})
+            self.cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (255, 255, 255), 1)
+            self.cv2.putText(frame, b["colour"], (x1 - 3, max(12, y1 - 6)), self.cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        self.n += 1
+        self.cv2.imwrite(os.path.join(HERE, "seek.jpg"), frame)
+        self.cv2.imwrite(os.path.join(HERE, f"seek_{self.n:02d}.jpg"), frame)
+        return out
+
     def close(self):
         self.cap.release()
         self.vlm.model_size.__defaults__ = self.tokens0
@@ -198,11 +253,15 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     target = str(args.get("target", "white box"))
     stop_cm = float(args.get("stop_cm", 22))
     tol = float(args.get("tol_deg", 7))
-    rate = float(args.get("turn_deg_s", 110))             # first guess, re-measured after every turn
+    # Turning on the spot: nothing happens for the first ~0.12 s of a pulse, then about 250 deg/s (car B on
+    # carpet, 2026-11-14: 0.18 s pulses turned 9 deg, 0.27 s pulses 36 deg). The rate is re-measured after every turn.
+    rate, dead = float(args.get("turn_deg_s", 250)), float(args.get("turn_dead_s", 0.12))
     w_cmd, u = float(args.get("w", 0.3)), float(args.get("u", 0.05))
     cm_s, step = float(args.get("cm_s", 17)), float(args.get("step_s", 0.33))
     seg, max_cm = float(args.get("seg_cm", 30)), float(args.get("max_cm", 200))
-    scan_deg, max_scans = float(args.get("scan_deg", 20)), int(args.get("max_scans", 20))   # car B really turns ~1.5x the guess
+    scan_deg, max_scans = float(args.get("scan_deg", 30)), int(args.get("max_scans", 15))
+    if args.get("scan") == "right":                      # search turning right instead of left
+        scan_deg = -scan_deg
     timeout = float(args.get("timeout", 360))
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
@@ -212,7 +271,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
 
     def turn(deg):
         """Turn about `deg` (+ = left) with one timed pulse. -> seconds it lasted."""
-        t = min(0.6, max(0.08, abs(deg) / rate))
+        t = min(0.6, dead + max(0.02, abs(deg) / rate))
         hw.set_velocity(0.0, 0.0, math.copysign(w_cmd, deg) * sign)
         t_end = time.monotonic() + t
         while time.monotonic() < t_end and not cancel.is_set():
@@ -229,6 +288,17 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
         return ok, detail
 
     try:
+        if args.get("survey"):                            # look all round, drive nowhere: what coloured things are there?
+            seen = {}
+            for k in range(int(args.get("views", 14))):
+                if cancel.is_set():
+                    return finish(False, "cancelled")
+                for b in eye.survey():
+                    seen[b["colour"]] = seen.get(b["colour"], 0) + 1
+                    say(f"view {k + 1}: {b['colour']} thing {abs(b['bearing']):.0f} deg {'left' if b['bearing'] > 0 else 'right'}, "
+                        f"about {b['dist'] if b['dist'] is None else round(b['dist'])} cm, {b['px'][0]}x{b['px'][1]} px")
+                turn(scan_deg)
+            return finish(True, "survey: " + (", ".join(f"{c} in {n} views" for c, n in seen.items()) or "nothing coloured"))
         while True:
             if cancel.is_set():
                 return finish(False, f"cancelled after {drove:.0f} cm")
@@ -252,7 +322,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                         scans = 0
                         continue
                     return finish(False, f"'{target}' not found in a full turn ({looks} looks)")
-                say(f"look {looks}: '{target}' not in the picture - turning left")
+                say(f"look {looks}: '{target}' not in the picture - turning {'left' if scan_deg > 0 else 'right'}")
                 turn(scan_deg)
                 scans, last, had = scans + 1, None, False
                 continue
@@ -264,7 +334,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                     sign = -sign
                     say(f"the car turned the other way ({did:+.0f} deg for {asked:+.0f}) - swapping the turn direction")
                 elif abs(did) > 2:
-                    rate = max(30.0, min(300.0, 0.5 * rate + 0.5 * abs(did) / secs))
+                    rate = max(60.0, min(500.0, 0.5 * rate + 0.5 * abs(did) / max(0.02, secs - dead)))
                     if b * b0 < 0 and abs(b) <= 14:       # the shortest pulse overshoots: this is as good as it gets
                         tol = max(tol, abs(b) + 1)        # (the sonar beam is +-15 deg, and we look again on the way)
                 last = None
