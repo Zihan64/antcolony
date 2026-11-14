@@ -36,7 +36,7 @@ class Driver:
         if abs(e) < c["ang_tol"]:
             return dict(ZERO), True
         if abs(e) > c["fine_ang"]:
-            return vel(0, 0, sgn(e) * clamp(0.7 * abs(e), c["u_min"], 1.0)), False
+            return vel(0, 0, sgn(e) * clamp(0.7 * abs(e), c["u_min"], c.get("w_max", 1.0))), False
         dur = clamp(0.8 * abs(e) / self.rate, 0.06, 0.4)
         self.pulse = (now + dur + c["settle_s"], pose[2], dur)
         return vel(0, 0, sgn(e) * c["u_min"], dur=dur), False
@@ -67,7 +67,8 @@ class Driver:
                         return cmd, False
                 self.turning, self.pulse = False, None
                 v = clamp(c["k_v"] * d, c["u_min"], c["u_max"]) * max(0.2, math.cos(a))
-                return vel(v, 0, clamp(c["k_w"] * a, -1, 1)), False
+                wm = c.get("w_max", 1.0)                    # control.w_max: cap on the turn command (real cars spin fast)
+                return vel(v, 0, clamp(c["k_w"] * a, -wm, wm)), False
         if final_th is None:
             return dict(ZERO), True
         return self.turn_to(pose, final_th, now)

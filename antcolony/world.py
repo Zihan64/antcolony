@@ -36,6 +36,9 @@ class Robot:
         self.mask_r = rc.get("mask_r", 0.22 if self.role == "arm" else rc.get("blade_fwd", 0.14) - 0.02)
         self.height = rc.get("height", 0.35 if self.role == "arm" else 0.12)   # tallest part above the floor, m
         self.shadow_r = rc.get("shadow_r", 0.12)       # half width of what that tall part covers (the arm column)
+        # where the tall part is: metres ahead of the centre. The arm rests stretched forward
+        # (hw_masterpi CARRY), so its shadow starts in front of the car, not at its centre
+        self.arm_at = rc.get("arm_at", (0.0, 0.07, 0.14, 0.21) if self.role == "arm" else (0.0,))
 
     def set_tag(self, x, y, h, now):
         """Tag pose -> pose of the chassis centre, using this robot's calibration."""
@@ -155,14 +158,17 @@ class World:
                 return True
             cam = self.camera
             if cam and cam[2] > r.height + 0.2:
-                # the robot's top, seen from the camera, lands on the floor this far behind it; only
-                # the arm column is that tall, so the strip is narrow (shadow_r), not the body's width
+                # a point `height` up, seen from the camera, lands on the floor this far behind where
+                # it stands. Only the arm is that tall, so the strips are narrow (shadow_r), one from
+                # each of a few points along the arm (centre ... gripper)
                 k = r.height / (cam[2] - r.height)
-                ex, ey = r.x + (r.x - cam[0]) * k, r.y + (r.y - cam[1]) * k
-                dx, dy = ex - r.x, ey - r.y
-                t = clamp(((p[0] - r.x) * dx + (p[1] - r.y) * dy) / max(dx * dx + dy * dy, 1e-9), 0.0, 1.0)
-                if dist(p, (r.x + t * dx, r.y + t * dy)) < r.shadow_r + pad:
-                    return True
+                c, s = math.cos(r.th), math.sin(r.th)
+                for f in r.arm_at:
+                    ax, ay = r.x + c * f, r.y + s * f
+                    dx, dy = (ax - cam[0]) * k, (ay - cam[1]) * k
+                    t = clamp(((p[0] - ax) * dx + (p[1] - ay) * dy) / max(dx * dx + dy * dy, 1e-9), 0.0, 1.0)
+                    if dist(p, (ax + t * dx, ay + t * dy)) < r.shadow_r + pad:
+                        return True
         return False
 
     # ------------------------------------------------------------------ update
@@ -217,6 +223,8 @@ class World:
                 self.objects.append(Obj(d, now, self.oc["default_size"]))
 
         for o in list(self.objects):
+            if o.state == "free" and o.cls == "push":    # first sized too big (merged with a shadow, ...): look again
+                o.cls = self.classify(o)
             if o.state == "new":
                 if o.hits >= self.oc["min_hits"]:
                     o.state, o.cls = "free", self.classify(o)

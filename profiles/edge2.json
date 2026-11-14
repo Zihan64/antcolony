@@ -34,5 +34,11 @@
     "grasp_max_long": 0.20
   },
 
-  "alloc": {"spacing": 0.30}
+  "alloc": {"spacing": 0.30},
+
+  "control": {
+    "_why": "measured 2026-11-14: the arm cars cover 30 cm/s at command 0.3 and turn 70-125 deg/s at the smallest turn command; the simulator's cars are about 4x slower. Keep the commands low until the controller has been tuned on the real cars.",
+    "u_max": 0.35,
+    "w_max": 0.5
+  }
 }

@@ -43,7 +43,10 @@ def _tag(bus, tag, wait, n=5):
 
 
 def _run(bus, name, tag, cmd, secs, wait, samples=None, until_turn=None):
-    t, turned, last = 0.0, 0.0, None
+    """Send `cmd` for `secs` (or until the tag has turned `until_turn`). The robot is stopped at
+    once if the tracker loses the tag for more than 0.5 s: it must never keep moving unseen
+    (2026-11-14: car A left the arena during a 5 s turn nobody could see)."""
+    t, turned, last, unseen = 0.0, 0.0, None, 0.0
     while t < secs:
         bus.send(name, dict(cmd, type="vel", guard=False))
         wait(0.1)
@@ -51,11 +54,18 @@ def _run(bus, name, tag, cmd, secs, wait, samples=None, until_turn=None):
         s = bus.world()
         if s and tag in s.get("tags", {}):
             p = s["tags"][tag]
+            unseen = 0.0
             if samples is not None:
                 samples.append(p)
             if last is not None:
                 turned += wrap(p[2] - last)
             last = p[2]
+        else:
+            unseen += 0.1
+            if unseen > 0.5:
+                bus.send(name, dict(ZERO, type="vel"))
+                raise RuntimeError(f"tag {tag} lost while {name} was moving ({cmd}) - stopped after {t:.1f} s. "
+                                   f"Is the tag hidden at this heading, or did the robot leave the camera's view?")
         if until_turn and abs(turned) >= until_turn:
             break
     bus.send(name, dict(ZERO, type="vel"))

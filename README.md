@@ -85,7 +85,8 @@ The coordinator can run on either computer; on the camera computer the tag data 
 3. **Tags.** Put the tag id that is on each car into `robots.A.tag` / `robots.B.tag` in `config.json` (defaults 10 and 11). In the tracker's `arena.json` give each car's tag its height so it is located precisely: `"objects": {"10": {"name": "car A", "height_m": 0.17}, "11": {"name": "car B", "height_m": 0.17}}` (tag face above the floor, measure it).
 4. **Tracker (computer 2).** `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
 5. **Cars.** Copy the current `robot/agent.py` and `robot/hw_masterpi.py` next to `vlm_grab.py`, then on each car: `python3 agent.py --name A --min-duty 30` (`--name B` on B; 30 on carpet).
-6. **Drive calibration**, one car at a time, alone in the middle with ~50 cm free: `python -m antcolony.calibrate --robot A --u 0.3` (then B). The default `--u 0.6` makes larger test moves than a 1.5 × 1.2 m arena may allow; start with 0.3 and raise it if the tool says the car barely moved (not tried on the real cars yet). Saves `calib/A.json`.
+6. **Drive calibration**, one car at a time with ~50 cm free around it: `python -m antcolony.calibrate --robot A --u 0.3 --fwd-secs 0.8 --strafe-secs 0.8` (then B). The arm cars cover about 30 cm per second on carpet, so the default 1.5 s moves are too long for a 1 m wide arena. The car is stopped at once if the tracker loses its tag. Saves `calib/A.json`. Done for A and B on 2026-11-14 (tag 8.5 cm behind the turning centre on both).
+   If a car does something odd, look at one short move at a time first: `python -m antcolony.jog --robot A --w 0.3 --secs 0.4` (also `--vx`, `--vy`) prints how far the tag moved and turned.
 7. **Check.** `python -m antcolony.check --overlay profiles/edge2.json --vlm http://<computer 1>:8090` — nothing moves; it lists what is missing (tracker data, a car's tag, calibration, agent, VLM, objects too big or already at the edge).
 
 ### Run
@@ -101,6 +102,13 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 - Each car parks 30 cm in front of its block, `vlm_grab.py approach` does the rest, the car carries the block to the nearest free place at the boundary, puts it down 8 cm inside it (`deliver.inset`), backs off and returns to where it started. The cars stay off the paper floor tags.
 - The log shows `missed #3: ... (try 2 of 5) - trying again`, `GIVES UP on #3 after 5 missed grabs`, and at the end `FINISHED in 94 s - A: 1 delivered, B: gave up`.
 - If the tracker does not detect the small blocks reliably, type their positions (tracker frame, metres; hover over them in the tracker GUI): `--objects 0.50,0.40 1.00,0.70`. The tracker's own detections are then ignored; the cars' cameras still do the final approach.
+
+### What the first hours with the real tracker and cars showed (2026-11-14)
+
+- **The camera looks at a slant** (1.84 m up, beside the arena). Parts of a 35 cm tall car land on the floor up to 40–60 cm behind it as seen from the camera, and the tracker reported them as objects (18 "objects" for two cars and two blocks). The tracker now sends the camera position and the coordinator ignores detections in each car's shadow (`World.hidden`). Consequences: a block in a car's shadow is invisible until the car moves, so **park the cars on the side away from the camera** and do not put blocks right behind them.
+- **The arm must rest stretched forward.** `arm.home()` folds it back over the chassis, above the tag; the tag was then visible only while the camera was behind the car. `hw_masterpi.py` now uses the carry pose as its rest pose.
+- Tags: A = 33, B = 36 (in `config.json`). Both are located with the plane method at their height (11–13 cm).
+- Speeds: about 0.30 m/s at command 0.3; turning 70–125°/s at the smallest turn command. `profiles/edge2.json` caps the commands (`control.u_max` 0.35, `control.w_max` 0.5).
 
 ### Known gaps (found in the review, not fixable in software alone)
 
@@ -118,7 +126,7 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 | C (dozer) | WhiteSky (172.20.1.136) | szk13579 | `~/antcolony/` | wheels, drive, sonar stop (35 cm) tested on the floor; camera (Camera Module 3 Wide) and pan/tilt servos (PCA9685 ch 8/9) work; blade not mounted yet |
 
 Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
-- `chassis.py`: `mirror_lr` in `motor_directions.json` (left/right motor wiring swapped);
+- `chassis.py`: `wheels` in `motor_directions.json` = which board port drives which wheel: `{"FL": 3, "FR": 1, "RL": 4, "RR": 2}` (2026-11-14, backups `*.before_wheelmap`). On A, ports 1 and 3 are the right and left wheel of ONE axle, not the two wheels of one side. The earlier `mirror_lr` patch did not cover that: "rotate" drove the front axle forward and the rear axle back, so the car crept forward or back instead of turning (measured with the overhead tracker: 0.7 s "turn right" = 8 cm backwards, 2° of turn; after the fix 0.4 s = 37–50° on the spot). Driving straight never showed it because all four wheels turn the same way;
 - `arm.py`: `ports` in `arm_directions.json` (servo 3 is plugged into port 2).
 
 The originals are saved next to them as `chassis.py.orig` / `arm.py.orig`. A currently uses B's `vision_calib.json`; recalibrate A's camera if its grasps are off.
@@ -233,6 +241,7 @@ antcolony/triage.py       decides grippability by size; optionally asks a VLM as
 antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
+antcolony/jog.py          one short move of one robot, measured by the tracker
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
 antcolony/sim.py          simulator (plays both camera and robots)
