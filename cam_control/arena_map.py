@@ -99,6 +99,8 @@ ARENA_DEFAULTS = {
     "obstacle_threshold": 30,         # color difference vs empty floor that counts as obstacle
     "min_obstacle_area_m2": 0.0004,   # ignore blobs smaller than 2 x 2 cm
     "appearance_z": 5.0,              # object = this many robust std devs unlike the floor
+    "route_switch_rel": 0.10,         # keep the current route unless a new one is this much shorter
+    "route_switch_m": 0.05,           #   ... plus this (hysteresis: no flipping between twin routes)
 }
 
 
@@ -1278,9 +1280,11 @@ def _segment_free(blocked, amap, cell, p, q):
     return True
 
 
-def astar(blocked, start, goal):
+def astar(blocked, start, goal, penalty=None):
     """8-connected A* on a bool grid (True = blocked). start/goal = (col, row).
-    Returns a list of (col, row) or None. No corner cutting past blocked cells."""
+    Returns a list of (col, row) or None. No corner cutting past blocked cells.
+    penalty: optional per-cell extra cost factor >= 0 (a step into a cell costs
+    step * (1 + penalty)); it never lowers a cost, so the heuristic stays admissible."""
     H, W = blocked.shape
     sc, sr = start
     gc, gr = goal
@@ -1315,7 +1319,7 @@ def astar(blocked, start, goal):
                 continue
             if dc and dr and (blocked[r, nc] or blocked[nr, c]):
                 continue
-            ng = gc_ + cost
+            ng = gc_ + (cost if penalty is None else cost * (1.0 + penalty[nr, nc]))
             if ng < g[nr, nc]:
                 g[nr, nc] = ng
                 parent[nr, nc] = r * W + c
@@ -1323,7 +1327,7 @@ def astar(blocked, start, goal):
     return None
 
 
-def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, blocked=None):
+def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, blocked=None, penalty=None):
     """A* from start to goal in arena meters. Returns a dict with
     status ("ok", "no_path", "start_blocked"...), waypoints [(x, y)], length_m, raw cell path."""
     if blocked is None:
@@ -1353,7 +1357,7 @@ def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, bl
         g = g2
         moved["goal"] = True
     t0 = time.perf_counter()
-    cells = astar(blocked, s, g)
+    cells = astar(blocked, s, g, penalty)
     dt = (time.perf_counter() - t0) * 1e3
     if cells is None:
         return {"status": "no_path", "waypoints": [], "length_m": None, "notes": notes, "ms": dt}
@@ -1387,7 +1391,21 @@ def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, bl
             "length_m": round(length, 4), "cells": cells, "notes": notes, "ms": round(dt, 1)}
 
 
-def plan_route(amap, points, plan_res=None, blocked=None, occ=None):
+def corridor_penalty(prev_waypoints, amap, shape, cell, weight=0.15, width_m=0.06):
+    """Per-cell A* cost penalty: 0 within width_m of the previous route, `weight` elsewhere.
+    With it a replan keeps to the previous corridor unless another way is more than ~weight
+    (15 %) shorter: two near-equal routes no longer swap because of a 1 cm wobble."""
+    line = np.zeros(shape, np.uint8)
+    pts = np.array([_w2g(amap, p_, cell) for p_ in prev_waypoints], np.int32)
+    if len(pts) >= 2:
+        cv2.polylines(line, [pts], False, 1, 1)
+    if not line.any():
+        return None
+    dist = cv2.distanceTransform(1 - line, cv2.DIST_L2, 3) * cell
+    return np.where(dist > width_m, np.float32(weight), np.float32(0.0))
+
+
+def plan_route(amap, points, plan_res=None, blocked=None, occ=None, prefer=None, prefer_weight=0.15):
     """A* through several points in order (start, stops..., goal), like a route with
     intermediate stops. Every leg is planned on the same grid and the legs are joined.
     Returns plan_path's fields for the whole route plus "legs" [{waypoints, length_m}]; if a leg
@@ -1395,12 +1413,14 @@ def plan_route(amap, points, plan_res=None, blocked=None, occ=None):
     if blocked is None:
         blocked, plan_res = planning_grid(occ, amap, plan_res=plan_res)
     n = len(points)
+    # prefer: the previous route's waypoints; stay in its corridor unless clearly worse
+    penalty = corridor_penalty(prefer, amap, blocked.shape, plan_res, prefer_weight) if prefer else None
 
     def name(i):
         return "start" if i == 0 else ("goal" if i == n - 1 else f"stop {i}")
     legs, wps, notes, total, ms = [], [], [], 0.0, 0.0
     for i, (a, b) in enumerate(zip(points, points[1:])):
-        p = plan_path(None, amap, a, b, plan_res=plan_res, blocked=blocked)
+        p = plan_path(None, amap, a, b, plan_res=plan_res, blocked=blocked, penalty=penalty)
         ms += p.get("ms") or 0.0
         notes += [f"leg {i + 1}: {t}" for t in p.get("notes", [])]
         if p["status"] != "ok":
@@ -1411,6 +1431,86 @@ def plan_route(amap, points, plan_res=None, blocked=None, occ=None):
         total += p["length_m"]
     return {"status": "ok", "waypoints": wps, "length_m": round(total, 4), "legs": legs, "notes": notes,
             "ms": round(ms, 1)}
+
+
+def _polyline_length(pts):
+    return float(sum(math.dist(a, b) for a, b in zip(pts, pts[1:])))
+
+
+def _trim_to(pts, p, max_off):
+    """The rest of polyline pts from the point closest to p on, starting at p itself.
+    None if p is more than max_off away from the polyline (the robot left the old path)."""
+    p = np.asarray(p, float)
+    best = None
+    for i, (a, b) in enumerate(zip(pts, pts[1:])):
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        ab = b - a
+        t = float(np.clip((p - a) @ ab / max(ab @ ab, 1e-12), 0, 1))
+        d = float(np.linalg.norm(a + t * ab - p))
+        if best is None or d < best[0]:
+            best = (d, i)
+    if best is None or best[0] > max_off:
+        return None
+    return [tuple(p)] + [tuple(q) for q in pts[best[1] + 1:]]
+
+
+def continue_route(old, new, amap, blocked, cell, max_off=0.10, end_tol=0.05):
+    """The previous route carried over to the current situation, or None if it no longer works.
+
+    Leg by leg (a leg whose stop was reached is dropped): the first leg is trimmed to where the
+    start (robot) is now; every leg's ends are moved to the new plan's ends (a tag stop or goal
+    may have moved a little). It is valid only if each end moved less than end_tol, the robot
+    is within max_off of the old path, and every segment is free on the CURRENT grid."""
+    if not old or old.get("status") != "ok" or new.get("status") != "ok":
+        return None
+    # (lengths compared below are true lengths: penalties only steer the search)
+    o_legs, n_legs = old.get("legs") or [], new.get("legs") or []
+    if len(o_legs) == len(n_legs) + 1:
+        o_legs = o_legs[1:]                      # the robot reached a stop since the last plan
+    if len(o_legs) != len(n_legs) or not n_legs:
+        return None
+    legs = []
+    for i, (ol, nl) in enumerate(zip(o_legs, n_legs)):
+        ow, nw = ol["waypoints"], nl["waypoints"]
+        if len(ow) < 2 or math.dist(ow[-1], nw[-1]) > end_tol:
+            return None
+        if i == 0:
+            w = _trim_to(ow, nw[0], max_off)
+            if w is None:
+                return None
+        else:
+            if math.dist(ow[0], nw[0]) > end_tol:
+                return None
+            w = [tuple(nw[0])] + [tuple(q) for q in ow[1:]]
+        w[-1] = tuple(nw[-1])
+        if len(w) < 2:
+            w = [tuple(nw[0]), tuple(nw[-1])]
+        if not all(_segment_free(blocked, amap, cell, a, b) for a, b in zip(w, w[1:])):
+            return None
+        legs.append({"waypoints": [(round(float(x), 4), round(float(y), 4)) for x, y in w],
+                     "length_m": round(_polyline_length(w), 4)})
+    wps = []
+    for lg in legs:
+        wps += lg["waypoints"] if not wps else lg["waypoints"][1:]
+    return {"status": "ok", "waypoints": wps, "length_m": round(sum(lg["length_m"] for lg in legs), 4),
+            "legs": legs, "notes": list(new.get("notes", [])), "ms": new.get("ms")}
+
+
+def stable_route(old, new, amap, blocked, cell, rel=0.10, abs_m=0.05):
+    """Path hysteresis. Two routes of almost equal length (left or right around an obstacle) make
+    A* flip between them as tiny things change (the robot moves 1 cm, an obstacle cell flickers),
+    which would make the robot zig-zag. Keep the previous route while it is still free and not
+    clearly worse: switch only if the new one is shorter by more than rel (10 %) + abs_m (5 cm),
+    or the old one is blocked / no longer fits. Returns (route, switched: bool)."""
+    kept = continue_route(old, new, amap, blocked, cell)
+    if kept is None:
+        return new, True
+    if new["length_m"] < kept["length_m"] - (rel * kept["length_m"] + abs_m):
+        new = dict(new, notes=[f"switched route: {100 * (kept['length_m'] - new['length_m']):.0f} cm shorter"]
+                   + list(new.get("notes", [])))
+        return new, True
+    kept["kept"] = True
+    return kept, False
 
 
 def pure_pursuit(robot_xy, robot_heading_deg, waypoints, lookahead=0.15):

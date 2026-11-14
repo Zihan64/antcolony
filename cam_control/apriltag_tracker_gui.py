@@ -550,7 +550,13 @@ class Worker(QtCore.QThread):
             blocked, cell = am.planning_grid(occ, gm, plan_res=cell)
             self.arena_data = (gm, occ, blocked, cell)
         if replan:
-            self._plan = am.plan_route(gm, points, plan_res=cell, blocked=blocked)
+            prev = self._plan["waypoints"] if self._plan and self._plan.get("status") == "ok" else None
+            new_plan = am.plan_route(gm, points, plan_res=cell, blocked=blocked, prefer=prev)
+            # hysteresis: stay on the previous route unless it is blocked or clearly longer, so two
+            # near-equal routes (left / right of an obstacle) do not alternate from replan to replan
+            self._plan, _switched = am.stable_route(self._plan, new_plan, gm, blocked, cell,
+                                                    rel=float(a.get("route_switch_rel", 0.10)),
+                                                    abs_m=float(a.get("route_switch_m", 0.05)))
             self._plan["goal"] = points[-1]
             if missing:
                 self._plan["notes"] = [f"stop(s) {missing} not seen yet: skipped"] + self._plan["notes"]
