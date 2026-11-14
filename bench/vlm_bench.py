@@ -117,6 +117,7 @@ def to_image_px(box, mode, w, h, sw, sh):
 
 
 API = "ollama"   # set from --api
+LAST_INFO = {}
 
 
 def chat(url, model, jpg_bytes, prompt, max_tokens):
@@ -138,14 +139,24 @@ def chat(url, model, jpg_bytes, prompt, max_tokens):
     with urllib.request.urlopen(req, timeout=600) as r:
         out = json.loads(r.read())
     dt = time.time() - t0
-    text = out["choices"][0]["message"]["content"] if API == "openai" else out["message"]["content"]
+    global LAST_INFO
+    if API == "openai":
+        text = out["choices"][0]["message"]["content"]
+        tm = out.get("timings", {})
+        LAST_INFO = dict(out_tokens=out.get("usage", {}).get("completion_tokens"),
+                         in_tokens=out.get("usage", {}).get("prompt_tokens"), cache_n=tm.get("cache_n"),
+                         prompt_ms=tm.get("prompt_ms"), gen_ms=tm.get("predicted_ms"))
+    else:
+        text = out["message"]["content"]
+        LAST_INFO = dict(out_tokens=out.get("eval_count"), in_tokens=out.get("prompt_eval_count"),
+                         prompt_ms=out.get("prompt_eval_duration", 0) / 1e6, gen_ms=out.get("eval_duration", 0) / 1e6)
     return text, dt
 
 
 def run_model(a, model, photos, manifest):
     out_dir = os.path.join(HERE, "results", re.sub(r"[^\w.-]+", "_", model + (("_" + a.tag) if a.tag else "")))
     os.makedirs(out_dir, exist_ok=True)
-    prompt = PROMPT_ANY if a.target == "any" else PROMPT.format(obj=a.target)
+    prompt = (PROMPT_ANY if a.target == "any" else PROMPT.format(obj=a.target)) + a.prompt_suffix
     rows, lat = [], []
     load_s = None
     for i, name in enumerate(photos):
@@ -154,8 +165,11 @@ def run_model(a, model, photos, manifest):
         sw, sh = model_size(w, h, a.img_tokens)
         buf = io.BytesIO()
         small = img.resize((sw, sh), Image.LANCZOS)
-        # one random corner pixel: a picture Ollama has never seen, so its cache cannot answer
-        small.putpixel((0, 0), tuple(random.randrange(256) for _ in range(3)))
+        # 8x8 random corner pixels: a picture the server has never seen, so its cache cannot answer
+        # (one pixel is not enough for llama-server: JPEG can wash it out and the cache still hits)
+        for x in range(8):
+            for y in range(8):
+                small.putpixel((x, y), tuple(random.randrange(256) for _ in range(3)))
         small.save(buf, "JPEG", quality=92)
         if i == 0:                               # model load: a throw-away call on a blank picture
             blank = io.BytesIO()
@@ -166,6 +180,8 @@ def run_model(a, model, photos, manifest):
         for k in range(a.repeat):
             text, dt = chat(a.url, model, buf.getvalue(), prompt, a.max_tokens)
             times.append(dt)
+            if k == 0:
+                info = dict(LAST_INFO)
         lat.append(times[0])
         raw = parse_boxes(text)
         mode = coord_mode(model, raw, sw, sh, a.coords)
@@ -185,7 +201,7 @@ def run_model(a, model, photos, manifest):
             expected = [o for o in expected if a.target.split()[-1] in o]
         verdict = "?" if expected is None else (
             ("hit" if kept else "MISS") if expected else ("ok" if not kept else "FALSE+"))
-        rows.append(dict(photo=name, s=times[0], cached_s=times[1:], n=len(kept), verdict=verdict,
+        rows.append(dict(photo=name, s=times[0], cached_s=times[1:], **info, n=len(kept), verdict=verdict,
                          mode=mode, text=" ".join(text.split())[:160]))
         draw = ImageDraw.Draw(img)
         for box, label in kept:
@@ -204,7 +220,12 @@ def run_model(a, model, photos, manifest):
                 p90_s=round(lat[min(len(lat) - 1, int(len(lat) * 0.9))], 2),
                 hits=f"{sum(r['verdict'] == 'hit' for r in pos)}/{len(pos)}",
                 false_pos=f"{sum(r['verdict'] == 'FALSE+' for r in neg)}/{len(neg)}",
-                coords=sorted({r["mode"] for r in rows}), out=out_dir)
+                coords=sorted({r["mode"] for r in rows}), out=out_dir,
+                in_tokens=statistics.median(r["in_tokens"] or 0 for r in rows),
+                out_tokens=statistics.median(r["out_tokens"] or 0 for r in rows),
+                prompt_ms=round(statistics.median(r["prompt_ms"] or 0 for r in rows)),
+                gen_ms=round(statistics.median(r["gen_ms"] or 0 for r in rows)),
+                cache_hits=sum(1 for r in rows if (r.get("cache_n") or 0) > 100))
     with open(os.path.join(out_dir, "results.json"), "w") as f:
         json.dump({"summary": summ, "settings": vars(a), "rows": rows}, f, indent=1)
     return summ
@@ -227,6 +248,7 @@ def main():
     ap.add_argument("--max-pixels", type=int, default=28 * 28 * 16384)
     ap.add_argument("--coords", default="auto", choices=["auto", "pixel", "rel1000", "norm"])
     ap.add_argument("--only", nargs="*", help="only these photo names")
+    ap.add_argument("--prompt-suffix", default="", help="text appended to the cars' prompt (to test shorter answers)")
     a = ap.parse_args()
     global API
     API = a.api
@@ -238,10 +260,12 @@ def main():
         print(f"\n=== {m}  ({len(photos)} photos, target={a.target!r}, img_tokens={a.img_tokens})")
         summaries.append(run_model(a, m, photos, manifest))
         summaries[-1]["model"] += f" [{a.api}]"
-    print("\nmodel                         load   median    p90   hits   false+  coords")
+    print("\nmodel                         load   median    p90   hits   false+  in_tok out_tok prompt_ms gen_ms  coords")
     for s in summaries:
         print(f"{s['model']:28s} {s['load_s']:6.1f}s {s['median_s']:6.2f}s {s['p90_s']:6.2f}s "
-              f"{s['hits']:>6s} {s['false_pos']:>7s}  {','.join(s['coords'])}")
+              f"{s['hits']:>6s} {s['false_pos']:>7s} {s['in_tokens']:7.0f} {s['out_tokens']:7.0f} "
+              f"{s['prompt_ms']:9d} {s['gen_ms']:6d}  {','.join(s['coords'])}"
+              + (f"  CACHE HITS {s['cache_hits']}" if s['cache_hits'] else ""))
     print("annotated photos:", ", ".join(s["out"] for s in summaries))
 
 
