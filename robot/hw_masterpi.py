@@ -198,11 +198,11 @@ class MasterPi:
         """Reach over the bin rim and let go. Default tip target: 18 cm ahead of the arm base, 10 cm up."""
         if not self.use_arm:
             return False, "no arm"
-        y, z = float(args.get("y_cm", 18)), float(args.get("z_cm", 10))
-        with self.lock:
-            r = self.arm.move_to(0, y, z, pitch=-45, pitch_min=-90, pitch_max=30, ms=1500)
+        x, y, z = float(args.get("x_cm", 0)), float(args.get("y_cm", 18)), float(args.get("z_cm", 10))
+        with self.lock:                          # x: cm to the right of the car's line (the arm base turns)
+            r = self.arm.move_to(x, y, z, pitch=-45, pitch_min=-90, pitch_max=30, ms=1500)
         if r is None:
-            return False, f"drop pose (0,{y},{z}) out of reach"
+            return False, f"drop pose ({x},{y},{z}) out of reach"
         time.sleep(1.7)
         with self.lock:
             self.arm.open(600)

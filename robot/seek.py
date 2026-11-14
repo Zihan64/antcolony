@@ -7,11 +7,13 @@ drop. No tracker. The loop is look - move - look:
 
   look    arm raised so the camera looks out across the floor (VIEW; the gripper servo is not
           touched: what it holds stays held), one photo, the VLM on the laptop boxes the target (~3 s)
-  not seen    turn left about 30 deg and look again (gives up after a full turn per camera view)
+  not seen    the ARM looks 50 deg left and right (the car stands still); still nothing: the car
+          turns a third of a circle and looks again (gives up after a full turn per camera view)
   off centre  turn towards it (short timed pulse; the turn rate - and its sign - are learned
           from how far the target moved in the picture)
-  centred     drive forward in short pulses, reading the front sonar at rest before each one,
-          at most `seg_cm` (30), then look again
+  centred     far from it: one smooth move, steering, with the target looked for in every camera
+          frame (no VLM: its colour, or the white patch the VLM just named); near it: short pulses,
+          the front sonar read at rest before each one, and a look after each
 
 Arrived = the sonar reads `stop_cm` or less (after aiming at the target, the tall thing straight
 ahead is taken to be the target). If the sonar never sees it (slanted face) the picture stops
@@ -133,6 +135,35 @@ def vivid_blobs(cv2, np, frame):
     return sorted(out, key=lambda b: -b["area"])
 
 
+def nearest_thing(cv2, np, frame, name):
+    """The NEAREST vivid thing (lowest in the picture) of the colour named in `name`; no colour word =
+    any colour. Things lying in the tray do not count. -> {"box", "colour"} or None."""
+    want = next((k for k in HUES if k in name.lower()), None)
+    best = None
+    for b in vivid_blobs(cv2, np, frame):
+        if want and b["colour"] != want:
+            continue
+        if best is None or b["box"][3] > best["box"][3]:
+            best = b
+    return best
+
+
+def white_things(cv2, np, frame, min_area=0.003):
+    """Every white, smooth patch: [(x1, y1, x2, y2)] - for following the tray from frame to frame."""
+    h, w = frame.shape[:2]
+    m = cv2.morphologyEx(white_mask(cv2, np, frame).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m[int(0.86 * h):, int(0.2 * w): int(0.9 * w)] = 0     # what the gripper holds
+    n, _, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    return [(int(x), int(y), int(x + bw), int(y + bh)) for x, y, bw, bh, a in stats[1:] if a >= min_area * h * w]
+
+
+def overlap(a, b):
+    """Intersection over union of two boxes."""
+    ix, iy = max(0, min(a[2], b[2]) - max(a[0], b[0])), max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    return inter / float((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter + 1e-9)
+
+
 def open_cam(cv2):
     devs = sorted(glob.glob("/dev/v4l/by-id/*-video-index0"))
     cap = cv2.VideoCapture(os.path.realpath(devs[0]) if devs else 0, cv2.CAP_V4L2 if devs else cv2.CAP_ANY)
@@ -158,31 +189,42 @@ class Eye:
         # "far" = the level view first; if a whole turn shows nothing, the lower view (a thing right
         # in front of the car is below the level view, or hidden behind what the gripper holds)
         self.views = [(VIEW_FAR, 4), (VIEW, 12)] if view == "far" else [(tuple(view), 4)] if view else [(VIEW, 12)]
-        self.pose(*self.views.pop(0))
+        self.pan_deg, self.box, self.colour = 0.0, None, None
+        self.now = self.views.pop(0)
+        self.pose(*self.now)
         self.n = 0
         for f in glob.glob(os.path.join(HERE, "seek_[0-9][0-9].jpg")):
             os.remove(f)
         for _ in range(20):                               # exposure / white balance
             self.cap.read()
 
-    def pose(self, view, slack):
+    def pose(self, view, slack, ms=1500):
         x, y, z, pitch = view
         self.geom = GEOM.get(tuple(view))
+        t = math.radians(self.pan_deg)                    # the arm base turned: the camera looks pan_deg to the left
+        x, y = x * math.cos(t) - y * math.sin(t), x * math.sin(t) + y * math.cos(t)
         with self.hw.lock:
-            ok = self.hw.arm.move_to(x, y, z, pitch=pitch, pitch_min=pitch - slack, pitch_max=pitch + slack, ms=1500)
+            ok = self.hw.arm.move_to(x, y, z, pitch=pitch, pitch_min=pitch - slack, pitch_max=pitch + slack, ms=ms)
             if ok is None:                                # out of reach: the driving view is better than none
                 print(f"  seek: view {view} out of reach - using the far driving view", flush=True)
                 self.geom = None
                 self.hw.arm.set_pulses(1500, dict(FAR))
                 if hasattr(self.hw.arm, "pos"):
                     self.hw.arm.pos = None
-        time.sleep(1.9)
+        time.sleep(ms / 1000.0 + 0.4)
+
+    def pan(self, deg):
+        """Turn the ARM (not the car) so that the camera looks `deg` to the left (+) / right (-)."""
+        if abs(deg - self.pan_deg) > 0.5:
+            self.pan_deg = float(deg)
+            self.pose(*self.now, ms=700)
 
     def next_view(self):
         """Switch to the next camera view, if there is one. -> switched?"""
         if not self.views:
             return False
-        self.pose(*self.views.pop(0))
+        self.now = self.views.pop(0)
+        self.pose(*self.now)
         return True
 
     def see(self):
@@ -200,22 +242,53 @@ class Eye:
             time.sleep(0.4)                               # the arm is still swaying: wait, take it again
         h, w = frame.shape[:2]
         if self.detector == "colour":
-            box = colour_blob(self.cv2, self.np, frame, self.target)
+            t = nearest_thing(self.cv2, self.np, frame, self.target)
+            box, self.colour = (t["box"], t["colour"]) if t else (None, self.colour)
         else:
             det = self.vlm.detect(frame, self.target, verbose=False)
             box = det["box"] if det else None
-        out = None
+        self.box = box
+        out = self.describe(box, w, h)
         if box is not None:
             x1, y1, x2, y2 = box
-            fx = (w / 2) / math.tan(math.radians(HFOV_DEG / 2))
-            out = {"bearing": math.degrees(math.atan((w / 2 - (x1 + x2) / 2) / fx)),
-                   "wide": (x2 - x1) / w, "bottom": y2 / h,
-                   "dist": floor_cm(self.geom, y2, h) if self.geom else None}     # its foot on the floor, cm ahead
             self.cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
         self.n += 1
         self.cv2.imwrite(os.path.join(HERE, "seek.jpg"), frame)
         self.cv2.imwrite(os.path.join(HERE, f"seek_{self.n:02d}.jpg"), frame)       # every look, for afterwards
         return out
+
+    def describe(self, box, w, h):
+        if box is None:
+            return None
+        x1, y1, x2, y2 = box
+        fx = (w / 2) / math.tan(math.radians(HFOV_DEG / 2))
+        return {"bearing": self.pan_deg + math.degrees(math.atan((w / 2 - (x1 + x2) / 2) / fx)),
+                "wide": (x2 - x1) / w, "bottom": y2 / h, "colour": self.colour,
+                "dist": floor_cm(self.geom, y2, h) if self.geom and abs(self.pan_deg) < 1 else None}   # its foot on the floor, cm ahead
+
+    def glance(self):
+        """A quick look while the car is MOVING: the newest frame, no VLM, nothing saved. The target is the
+        thing found by the last see(): a coloured thing is found again by its colour, anything else (the
+        tray) as the white patch that overlaps where it was a moment ago. -> like see(), or None = lost."""
+        frame = None
+        for _ in range(2):                                # the frame in the driver's queue is old
+            ok, f = self.cap.read()
+            if ok:
+                frame = f
+        if frame is None or self.box is None:
+            return None
+        h, w = frame.shape[:2]
+        if self.detector == "colour":
+            t = nearest_thing(self.cv2, self.np, frame, self.colour or self.target)
+            box = t["box"] if t else None
+        else:
+            cands = [(overlap(self.box, b), b) for b in white_things(self.cv2, self.np, frame)]
+            cands = [c for c in cands if c[0] > 0.15]
+            box = max(cands)[1] if cands else None
+        if box is None:
+            return None
+        self.box = box
+        return self.describe(box, w, h)
 
     def survey(self):
         """One sharp photo, every vivid thing in it: [{"colour", "bearing", "dist", "px"}]. Saved like see()."""
@@ -259,9 +332,16 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     w_cmd, u = float(args.get("w", 0.3)), float(args.get("u", 0.05))
     cm_s, step = float(args.get("cm_s", 17)), float(args.get("step_s", 0.33))
     seg, max_cm = float(args.get("seg_cm", 30)), float(args.get("max_cm", 200))
-    scan_deg, max_scans = float(args.get("scan_deg", 30)), int(args.get("max_scans", 15))
+    # Searching: the ARM looks left and right first (the camera rides on it) - the car stands still and
+    # three looks cover the 170 deg in front of it; only if nothing is there does the car turn, by a
+    # third of a circle. Without an arm that can pan (tests): the car turns 30 deg per look as before.
+    pans = [float(v) for v in args.get("pans", (50, -50))] if hasattr(eye, "pan") and args.get("pan", True) else []
+    scan_deg = float(args.get("scan_deg", 120 if pans else 30))
+    max_scans = int(args.get("max_scans", 3 if pans else 15))
     if args.get("scan") == "right":                      # search turning right instead of left
         scan_deg = -scan_deg
+    follow = hasattr(eye, "glance") and args.get("follow", True)
+    steer = float(args.get("steer_deg", 150))             # gentle: 15 deg off = a tenth of full turn command; 0 = roll straight
     timeout = float(args.get("timeout", 360))
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
@@ -306,16 +386,25 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                 return finish(False, f"timeout after {looks} looks, {drove:.0f} cm")
             s = eye.see()
             looks += 1
+            if s is None and had and last is None and not args.get("look_only"):
+                had = False                               # it was there a moment ago and the car has not turned:
+                say(f"look {looks}: '{target}' not found this time - looking again")      # the VLM misses now and then
+                s = eye.see()
+                looks += 1
+            if s is None and pans and not args.get("look_only"):
+                for pan in pans:                          # not straight ahead: look to the sides with the arm
+                    eye.pan(pan)
+                    s = eye.see()
+                    looks += 1
+                    if s is not None:
+                        break
+                eye.pan(0)
             if args.get("look_only"):
                 d = hw.sonar_med()
                 return finish(s is not None, f"{target}: " + ("not in the picture" if s is None else
                               f"{abs(s['bearing']):.0f} deg {'left' if s['bearing'] > 0 else 'right'}, "
                               f"{100 * s['wide']:.0f} % of the width") + f"; sonar {d if d is None else round(d)} cm")
             if s is None:
-                if had and last is None:                  # it was there a moment ago and the car has not turned:
-                    had = False                           # the VLM misses now and then - look once more first
-                    say(f"look {looks}: '{target}' not found this time - looking again")
-                    continue
                 if scans >= max_scans:
                     if hasattr(eye, "next_view") and eye.next_view():
                         say("nothing in a whole turn with this view - once more with the other camera view")
@@ -351,7 +440,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             bstop = args.get("bottom_stop")               # small target on the floor: close enough when its lower
             if bstop is not None and s["bottom"] >= float(bstop):      # edge is this far down the picture
                 return finish(True, f"close to the {target}: lower edge at {100 * s['bottom']:.0f} % of the picture, "
-                                    f"{looks} looks, drove {drove:.0f} cm")
+                                    f"{looks} looks, drove {drove:.0f} cm; colour={s.get('colour')}")
             # The car must NEVER touch the target (user, 2026-11-14: it lunged at the tray). So this skill
             # only brings it to `arrive_cm` in front of the target, by the picture: the stretch driven
             # before the next look is at most half of what is left to that line, and `dock` does the rest.
@@ -366,6 +455,51 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                 seg_now = min(seg_now, 20.0 if s["bottom"] < float(bstop) - 0.15 else 8.0)
             elif dist is not None:
                 seg_now = max(5.0, min(seg, 0.5 * (dist - arrive) + 3.0))
+            # Far enough to roll: ONE smooth move, steering on the way. The target is looked for again in
+            # every camera frame (by its colour, or as the white patch the VLM just named); the car stops as
+            # soon as it is near, as soon as the target is missing from two frames in a row, or when the sonar
+            # sees something. Then a proper look decides what next - never a move without the target in view.
+            if follow and seg_now >= 12 and not near_by_eye:
+                d = hw.sonar_med()
+                if d is None or d > stop_cm + 25:
+                    t_f, lost, why = time.monotonic(), 0, "long"
+                    hw.set_velocity(u, 0.0, 0.0)
+                    while time.monotonic() - t_f < float(args.get("follow_s", 10)):
+                        if cancel.is_set():
+                            why = "cancel"
+                            break
+                        g = eye.glance()
+                        d = hw.sonar_cm()
+                        if d is not None and d <= stop_cm + 12:
+                            why = "sonar"
+                            break
+                        if g is None:
+                            lost += 1
+                            if lost >= 2:
+                                why = "lost"
+                                break
+                            continue
+                        lost = 0
+                        if (bstop is not None and g["bottom"] >= float(bstop) - 0.04) or \
+                           (bstop is None and ((g["dist"] is not None and g["dist"] <= arrive + 5) or g["wide"] >= 0.7
+                                               or (g["bottom"] >= 0.9 and g["wide"] >= 0.4))):
+                            why = "near"
+                            break
+                        if abs(g["bearing"]) > 22:        # drifting off: stop and aim again with a proper look
+                            why = "off line"
+                            break
+                        hw.set_velocity(u, 0.0, sign * max(-0.12, min(0.12, g["bearing"] / steer)) if steer else 0.0)
+                    hw.stop()
+                    went = max(0.0, 22.0 * (time.monotonic() - t_f - 0.075))
+                    time.sleep(0.5)
+                    drove += went
+                    say(f"rolled {went:.0f} cm following it ({why})")
+                    if why == "cancel":
+                        return finish(False, f"cancelled after {drove:.0f} cm")
+                    if why == "lost" and went < 4:
+                        follow = False                    # cannot follow this one: short steps and looks instead
+                    last = None
+                    continue
             gone = 0.0
             while gone < seg_now:
                 if cancel.is_set():
@@ -458,6 +592,17 @@ class EdgeEye:
         cv2.imwrite(os.path.join(HERE, "dock.jpg"), frame)
         return m
 
+    def point(self, margin=4.0):
+        cv2, frame = self.cv2, self.frame()
+        p = drop_point(cv2, self.np, frame, self.H, margin)
+        if "x" in p:                                      # draw it: cm -> picture px
+            px = cv2.perspectiveTransform(self.np.array([[[p["x"], p["y"]]]], dtype=self.np.float64), self.np.linalg.inv(self.H))[0, 0]
+            cv2.circle(frame, (int(px[0]), int(px[1])), 14, (0, 255, 0) if p["ok"] else (0, 165, 255), 3)
+            cv2.putText(frame, f"{'drop' if p['ok'] else 'best'} x={p['x']:+.1f} y={p['y']:.1f} cm, {p['margin']:.1f} cm inside",
+                        (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imwrite(os.path.join(HERE, "dock.jpg"), frame)
+        return p
+
     def close(self):
         self.cap.release()
 
@@ -529,19 +674,56 @@ def measure(cv2, np, frame, H):
     return {"state": "edge", "y": y, "deep": bool(row[far: edge + 1].mean() >= 0.85), "side": side, "row": edge}
 
 
-def dock(hw, args, cancel, eye=None, carry_pose=None):
-    """The last ~45 cm to the white tray, without ever touching it. -> (ok, detail).
-    1. lower search view: the tray is found as the nearest big white smooth thing; the car slides
-       sideways (mecanum) until it is on the car's line and creeps up - at most 6 cm at a time, each
-       step from a fresh photo - until its near edge is about 24 cm ahead. No tray in the photo =
-       no move at all.
-    2. calibrated LOOK pose: the edge on the car's line in cm; creep until it is `edge_cm` (13) in
-       front of the arm base (the chassis ends ~6 cm in front of the arm base: ~7 cm of air), sliding again if the
-       tray is off to one side or there is not 10 cm of tray beyond the edge. At most 3 moves of
-       4 cm with nothing white in view, then it gives up rather than push on blind.
-    (2026-11-14: an earlier version crept 25 cm blind past the tray's corner.)"""
-    want, tol = float(args.get("edge_cm", 13)), float(args.get("tol_cm", 1.5))
+def drop_point(cv2, np, frame, H, margin=4.0):
+    """Where can the arm let go so that the object lands in the tray? Look-down picture -> floor map
+    in cm (table calibration) -> the white tray as a region -> a point inside it that is at least
+    `margin` cm from everything seen that is not tray, and within the arm's reach from where the car
+    stands. The tray is a rectangle and any such point will do: the car is NOT lined up with an edge
+    or a corner first (user, 2026-11-14: it kept sliding to one corner although it could reach).
+    -> {"ok": True, "x", "y", "margin"}   x cm right of the car's line, y cm ahead of the arm base
+       {"ok": False, "x", "y", "margin"}   best point seen, out of reach or too close to the rim: move towards it
+       {"ok": False}                       no tray in the picture"""
+    S, X0, X1, Y0, Y1 = 4.0, -13.0, 13.0, 8.0, 27.0             # canvas: 4 px per cm
+    W, Hc = int((X1 - X0) * S), int((Y1 - Y0) * S)
+    A = np.array([[1 / S, 0, X0], [0, -1 / S, Y1], [0, 0, 1]], dtype=np.float64)      # canvas px -> cm
+    M = np.linalg.inv(H) @ A                                                         # canvas px -> picture px
+    white = white_mask(cv2, np, frame).astype(np.uint8) * 255
+    h, w = white.shape
+    white[int(0.93 * h):, int(0.2 * w): int(0.9 * w)] = 0       # what the gripper still holds shows here
+    flags = cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP
+    top = cv2.warpPerspective(white, M, (W, Hc), flags=flags, borderValue=0) > 0
+    seen = cv2.warpPerspective(np.full((h, w), 255, np.uint8), M, (W, Hc), flags=flags, borderValue=0) > 0
+    if top.sum() < 6 * S * S:                                   # less than ~6 cm2 of tray
+        return {"ok": False}
+    # distance (cm) from each point to the nearest thing SEEN that is not tray. Beyond the picture's edge
+    # the tray is taken to go on for another 2 cm, no more: a rim may lie just outside the picture.
+    dist = cv2.distanceTransform((top | ~seen).astype(np.uint8), cv2.DIST_L2, 5) / S
+    dist = np.minimum(dist, cv2.distanceTransform(top.astype(np.uint8), cv2.DIST_L2, 5) / S + 2.0)
+    dist[~top] = 0
+    ys, xs = np.mgrid[0:Hc, 0:W]
+    X, Y = X0 + xs / S, Y1 - ys / S
+    r = np.hypot(X, Y)
+    can = top & (r >= 12.5) & (r <= 21.0) & (np.abs(np.degrees(np.arctan2(X, Y))) <= 55)
+    score = np.minimum(dist, 8.0) - 0.05 * np.abs(X) - 0.03 * np.abs(r - 18.0)
+    if can.any() and float(dist[can].max()) >= margin:
+        i = int(np.argmax(np.where(can & (dist >= margin), score, -1e9)))
+        return {"ok": True, "x": float(X.flat[i]), "y": float(Y.flat[i]), "margin": float(dist.flat[i])}
+    i = int(np.argmax(dist))
+    return {"ok": False, "x": float(X.flat[i]), "y": float(Y.flat[i]), "margin": float(dist.flat[i])}
+
+
+def dock(hw, args, cancel, eye=None, carry_pose=None, drop=None):
+    """The last ~45 cm to the white tray without ever touching it, then - with {"drop": true} - the
+    object goes in. -> (ok, detail).
+    1. lower search view: the tray is the nearest big white smooth thing; the car creeps up, at most
+       6 cm per fresh photo, until its near edge is about 24 cm ahead; it slides sideways only if the
+       tray is more than 8 cm off the car's line. No tray in the photo = no move at all.
+    2. calibrated LOOK pose: drop_point() looks for a spot inside the tray that the arm can reach from
+       here. Found = done (no lining up with an edge or a corner). Not found = one small move towards
+       the best spot seen (forward at most 4 cm, or sideways), and look again. At most 3 moves with
+       no tray in view, then it gives up rather than push on blind."""
     cm_s, side_cm_s, u = float(args.get("cm_s", 17)), float(args.get("side_cm_s", 15)), float(args.get("u", 0.05))
+    margin = float(args.get("margin_cm", 4.0))
     say = lambda msg: print(f"  dock: {msg}", flush=True)
     made = eye is None
     if made:
@@ -555,7 +737,7 @@ def dock(hw, args, cancel, eye=None, carry_pose=None):
         return ok, detail
 
     def slide(side, cm):
-        say(f"the tray is to the {'left' if side > 0 else 'right'} - sliding {cm:.0f} cm that way")
+        say(f"sliding {cm:.0f} cm to the {'left' if side > 0 else 'right'}")
         hw.pulse(0.0, side * u, max(0.08, cm / side_cm_s), cancel)
 
     try:
@@ -569,45 +751,47 @@ def dock(hw, args, cancel, eye=None, carry_pose=None):
             say(f"tray {abs(b['off']):.0f} cm to the {'left' if b['off'] > 0 else 'right'}, near edge about {b['dist']:.0f} cm ahead")
             if i == 0 and b["dist"] > float(args.get("max_start_cm", 75)):
                 return finish(False, f"the tray is still about {b['dist']:.0f} cm away - seek first (nothing moved)")
-            if abs(b["off"]) > 3.0:
-                slide(1 if b["off"] > 0 else -1, min(6.0, 0.8 * abs(b["off"])))
+            if abs(b["off"]) > 8.0:                       # the arm reaches 8 cm to either side: only then
+                slide(1 if b["off"] > 0 else -1, min(6.0, abs(b["off"]) - 4.0))
             elif b["dist"] <= 25.0:
                 break
             else:
                 hw.pulse(u, 0.0, max(0.10, min(6.0, b["dist"] - 22.0) / cm_s), cancel)
         else:
-            return finish(False, "could not line up with the tray")
+            return finish(False, "could not get in front of the tray")
 
         eye.look()
-        blind, slides, prev = 0, 0, None
-        for i in range(int(args.get("max_moves", 20))):
+        blind = 0
+        for i in range(int(args.get("max_moves", 14))):
             if cancel.is_set():
                 return finish(False, "cancelled")
-            m = eye.edge()
-            if m["state"] == "none":
+            p = eye.point(margin)
+            if p["ok"]:
+                say(f"can reach into the tray from here: {abs(p['x']):.0f} cm {'right' if p['x'] > 0 else 'left'}, "
+                    f"{p['y']:.0f} cm ahead, {p['margin']:.0f} cm from the rim")
+                if not args.get("drop"):
+                    return finish(True, f"at the tray: drop point x={p['x']:+.1f} y={p['y']:.1f} cm ({p['margin']:.0f} cm inside)")
+                hw.stop()
+                if made:
+                    eye.close()
+                ok, detail = (drop or hw.drop)({"x_cm": round(p["x"], 1), "y_cm": round(p["y"], 1), "z_cm": float(args.get("z_cm", 10))})
+                return ok, (f"in the tray: let go {abs(p['x']):.0f} cm {'right' if p['x'] > 0 else 'left'}, {p['y']:.0f} cm ahead, "
+                            f"{p['margin']:.0f} cm inside the rim" if ok else detail)
+            if "x" not in p:
                 blind += 1
                 if blind > 3:
-                    return finish(False, "the tray's edge did not come into the look-down picture - stopped")
-                say("nothing white under the camera yet - forward 4 cm")
+                    return finish(False, "the tray did not come into the look-down picture - stopped")
+                say("no tray under the camera yet - forward 4 cm")
                 hw.pulse(u, 0.0, 4.0 / cm_s, cancel)
-            elif m["state"] == "side" or (m["state"] == "edge" and not m["deep"] and slides < 8):
-                slides += 1
-                if slides > 8:
-                    return finish(False, "the tray stays to one side of the car")
-                slide(m["side"], 4.0 if m["state"] == "side" else 3.0)
-            elif m["state"] == "close":
-                say("white right under the camera - back 2.5 cm")
-                hw.pulse(-u, 0.0, 2.5 / cm_s, cancel)
+                continue
+            say(f"best spot {abs(p['x']):.0f} cm {'right' if p['x'] > 0 else 'left'}, {p['y']:.0f} cm ahead, only {p['margin']:.1f} cm inside")
+            r = math.hypot(p["x"], p["y"])
+            if abs(p["x"]) > 9.0:                         # beyond the arm's sideways reach
+                slide(-1 if p["x"] > 0 else 1, min(5.0, abs(p["x"]) - 5.0))
+            elif r > 21.0 or p["margin"] < margin:        # too far, or only the rim is in reach: a little closer
+                hw.pulse(u, 0.0, max(0.10, min(4.0, max(1.5, r - 18.0)) / cm_s), cancel)
             else:
-                err = m["y"] - want
-                say(f"edge {m['y']:.1f} cm ahead (want {want:.0f})")
-                if prev is not None and err * prev < 0:   # went past it: the smallest move is too big for this
-                    tol = min(3.0, tol + 0.75)            # tolerance - accept a little more rather than rock to and fro
-                prev = err
-                if abs(err) <= tol:
-                    return finish(True, f"docked: edge {m['y']:.1f} cm in front of the arm base"
-                                        + ("" if m["deep"] else " (not much tray behind it)"))
-                hw.pulse(math.copysign(u, err), 0.0, min(0.33, max(0.10, 0.8 * abs(err) / cm_s)), cancel)
-        return finish(False, "could not settle at the edge")
+                hw.pulse(-u, 0.0, 2.5 / cm_s, cancel)     # under the camera: a little back
+        return finish(False, "found no spot in the tray that the arm can reach")
     except Exception as e:
         return finish(False, f"{type(e).__name__}: {e}")

@@ -46,6 +46,7 @@ class FakeCar(hw_masterpi.MasterPi):
         self.cancel, self.cancel_at = threading.Event(), cancel_at
         self.sonar_sees_set = True
         self.gives_dist, self.dist_err, self.closest = True, 1.0, 1e9
+        self.pan_deg, self.glances, self.can_follow, self.steer = 0, 0, True, 0.0
 
     # geometry: bearing of the box from the car's nose line, + = left; distance to its face
     def rel(self):
@@ -58,7 +59,8 @@ class FakeCar(hw_masterpi.MasterPi):
     def set_velocity(self, vx, vy, w):
         self.v = math.copysign(17.0, vx) if abs(vx) > 0.02 else 0.0
         self.vs = math.copysign(15.0, vy) if abs(vy) > 0.02 else 0.0     # sliding left (+) / right
-        w_new = math.copysign(self.turn_rate, w) * self.turn_sign if abs(w) > 0.02 else 0.0
+        self.steer = w if abs(vx) > 0.02 else 0.0
+        w_new = math.copysign(self.turn_rate, w) * self.turn_sign if abs(w) > 0.02 and abs(vx) <= 0.02 else 0.0
         if w_new and not self.w:
             self.spin = 0.0                                       # a turn pulse starts: nothing moves for the first 0.12 s
         self.w = w_new
@@ -69,7 +71,10 @@ class FakeCar(hw_masterpi.MasterPi):
     def move(self, h):
         if self.w:
             self.spin += h
-        self.th += self.w * h if self.spin > 0.12 else 0.0
+        if self.v:                                                # steering while rolling: gentle, proportional
+            self.th += math.radians(600.0) * self.steer * self.turn_sign * h
+        else:
+            self.th += self.w * h if self.spin > 0.12 else 0.0
         self.x += -math.sin(self.th) * self.v * h - math.cos(self.th) * self.vs * h
         self.y += math.cos(self.th) * self.v * h - math.sin(self.th) * self.vs * h
         b, d = self.rel()
@@ -87,13 +92,27 @@ class FakeCar(hw_masterpi.MasterPi):
         return round(d, 1)
 
     # the camera + VLM
-    def see(self):
-        self.looks += 1
+    def pan(self, deg):                                           # the arm turns, the car does not
+        if deg != self.pan_deg:
+            self.pan_deg = deg
+            hw_masterpi.time.sleep(0.7)
+
+    def glance(self):                                             # one camera frame while moving: time passes
+        hw_masterpi.time.sleep(0.15)
+        self.glances += 1
         b, d = self.rel()
-        if d is None or abs(b) > 33 or (self.miss_every and self.looks % self.miss_every == 0):
+        if d is None or abs(b - self.pan_deg) > 33 or not self.can_follow:
+            return None
+        return self.see(count=False)
+
+    def see(self, count=True):
+        if count:
+            self.looks += 1
+        b, d = self.rel()
+        if d is None or abs(b - self.pan_deg) > 33 or (count and self.miss_every and self.looks % self.miss_every == 0):
             return None
         wide = min(1.0, math.degrees(2 * math.atan(BOX_W / 2 / max(d, 1.0))) / 66.0)
-        return {"bearing": b * 0.9 + 1.5, "wide": wide, "bottom": min(1.0, 0.05 + 30.0 / max(d, 1.0)),
+        return {"bearing": b * 0.9 + 1.5, "wide": wide, "bottom": min(1.0, 0.05 + 30.0 / max(d, 1.0)), "colour": "red",
                 "dist": (d + 6.0) * self.dist_err if self.gives_dist else None}     # arm base is 6 cm behind the sonar
 
 
@@ -135,15 +154,22 @@ CASES = [
      {"bottom_stop": 0.4, "stop_cm": 12}, {"sonar_sees": False}, lambda c, ok: ok and 50 <= c.rel()[1] + 12.5 <= 95 and abs(c.rel()[0]) < 20),
     ("tray 1.6 m away, picture distance 20 % too long: still stops well before it", (20, 160), {}, {"sonar_sees": False},
      lambda c, ok: ok and c.closest >= 14),
+    ("tray 1.5 m away, cannot be followed between looks (falls back to short steps)", (-30, 150), {"follow": False}, {"sonar_sees": False},
+     lambda c, ok: ok and c.closest >= 14),
+    ("box behind the car, arm cannot pan (car turns 30 deg per look)", (10, -80), {"pan": False}, {}, lambda c, ok: ok and near(c)),
     ("low tray 1.2 m away that the sonar never sees", (30, 115), {}, {"sonar_sees": False}, lambda c, ok: ok and near(c, 8, 45)),
     ("low tray behind the car, sonar blind, VLM misses every 4th look", (-20, -90), {}, {"sonar_sees": False, "miss_every": 4},
      lambda c, ok: ok and near(c, 8, 45)),
 ]
 
 
+TRAY_D = 20.0                                         # the fake tray: BOX_W (25) wide, 20 cm deep
+
+
 class FakeEdge:
     """The docking camera. Lower view (blob): the tray's sideways offset and near-edge distance, 12 % off.
-    Look-down view (edge): its near edge when that is 7-23 cm in front of the arm base."""
+    Look-down view (point): what drop_point() would say - the best spot inside the tray within the
+    picture (x -7..9 cm, y 9.4..24 cm) and the arm's reach, and how far inside the rim it is."""
 
     def __init__(self, car, noise=0.0):
         self.car, self.noise, self.n = car, noise, 0
@@ -154,26 +180,31 @@ class FakeEdge:
     def look(self):
         pass
 
-    def blob(self):
+    def geom(self):
         c = self.car
-        d, lat = (c.box[1] - BOX_W / 2 - c.y) + 6.0, c.x - c.box[0]
+        return (c.box[1] - BOX_W / 2 - c.y) + 6.0, c.x - c.box[0]     # near edge ahead of the arm base; tray centre left of the car's line
+
+    def blob(self):
+        d, lat = self.geom()
         if d > 150 or abs(lat) > 0.7 * max(d, 21) + BOX_W / 2:
             return None
         return {"off": lat * 0.88, "dist": max(21.0, d * 1.12)}
 
-    def edge(self):
+    def point(self, margin=4.0):
         self.n += 1
-        c = self.car
-        d = (c.box[1] - BOX_W / 2 - c.y) + 6.0 + (self.noise if self.n % 2 else -self.noise)   # arm base 6 cm behind the sonar
-        lat = c.x - c.box[0]                              # tray centre, cm to the LEFT of the car's line
-        side = 1 if lat > 0 else -1
-        if d > 23 or abs(lat) > BOX_W / 2 + 9:
-            return {"state": "none"}
-        if abs(lat) > BOX_W / 2 - 2:
-            return {"state": "side", "side": side}
-        if d < 7:
-            return {"state": "close", "side": side}
-        return {"state": "edge", "y": d, "deep": abs(lat) < BOX_W / 2 - 5, "side": side}
+        d, lat = self.geom()
+        d += self.noise if self.n % 2 else -self.noise
+        best = None
+        for xi in range(-7, 10):                          # x: cm right of the car's line
+            for yi in range(10, 25):
+                ins = min(yi - d, d + TRAY_D - yi, BOX_W / 2 - abs(xi + lat))      # cm inside the rim (+lat: tray centre is lat LEFT)
+                if ins <= 0:
+                    continue
+                ok = 12.5 <= math.hypot(xi, yi) <= 21.0 and ins >= margin
+                key = (ok, min(ins, 8) - 0.05 * abs(xi))
+                if best is None or key > best[0]:
+                    best = (key, {"ok": ok, "x": float(xi), "y": float(yi), "margin": float(ins)})
+        return best[1] if best else {"ok": False}
 
 
 def run_dock(start_cm, noise=0.0, off=0.0, **kw):
@@ -185,15 +216,22 @@ def run_dock(start_cm, noise=0.0, off=0.0, **kw):
 
     def posed():
         car.posed += 1
-    ok, detail = seek.dock(car, {}, car.cancel, eye=FakeEdge(car, noise), carry_pose=posed)
+    car.dropped = None
+
+    def drop(a):
+        car.dropped = (a["x_cm"], a["y_cm"])
+        return True, "dropped"
+    ok, detail = seek.dock(car, {"drop": True}, car.cancel, eye=FakeEdge(car, noise), carry_pose=posed, drop=drop)
     return car, ok, detail
 
 
-DOCK = [("dock from 30 cm (edge not in the look-down picture yet)", 30, 0.0, 0), ("dock from 14 cm", 14, 0.0, 0),
-        ("dock from 4 cm (too close: backs up)", 0.5, 0.0, 0), ("dock with +-1 cm measuring noise", 22, 1.0, 0),
-        ("dock: tray 15 cm to the right of the car's line (slides over first)", 12, 0.0, 15),
-        ("dock: tray 9 cm to the left, only its edge region under the camera", 20, 0.0, -9),
-        ("dock: tray 40 cm ahead and 12 cm to the left", 40, 0.0, -12),
+DOCK = [("place from 30 cm", 30, 0.0, 0), ("place from 14 cm", 14, 0.0, 0),
+        ("place: tray already within reach, straight ahead - must not move at all", 8, 0.0, 0),
+        ("place: within reach but 7 cm to the right - reaches over, must not move", 8, 0.0, 7),
+        ("place: within reach, 6 cm to the left - reaches over, must not move", 9, 0.0, -6),
+        ("place from 4 cm (too close)", 0.5, 0.0, 0), ("place with +-1 cm measuring noise", 22, 1.0, 0),
+        ("place: tray 15 cm to the right of the car's line", 12, 0.0, 15),
+        ("place: tray 40 cm ahead and 12 cm to the left", 40, 0.0, -12),
         ("dock: tray 90 cm away - refuses, does not move", 90, 0.0, 0)]
 
 
@@ -216,11 +254,16 @@ if __name__ == "__main__":
         if verbose:
             print(f"--- {name}")
         car, ok, detail = run_dock(start, noise, off)
-        edge, lat = (car.box[1] - BOX_W / 2 - car.y) + 6.0, abs(car.x - car.box[0])
-        good = ((ok and 11 <= edge <= 15 and lat < BOX_W / 2 - 4) if start < 60 else (not ok and edge > 40)) and car.posed == 1 \
+        edge, lat = (car.box[1] - BOX_W / 2 - car.y) + 6.0, car.x - car.box[0]
+        inside = None
+        if car.dropped:                                   # where the object really lands, cm inside the rim
+            dx, dy = car.dropped
+            inside = min(dy - edge, edge + TRAY_D - dy, BOX_W / 2 - abs(dx + lat))
+        moved = math.hypot(car.x, car.y)
+        good = ((ok and inside is not None and inside >= 2.5) if start < 60 else (not ok and edge > 40 and moved < 1)) \
             and car.closest + 6.0 >= min(9.5, start + 6.0) - 0.3    # chassis ends 6 cm in front of the arm base: never nearer than 3.5 cm
         bad += not good
-        print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  [edge really {edge:.1f} cm from the arm base, "
-              f"never nearer than {car.closest + 6.0:.1f}]")
+        print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  [lands {inside if inside is None else round(inside, 1)} cm inside the rim, "
+              f"car moved {moved:.0f} cm, never nearer than {car.closest + 6.0:.1f} cm]")
     print(f"\n{len(CASES) + len(DOCK) - bad}/{len(CASES) + len(DOCK)} cases ok")
     sys.exit(1 if bad else 0)
