@@ -2,6 +2,12 @@
 
 An overhead camera with AprilTags provides localization, and a single host coordinates three robots: dozer C sweeps far-away debris toward the bin, and arm robots A and B pick the debris up and drop it into the bin.
 
+## HackPrinceton Fall 2026
+
+- **Main track:** Sustainability (smart waste management: a robot team that clears and collects floor litter without a human doing the picking)
+- **Optional track:** Best Hardware Hack
+- **Special tracks:** Best Physical AI Hack; Best Practical AI Innovation (Amazon)
+
 This repository is the **coordination layer**. It sits between the two parts you already have:
 
 ```
