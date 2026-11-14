@@ -311,41 +311,80 @@ def dedupe(objs, tag_points=()):
     return keep
 
 
-class FloorTracker:
-    """Keeps detected objects' ids stable by floor position alone (labels play no part):
-    each new detection is matched to the nearest track within a gate, positions are smoothed,
-    tracks unseen for `ttl` seconds are forgotten. A new track is reported only once it has
-    been seen `min_hits` times (filters single-cycle false proposals)."""
+ELONGATED = 2.5     # length / width above which an object keeps a rectangle instead of a square
 
-    def __init__(self, gate_m=0.25, ttl=1.5, alpha=0.5, min_hits=2):
-        self.gate, self.ttl, self.alpha, self.min_hits = gate_m, ttl, alpha, min_hits
+
+def box_geometry(footprint):
+    """(cx, cy, length, width, angle_rad) of the smallest rotated rectangle around a footprint."""
+    (cx, cy), (w, h), ang = cv2.minAreaRect(np.asarray(footprint, np.float32))
+    a = math.radians(ang)
+    if h > w:                                   # angle of the LONG side
+        w, h, a = h, w, a + math.pi / 2
+    return cx, cy, w, h, a
+
+
+def box_polygon(cx, cy, length, width, angle):
+    """Square (side = length) unless the object is clearly elongated, then a rectangle."""
+    if length < ELONGATED * width:
+        width = length
+    c, s_ = math.cos(angle), math.sin(angle)
+    hl, hw = length / 2, width / 2
+    loc = np.array([[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]])
+    return loc @ np.array([[c, s_], [-s_, c]]) + [cx, cy]
+
+
+class FloorTracker:
+    """Keeps detected objects stable. Matching is by floor position alone (labels play no
+    part). Each track holds a smoothed box (center, size, orientation) rather than the raw
+    outline of the latest frame, so the drawn bounds do not jitter:
+      * center and size are exponentially smoothed (size more slowly than position);
+      * orientation is smoothed on the circle with the box's symmetry (90 deg for a square,
+        180 deg for a rectangle), so 0 / 90 deg flips of a square never make it spin;
+      * a new track is reported only once seen `min_hits` times, and a track survives short
+        gaps (`ttl`), so one missed or extra frame never makes a box blink."""
+
+    def __init__(self, gate_m=0.15, ttl=1.5, alpha=0.35, size_alpha=0.15, min_hits=3):
+        self.gate, self.ttl, self.alpha, self.size_alpha, self.min_hits = gate_m, ttl, alpha, size_alpha, min_hits
         self.tracks = {}
         self.next_id = DET_ID_BASE
+
+    @staticmethod
+    def _sym(t):
+        return 4 if t["length"] < ELONGATED * t["width"] else 2      # 90 or 180 deg symmetry
 
     def update(self, objs, now):
         used = set()
         for o in sorted(objs, key=lambda o: -o["conf"]):
+            cx, cy, L, Wd, ang = box_geometry(o["footprint"])
             best, bd = None, None
             for tid, t in self.tracks.items():
                 if tid in used:
                     continue
-                dist = math.hypot(t["x"] - o["x"], t["y"] - o["y"])
-                if dist < max(self.gate, 0.6 * o["width_m"]) and (bd is None or dist < bd):
+                dist = math.hypot(t["x"] - cx, t["y"] - cy)
+                if dist < max(self.gate, 0.6 * max(L, t["length"])) and (bd is None or dist < bd):
                     best, bd = tid, dist
             if best is None:
                 best = self.next_id
                 self.next_id += 1
-                self.tracks[best] = dict(o, first=now, hits=0)
+                self.tracks[best] = dict(o, x=cx, y=cy, length=L, width=Wd, angle=ang, first=now, hits=0)
             else:
                 t = self.tracks[best]
-                a = self.alpha
-                for k in ("x", "y", "width_m", "depth_m", "height_m", "conf"):
-                    t[k] = (1 - a) * t[k] + a * o[k]
-                # newest footprint shape, moved to the smoothed center
-                t["footprint"] = o["footprint"] + (np.array([t["x"], t["y"]]) - [o["x"], o["y"]])
-                t["contact"], t["box"] = o["contact"], o["box"]
-            self.tracks[best]["seen"] = now
-            self.tracks[best]["hits"] += 1
+                a, sa = self.alpha, self.size_alpha
+                t["x"] += a * (cx - t["x"])
+                t["y"] += a * (cy - t["y"])
+                t["length"] += sa * (L - t["length"])
+                t["width"] += sa * (Wd - t["width"])
+                n = self._sym(t)                      # average n*angle on the circle
+                v = (1 - a) * np.exp(1j * n * t["angle"]) + a * np.exp(1j * n * ang)
+                t["angle"] = float(np.angle(v)) / n
+                for k in ("height_m", "conf"):
+                    t[k] = (1 - a) * t.get(k, 0.0) + a * o.get(k, 0.0)
+                t["contact"], t["box"] = o.get("contact"), o.get("box")
+            t = self.tracks[best]
+            t["width_m"], t["depth_m"] = t["length"], t["width"] if t["length"] >= ELONGATED * t["width"] else t["length"]
+            t["footprint"] = box_polygon(t["x"], t["y"], t["length"], t["width"], t["angle"])
+            t["seen"] = now
+            t["hits"] += 1
             used.add(best)
         for tid in [t for t, v in self.tracks.items() if now - v["seen"] > self.ttl]:
             del self.tracks[tid]
@@ -360,6 +399,7 @@ def as_result_objects(tracks, now):
         out.append({"id": tid, "name": "object", "frame": "world", "method": "detect",
                     "x": t["x"], "y": t["y"], "z": 0.0, "yaw_deg": 0.0, "tilt_deg": 0.0,
                     "reproj_px": 0.0, "conf": round(t["conf"], 2), "width_m": round(t["width_m"], 3),
+                    "yaw_box_deg": round(math.degrees(t.get("angle", 0.0)), 1),
                     "depth_m": round(t["depth_m"], 3), "height_m": round(t["height_m"], 3),
                     "contact": t["contact"], "box": t["box"], "footprint_poly": t["footprint"],
                     "age_s": round(now - t["seen"], 2), "family": "detector", "native_id": None})

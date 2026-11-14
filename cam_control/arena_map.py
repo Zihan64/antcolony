@@ -1033,7 +1033,12 @@ class GlobalMap:
         if self.view is None:
             return []
         r0, r1, c0, c1, vis = self.view
-        ob = ((self.logodds[r0:r1, c0:c1] > 0) & vis).astype(np.uint8)
+        # Confident cells only (evidence > 1, i.e. seen as "not floor" in several updates): cells at
+        # an object's rim hover around 0 and made the outline breathe. Fragments of one object
+        # closer than ~2 cm are joined, so it does not split into two boxes now and then.
+        ob = ((self.logodds[r0:r1, c0:c1] > 1.0) & vis).astype(np.uint8)
+        k = max(3, int(round(0.02 / self.res)) | 1)
+        ob = cv2.morphologyEx(ob, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         cs, _ = cv2.findContours(ob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_px = float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
         out = []
@@ -1380,6 +1385,32 @@ def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, bl
     length = float(sum(math.dist(a, b) for a, b in zip(wps, wps[1:])))
     return {"status": "ok", "waypoints": [(round(float(x), 4), round(float(y), 4)) for x, y in wps],
             "length_m": round(length, 4), "cells": cells, "notes": notes, "ms": round(dt, 1)}
+
+
+def plan_route(amap, points, plan_res=None, blocked=None, occ=None):
+    """A* through several points in order (start, stops..., goal), like a route with
+    intermediate stops. Every leg is planned on the same grid and the legs are joined.
+    Returns plan_path's fields for the whole route plus "legs" [{waypoints, length_m}]; if a leg
+    fails, status names it (e.g. "leg 2 (stop 1 -> goal): no_path")."""
+    if blocked is None:
+        blocked, plan_res = planning_grid(occ, amap, plan_res=plan_res)
+    n = len(points)
+
+    def name(i):
+        return "start" if i == 0 else ("goal" if i == n - 1 else f"stop {i}")
+    legs, wps, notes, total, ms = [], [], [], 0.0, 0.0
+    for i, (a, b) in enumerate(zip(points, points[1:])):
+        p = plan_path(None, amap, a, b, plan_res=plan_res, blocked=blocked)
+        ms += p.get("ms") or 0.0
+        notes += [f"leg {i + 1}: {t}" for t in p.get("notes", [])]
+        if p["status"] != "ok":
+            return {"status": f"leg {i + 1} ({name(i)} -> {name(i + 1)}): {p['status']}", "waypoints": wps,
+                    "length_m": None, "legs": legs, "notes": notes, "ms": round(ms, 1)}
+        legs.append({"waypoints": p["waypoints"], "length_m": p["length_m"]})
+        wps += p["waypoints"] if not wps else p["waypoints"][1:]
+        total += p["length_m"]
+    return {"status": "ok", "waypoints": wps, "length_m": round(total, 4), "legs": legs, "notes": notes,
+            "ms": round(ms, 1)}
 
 
 def pure_pursuit(robot_xy, robot_heading_deg, waypoints, lookahead=0.15):

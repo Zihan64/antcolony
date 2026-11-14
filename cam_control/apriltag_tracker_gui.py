@@ -341,6 +341,11 @@ class Worker(QtCore.QThread):
         self.pair = None               # (start tag id, goal tag id) for tag-to-tag paths
         self._pair_last = {}
         self._pair_key = None
+        # intermediate stops between start and goal, in order: {"kind": "tag", "id"} (a tag or a
+        # detected object, followed live) or {"kind": "point", "xy"}; like a route with stops
+        self.stops = []
+        self._next_stop = 0            # with a robot: stops before this index are reached
+        self._route_draw = []          # (number, xy, done) for drawing
 
     def start_recording(self, path):
         with self.rec_lock:
@@ -477,8 +482,7 @@ class Worker(QtCore.QThread):
                 tracks = self.app_tracker.update(od.dedupe(found, tag_pts), now)
                 self._app_objs = od.as_result_objects(tracks, now)
                 for o_ in self._app_objs:
-                    o_["method"] = "appearance"
-                    o_["obstacle"] = False        # already an obstacle in the map itself
+                    o_["method"] = "appearance"   # its square bounds are an A* obstacle too
         if not self.appearance:
             self._app_objs = []
         r["objects"].extend(self._app_objs)
@@ -488,25 +492,54 @@ class Worker(QtCore.QThread):
             info["background_captured"] = True
 
         start = (robot["x"], robot["y"]) if robot is not None else (None if pair else self.manual_start)
-        if pair:
-            # follow both tags: replan when either moved more than 1 cm (at most ~7x per second)
-            key = None if start is None or goal is None else \
-                (round(start[0], 2), round(start[1], 2), round(goal[0], 2), round(goal[1], 2))
-            replan = key is not None and (self._plan is None or (
-                key != self._pair_key and now - self._last_plan_t > 0.15) or
-                (self.auto_replan and now - self._last_plan_t > self.replan_period))
-            if replan:
-                self._pair_key = key
-        else:
-            replan = goal is not None and start is not None and (
-                self._plan is None or self._plan.get("goal") != goal or
-                (self.auto_replan and now - self._last_plan_t > self.replan_period))
+
+        # Intermediate stops: tags / detected objects are followed live (last seen position kept),
+        # points are fixed. With a robot, a stop it has reached drops out of the route, so the plan
+        # always runs robot -> next stops -> goal.
+        stop_xy, stop_info = [], []
+        for k, st in enumerate(self.stops):
+            xy, seen = None, True
+            if st["kind"] == "point":
+                xy = tuple(st["xy"])
+            else:
+                tid = st["id"]
+                if tid in objs:
+                    self._pair_last[tid] = (objs[tid], now)
+                last = self._pair_last.get(tid)
+                seen = tid in objs
+                xy = (last[0]["x"], last[0]["y"]) if last else None
+                if tid < od.DET_ID_BASE:
+                    skip.add(tid)                 # a tag stop is a place to go, not an obstacle
+            stop_xy.append(xy)
+            stop_info.append({"n": k + 1, "label": st.get("label", ""), "xy": xy, "seen": seen,
+                              "done": robot is not None and k < self._next_stop})
+        arrive = max(0.05, 0.6 * float(a.get("robot_radius_m", 0.1)))
+        if robot is not None and self._next_stop < len(self.stops):
+            nxt = stop_xy[self._next_stop]
+            if nxt is not None and math.hypot(robot["x"] - nxt[0], robot["y"] - nxt[1]) < arrive:
+                info["events"].append(f"reached stop {self._next_stop + 1} "
+                                      f"({self.stops[self._next_stop].get('label', '')})")
+                stop_info[self._next_stop]["done"] = True
+                self._next_stop += 1
+        first = self._next_stop if robot is not None else 0
+        route_stops = [xy for xy in stop_xy[first:] if xy is not None]
+        missing = [i + 1 for i, xy in enumerate(stop_xy) if xy is None and i >= first]
+        self._route_draw = [(i["n"], i["xy"], i["done"]) for i in stop_info if i["xy"] is not None]
+        points = [start] + route_stops + ([goal] if goal is not None else [])
+        have_route = start is not None and len(points) >= 2
+        # replan when any point moved more than 1 cm (at most ~7x per second), or periodically
+        key = tuple((round(p_[0], 2), round(p_[1], 2)) for p_ in points) if have_route else None
+        replan = have_route and (self._plan is None or (
+            key != self._pair_key and now - self._last_plan_t > 0.15) or
+            (self.auto_replan and now - self._last_plan_t > self.replan_period))
+        if replan:
+            self._pair_key = key
         draw = self.arena_free and now - getattr(self, "_draw_t", 0) > 0.2
         foot = blocked = None
         cell = gm.plan_resolution()
         if replan or draw:
             # a detected object that contains the robot or a path end is that thing itself
-            ends = [p_ for p_ in ((robot["x"], robot["y"]) if robot is not None else None, goal) if p_]
+            ends = [p_ for p_ in ((robot["x"], robot["y"]) if robot is not None else None, goal, *route_stops) if p_]
             for o in r["objects"]:
                 if o.get("footprint_poly") is not None and ends:
                     hull = o["footprint_poly"].astype(np.float32)
@@ -517,22 +550,29 @@ class Worker(QtCore.QThread):
             blocked, cell = am.planning_grid(occ, gm, plan_res=cell)
             self.arena_data = (gm, occ, blocked, cell)
         if replan:
-            self._plan = am.plan_path(None, gm, start, goal, plan_res=cell, blocked=blocked)
-            self._plan["goal"] = goal
+            self._plan = am.plan_route(gm, points, plan_res=cell, blocked=blocked)
+            self._plan["goal"] = points[-1]
+            if missing:
+                self._plan["notes"] = [f"stop(s) {missing} not seen yet: skipped"] + self._plan["notes"]
             self._last_plan_t = now
-        if goal is None:
+        if not have_route:
             self._plan = None
         plan = self._plan
         cmd = None
         if plan and plan["status"] == "ok" and robot is not None:
-            cmd = am.pure_pursuit((robot["x"], robot["y"]), robot.get("yaw_deg", 0.0), plan["waypoints"])
+            # steer along the current leg only: a route that comes back along the same corridor
+            # must not make the robot skip ahead to the return part
+            leg = plan["legs"][0]["waypoints"] if plan.get("legs") else plan["waypoints"]
+            cmd = am.pure_pursuit((robot["x"], robot["y"]), robot.get("yaw_deg", 0.0), leg)
 
         info.update({"valid": True, "robot": None if robot is None else
                      {k: robot[k] for k in ("x", "y", "z", "yaw_deg")},
                      "start": start, "goal": goal, "pair": pair_info,
+                     "stops": stop_info, "next_stop": self._next_stop if robot is not None else None,
                      "plan": None if plan is None else {k: plan[k] for k in
                                                         ("status", "waypoints", "length_m", "notes")
-                                                        if k in plan} | {"ms": plan.get("ms")},
+                                                        if k in plan} | {"ms": plan.get("ms"),
+                                                                         "leg_lengths_m": [lg["length_m"] for lg in plan.get("legs", [])]},
                      "command": cmd, "has_background": gm.bg_enabled,
                      "map": {"res_mm": round(gm.res * 1000, 1), "x0": gm.x0, "x1": gm.x1, "y0": gm.y0,
                              "y1": gm.y1, "known_m2": round(float(gm.seen.sum()) * gm.res ** 2, 2),
@@ -543,7 +583,7 @@ class Worker(QtCore.QThread):
             try:
                 msg = {"t": r["t"], "frame": "arena", "objects": m.public(r)["objects"],
                        "camera": r["camera"], "robot": info["robot"], "goal": goal,
-                       "pair": pair_info,
+                       "pair": pair_info, "stops": stop_info,
                        "path": info["plan"], "command": cmd}
                 self.udp[0].sendto(json.dumps(msg, default=float).encode(), self.udp[1])
             except OSError:
@@ -581,6 +621,11 @@ class Worker(QtCore.QThread):
         if start is not None and robot is None:
             p = tuple(np.round(gm.w2p([start])[0]).astype(int))
             cv2.drawMarker(vis, p, (255, 0, 255), cv2.MARKER_SQUARE, 12, 2)
+        for n_, xy, done in self._route_draw:
+            p = tuple(np.round(gm.w2p([xy])[0]).astype(int))
+            col = (150, 150, 150) if done else (0, 200, 255)
+            cv2.circle(vis, p, 9, col, 2, cv2.LINE_AA)
+            cv2.putText(vis, str(n_), (p[0] - 4, p[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
         if goal is not None:
             p = tuple(np.round(gm.w2p([goal])[0]).astype(int))
             cv2.drawMarker(vis, p, (0, 255, 0), cv2.MARKER_STAR, 18, 2)
@@ -657,8 +702,13 @@ class Worker(QtCore.QThread):
                             cv2.polylines(frame, [pp], True, (255, 0, 255), 2, cv2.LINE_AA)
                             m._put(frame, f"obj {o['id']} ({o['x']:+.2f}, {o['y']:+.2f})",
                                    (int(pp[:, 0].min()), int(pp[:, 1].min()) - 6), (255, 0, 255))
-                    if self.objdet is not None:
-                        od.draw_detections(frame, [o for o in self._det_objs if "box" in o and o.get("frame") == "world"])
+                    if floor.valid and self.objdet is not None:
+                        for o in self._det_objs:
+                            if o.get("frame") != "world" or o.get("footprint_poly") is None:
+                                continue
+                            poly = np.column_stack([o["footprint_poly"], np.zeros(len(o["footprint_poly"]))])
+                            pp = np.round(floor.world_to_pixel(poly, K, D)).astype(np.int32)
+                            cv2.polylines(frame, [pp], True, (255, 0, 255), 2, cv2.LINE_AA)
                         for o in self._det_objs:
                             if o.get("frame") == "image":
                                 x1, y1, x2, y2 = [int(v) for v in o["box"]]
@@ -680,6 +730,14 @@ class Worker(QtCore.QThread):
                         g_ = floor.world_to_pixel([[*plan["waypoints"][-1], 0]], K, D)[0]
                         cv2.drawMarker(frame, (int(g_[0]), int(g_[1])), (0, 255, 0), cv2.MARKER_STAR, 26, 3)
                         m._put(frame, f"A* {plan['length_m']:.3f} m", (int(g_[0]) + 14, int(g_[1]) - 10), (0, 255, 0))
+                    if floor.valid:
+                        for n_, xy, done in list(self._route_draw):
+                            u_, v_ = floor.world_to_pixel([[xy[0], xy[1], 0.0]], K, D)[0]
+                            if np.isfinite(u_) and np.isfinite(v_):
+                                col = (150, 150, 150) if done else (0, 200, 255)
+                                cv2.circle(frame, (int(u_), int(v_)), 14, (0, 0, 0), 5, cv2.LINE_AA)
+                                cv2.circle(frame, (int(u_), int(v_)), 14, col, 3, cv2.LINE_AA)
+                                m._put(frame, f"stop {n_}" + (" (done)" if done else ""), (int(u_) + 16, int(v_) - 12), col)
                     if floor.valid:
                         for p in list(self.pins):
                             u, v = floor.world_to_pixel([p], K, D)[0]
@@ -751,7 +809,11 @@ class VideoView(QtWidgets.QLabel):
     def mousePressEvent(self, e):
         p = self._to_frame(e.position())
         if p:
-            self.clicked.emit(p[0], p[1], 1 if e.button() == Qt.MouseButton.LeftButton else 2)
+            b = e.button()
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            code = (3 if (b == Qt.MouseButton.MiddleButton or (b == Qt.MouseButton.LeftButton and shift))
+                    else 1 if b == Qt.MouseButton.LeftButton else 2)
+            self.clicked.emit(p[0], p[1], code)
 
 
 class ArenaView(VideoView):
@@ -1009,10 +1071,27 @@ class MainWindow(QtWidgets.QMainWindow):
         hint.setWordWrap(True)
         self.pair_info = QtWidgets.QLabel("")
         self.pair_info.setWordWrap(True)
+        self.stops_list = QtWidgets.QListWidget()
+        self.stops_list.setToolTip("Stops in order, between start and goal. Drag to reorder.")
+        self.stops_list.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self.stops_list.setMaximumHeight(78)
+        self.stops_list.model().rowsMoved.connect(lambda *_: self._sync_stops())
+        self.stop_combo = QtWidgets.QComboBox(editable=True)
+        self.stop_combo.setToolTip("A tag or detected object to stop at (followed live).")
+        add_stop = QtWidgets.QPushButton("Add stop")
+        add_stop.clicked.connect(self.add_stop)
+        del_stop = QtWidgets.QPushButton("Remove")
+        del_stop.setToolTip("Remove the selected stop (or the last one)")
+        del_stop.clicked.connect(self.remove_stop)
+        clr_stop = QtWidgets.QPushButton("Clear")
+        clr_stop.clicked.connect(self.clear_stops)
         f.addRow("Start (robot)", self.pair_start)
+        f.addRow("Stops", self.stops_list)
+        f.addRow(self.stop_combo, hrow(add_stop, del_stop, clr_stop))
         f.addRow("Goal", self.pair_goal)
         f.addRow(self.pair_btn)
         f.addRow(hrow(swap, clear_goal))
+        hint.setText("Arena / A* view: left click = goal, right = start, shift+click (or middle) = add stop.")
         f.addRow(hint)
         f.addRow(self.pair_info)
 
@@ -1510,6 +1589,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.amap = amap
             self.log_msg("Arena loaded: press Set up arena to re-measure and lock, or Capture empty floor.")
         self._udp_changed()
+        self._sync_stops()
         if self.det_chk.isChecked():          # on by default; kept across Stop / Start
             self.toggle_detection(True)
         self.worker.start()
@@ -1866,6 +1946,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not (self.worker and self.worker.amap is not None):
             return
         x, y = self.worker.amap.p2w(u, v)
+        if button == 3:
+            self._add_stop_item({"kind": "point", "xy": (round(x, 4), round(y, 4)),
+                                 "label": f"({x:+.2f}, {y:+.2f})"})
+            return
         if button == 1:
             if self.pair_btn.isChecked():
                 self.pair_btn.setChecked(False)
@@ -1911,13 +1995,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 txt.append("; ".join(pl["notes"]))
         elif info.get("goal") is None:
             txt.append("left click = goal, right click = start (when no robot tag)")
+        sts = info.get("stops") or []
+        if sts:
+            done = sum(1 for s_ in sts if s_["done"])
+            legs = (info.get("plan") or {}).get("leg_lengths_m") or []
+            txt.append(f"route: {len(sts)} stop(s), {done} reached"
+                       + (" | legs " + ", ".join(f"{v:.2f}" for v in legs) + " m" if legs else ""))
         pi = info.get("pair")
         if pi:
             def st(seen, age):
                 return "seen" if seen else ("lost" if age is None else f"last seen {age:.1f} s ago")
             pl2 = info.get("plan") or {}
+            route = ""
+            if sts:
+                route = "".join(f"stop {s_['n']} {s_['label']}: " + ("reached" if s_["done"] else
+                                ("ok" if s_["xy"] is not None else "not seen yet")) + "\n" for s_ in sts)
             self.pair_info.setText(
-                f"start tag {pi['start_id']}: {st(pi['start_seen'], pi['start_age_s'])}\n"
+                f"start tag {pi['start_id']}: {st(pi['start_seen'], pi['start_age_s'])}\n" + route +
                 f"goal tag {pi['goal_id']}: {st(pi['goal_seen'], pi['goal_age_s'])}\n"
                 + (f"path {pl2['length_m']:.3f} m, {len(pl2['waypoints'])} waypoints"
                    if pl2.get("status") == "ok" else f"path: {pl2.get('status', 'waiting for both tags')}"))
@@ -1969,6 +2063,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg["arena"]["appearance_z"] = self.det_app_z.value()   # shared with the live map
         if self.worker and self.worker.objdet is not None:
             self.worker.objdet.configure(self.det_conf.value(), int(self.det_size.currentText()))
+
+    # ---------------- route stops ----------------
+    def _add_stop_item(self, spec):
+        it = QtWidgets.QListWidgetItem(f"{self.stops_list.count() + 1}. {spec['label']}")
+        it.setData(Qt.ItemDataRole.UserRole, spec)
+        self.stops_list.addItem(it)
+        self._sync_stops()
+        self.log_msg(f"Stop {self.stops_list.count()} added: {spec['label']}")
+
+    def add_stop(self):
+        txt = self.stop_combo.currentText().strip()
+        tid = txt.split(":")[0].strip()
+        if not tid.lstrip("-").isdigit():
+            self.log_msg("Choose a tag / object id for the stop (or shift+click a point on the Arena view).")
+            return
+        self._add_stop_item({"kind": "tag", "id": int(tid), "label": txt})
+
+    def remove_stop(self):
+        row = self.stops_list.currentRow()
+        if self.stops_list.count():
+            self.stops_list.takeItem(row if row >= 0 else self.stops_list.count() - 1)
+            self._sync_stops()
+
+    def clear_stops(self):
+        self.stops_list.clear()
+        self._sync_stops()
+
+    def _sync_stops(self):
+        """List widget -> worker (order matters). Renumbers the items; the route restarts."""
+        stops = []
+        for i in range(self.stops_list.count()):
+            it = self.stops_list.item(i)
+            spec = it.data(Qt.ItemDataRole.UserRole)
+            it.setText(f"{i + 1}. {spec['label']}")
+            stops.append(spec)
+        if self.worker:
+            self.worker.stops = stops
+            self.worker._next_stop = 0
+            self.worker._plan = None
+            self.worker._pair_key = None
 
     def _pair_ids(self):
         out = []
@@ -2039,7 +2173,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._pair_choice_ids = ids
         names = {t: (self.stats[t].last[1]["name"] if self.stats[t].last else "") for t in ids}
-        for cb in (self.pair_start, self.pair_goal):
+        for cb in (self.pair_start, self.pair_goal, self.stop_combo):
             cur = cb.currentText()
             cb.blockSignals(True)
             cb.clear()
