@@ -7,7 +7,9 @@ Uses apriltag_floor_mapper.py (same folder) for detection and pose.
 
 Layout (seen from above, meters, right-handed, z up)
 
-  Put the 4 tags (default 29, 30, 31, 32) flat at the corners in ANY arrangement.
+  Put the 4 pivot tags flat at the corners in ANY arrangement. The pivots are always the 4
+  largest tags on the print sheet (29, 30, 31, 32 = 112 mm); any number of other tags may be in
+  view during setup, they are ignored for the plane.
   The first id is the origin. Geometry decides the rest: the farthest tag is the diagonal,
   the two neighbors become +x and +y so that z points up. Example from a real floor:
 
@@ -40,8 +42,8 @@ Mapping beyond the tags, adaptively (GlobalMap)
     removed object clears after a few frames. The empty-floor reference adapts to slow
     lighting changes on free cells, and newly seen floor gets its own reference.
   * The floor pose locks when the camera is still and re-locks after it is moved (fusion
-    pauses while it moves). Flat tags left still on the floor are learned as extra anchors;
-    an anchor that is moved is detected and dropped.
+    pauses while it moves). Only the 4 corner (pivot) tags define the plane: other tags are
+    always objects, so moving one can never tilt or shift the floor.
 
 Pipeline per frame
   camera frame -> fused into the global floor map (color, reference, obstacle evidence)
@@ -63,7 +65,6 @@ Library
 
 import argparse
 import heapq
-from collections import deque
 import json
 import math
 import os
@@ -91,20 +92,27 @@ ARENA_DEFAULTS = {
     "max_extent_m": 6.0,              # the global map may grow this far beyond the arena
     "min_px_per_cell": 0.35,          # skip cells the camera sees too obliquely (too coarse)
     "unknown_blocked": True,          # A* treats never-seen floor as blocked
-    "learn_anchors": True,            # flat, still floor tags become extra anchors
     "map_resolution_m": None,         # None = auto (matched to the camera's floor detail)
     "plan_resolution_m": 0.01,        # A* grid: 1 cm cells
     "robot_id": None,                 # tag on the robot (global id), excluded from obstacles
     "robot_radius_m": 0.10,           # obstacles are inflated by this for planning
     "obstacle_threshold": 30,         # color difference vs empty floor that counts as obstacle
     "min_obstacle_area_m2": 0.0004,   # ignore blobs smaller than 2 x 2 cm
+    "appearance_z": 5.0,              # object = this many robust std devs unlike the floor
 }
 
 
 def arena_settings(cfg):
+    """Arena block with defaults. The corner (pivot) tags are always the 4 largest tags on the
+    print sheet; a saved order is kept only if it names exactly those 4 (the order picks the
+    origin tag)."""
     a = dict(ARENA_DEFAULTS)
     a.update((cfg or {}).get("arena", {}) or {})
-    a["corner_ids"] = [int(i) for i in a["corner_ids"]]
+    a.pop("learn_anchors", None)          # removed: only the pivots may define the plane
+    saved = [int(i) for i in a.get("corner_ids") or []]
+    piv = m.corner_tag_ids((cfg or {}).get("tag_sizes") or {})
+    a["corner_ids"] = saved if (piv is None and len(saved) == 4) or (piv and sorted(saved) == piv) \
+        else (piv or [int(i) for i in ARENA_DEFAULTS["corner_ids"]])
     if a.get("robot_id") is not None:
         a["robot_id"] = int(a["robot_id"])
     return a
@@ -776,48 +784,6 @@ class ArenaMap:
 # Adaptive: learned anchors and the global floor map
 # --------------------------------------------------------------------------
 
-class AnchorLearner:
-    """Turns tags that lie still and flat on the floor into extra floor anchors.
-
-    A tag qualifies when it was located in plane mode, its 3D pose agrees it is on the floor,
-    and its position stayed within `max_std_m` over `frames` frames while the floor pose was
-    good. More anchors spread over the floor keep the plane accurate when corner tags are
-    hidden, and let the camera look at floor away from the original 4 tags."""
-
-    def __init__(self, frames=30, max_std_m=0.0015, max_head_std_deg=1.0, exclude=(), z_tol_m=0.03):
-        self.frames, self.max_std, self.max_head, self.z_tol = frames, max_std_m, max_head_std_deg, z_tol_m
-        self.exclude = set(exclude)
-        self.hist = {}
-
-    def step(self, result, floor, cfg):
-        """Returns {id: floor_tag spec} for tags that just became anchors."""
-        new = {}
-        if not floor.valid or (floor.reproj or 9) > 2.0:
-            return new
-        seen = set()
-        for o in result["objects"]:
-            tid = o["id"]
-            spec = cfg.get("objects", {}).get(tid, {})
-            if (o.get("method") != "plane" or tid in floor.world_corners or tid in self.exclude
-                    or spec.get("anchor") is False or "height_m" in spec
-                    or abs(o.get("pose_z_m", 1.0)) > max(self.z_tol, 0.5 * o.get("distance_m", 0) ** 2 / 100)):
-                continue
-            seen.add(tid)
-            h = self.hist.setdefault(tid, deque(maxlen=self.frames))
-            h.append((o["x"], o["y"], o["yaw_deg"]))
-            if len(h) == self.frames:
-                a = np.array(h)
-                hd = np.unwrap(np.radians(a[:, 2]))
-                if a[:, :2].std(0).max() < self.max_std and math.degrees(hd.std()) < self.max_head:
-                    new[tid] = {"x": round(float(a[:, 0].mean()), 5), "y": round(float(a[:, 1].mean()), 5),
-                                "yaw_deg": round(float(math.degrees(np.mean(hd))), 3), "learned": True}
-                    del self.hist[tid]
-        for tid in list(self.hist):
-            if tid not in seen:
-                del self.hist[tid]
-        return new
-
-
 class GlobalMap:
     """Floor map in arena coordinates that covers everything the camera can see (not just the
     area between the corner tags), grows when new floor comes into view, and fuses frames:
@@ -852,6 +818,7 @@ class GlobalMap:
         self.x1, self.y1 = math.ceil(hi[0] / 0.5) * 0.5, math.ceil(hi[1] / 0.5) * 0.5
         self._alloc()
         self.bg_enabled = False
+        self.detect_appearance = False  # objects = floor cells that look unlike the rest of the floor
         self._cache = None
         self.view = None            # (r0, r1, c0, c1, vis) of the current frame
 
@@ -1015,6 +982,7 @@ class GlobalMap:
             np.copyto(lo, np.float32(0), where=vis)
             self.bg_enabled = True
         obst = np.zeros(vis.shape, bool)
+        sources = []
         if self.bg_enabled:
             new = vis & ~bg_ok           # newly seen floor: assume empty at first sight
             if new.any():
@@ -1024,7 +992,11 @@ class GlobalMap:
             score = cv2.transform(d, np.array([[0.5, 1.0, 1.0]], np.float32))
             if score.ndim == 3:
                 score = score[..., 0]
-            raw = ((score > float(self.arena["obstacle_threshold"])) & vis & bg_ok).astype(np.uint8) * 255
+            sources.append((score > float(self.arena["obstacle_threshold"])) & vis & bg_ok)
+        if self.detect_appearance:
+            sources.append(appearance_mask(rect, vis, ppc, self.res, float(self.arena.get("appearance_z", 5.0))))
+        if sources:
+            raw = np.logical_or.reduce(sources).astype(np.uint8) * 255
             raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             raw = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
             for poly in clear_polys:
@@ -1034,13 +1006,15 @@ class GlobalMap:
             keep = np.zeros(n, bool)
             keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
             obst = keep[labl] & vis
-            free = vis & ~obst & bg_ok
+            judged = vis if self.detect_appearance else (vis & bg_ok)
+            free = judged & ~obst
             lo += np.where(obst, np.float32(0.9), np.where(free, np.float32(-0.5), np.float32(0)))
             np.clip(lo, -4, 4, out=lo)
-            # adapt the empty-floor reference to slow lighting changes, on confidently free cells only
-            ad = free & (lo < -2)
-            cv2.accumulateWeighted(lab, bg, adapt_rate, mask=ad.astype(np.uint8))
-            # robot body: never an obstacle
+            if self.bg_enabled:
+                # adapt the empty-floor reference to slow lighting changes, on confidently free cells only
+                ad = free & bg_ok & (lo < -2)
+                cv2.accumulateWeighted(lab, bg, adapt_rate, mask=ad.astype(np.uint8))
+            # robot body, flat floor tags: never an obstacle
             if clear_polys:
                 cm = np.zeros(vis.shape, np.uint8)
                 for poly in clear_polys:
@@ -1052,6 +1026,36 @@ class GlobalMap:
     # ---- outputs
     def obstacles(self):
         return self.logodds > 0
+
+    def objects_in_view(self):
+        """Obstacle blobs in the current view as objects: centroid, footprint polygon (world),
+        size. Blobs come from the fused obstacle evidence, so they are stable over frames."""
+        if self.view is None:
+            return []
+        r0, r1, c0, c1, vis = self.view
+        ob = ((self.logodds[r0:r1, c0:c1] > 0) & vis).astype(np.uint8)
+        cs, _ = cv2.findContours(ob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_px = float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+        out = []
+        for c in cs:
+            if cv2.contourArea(c) < min_px:
+                continue
+            mo = cv2.moments(c)
+            if mo["m00"] <= 0:
+                continue
+            hull = cv2.convexHull(c).reshape(-1, 2).astype(np.float64)
+            world = np.column_stack([self.x0 + (c0 + hull[:, 0] + 0.5) * self.res,
+                                     self.y1 - (r0 + hull[:, 1] + 0.5) * self.res])
+            cx, cy = mo["m10"] / mo["m00"], mo["m01"] / mo["m00"]
+            (_, _), (w, h), _ = cv2.minAreaRect(c)
+            if min(w, h) * self.res < 0.015:       # a sliver along an edge, not an object
+                continue
+            out.append({"name": "object", "conf": 1.0, "box": None,
+                        "x": float(self.x0 + (c0 + cx + 0.5) * self.res),
+                        "y": float(self.y1 - (r0 + cy + 0.5) * self.res),
+                        "contact": None, "width_m": float(max(w, h) * self.res),
+                        "depth_m": float(min(w, h) * self.res), "height_m": 0.0, "footprint": world})
+        return out
 
     def footprint_mask(self, objects, cfg, skip_ids=()):
         return ArenaMap.footprint_mask(self, objects, cfg, skip_ids)
@@ -1080,6 +1084,79 @@ class GlobalMap:
 
 
 # --------------------------------------------------------------------------
+# Objects by appearance (no model, no stored reference)
+# --------------------------------------------------------------------------
+
+_FEATURE_MIN_SPREAD = (2.0, 1.5, 1.5, 0.12)    # L, a, b, log edge energy: floor noise never below this
+_FEATURE_WEIGHT = (0.7, 1.0, 1.0, 1.0)         # lightness counts a bit less (shading, shadows)
+
+
+def appearance_mask(rect, vis, ppc, res, z_thr=5.0, win_m=0.025):
+    """Floor cells that do not look like floor, judged against the floor itself in THIS frame.
+
+    Works for any object, never seen before, with no class list and no empty-floor image:
+    the visible floor is mostly floor, so the robust statistics (median / MAD) of its local
+    color (Lab mean over ~2.5 cm) and local edge energy (log of the mean gradient magnitude:
+    a speckled carpet is busy, a box, a phone, paper are smooth) describe "floor". A cell
+    whose features lie more than z_thr robust standard deviations away is something else: a
+    cube, paper, a box, a foot. Statistics are taken separately for near / mid / far floor (by
+    camera pixels per cell), so blurrier far floor is compared with far floor, not with sharp
+    near floor. Returns a bool mask shaped like vis.
+
+    Speed: gradients are taken at full map resolution (the carpet speckle is a few mm), then the
+    features are averaged down to ~8 mm cells for the statistics and the test (objects of 2 cm
+    and more are still several cells), and the mask is scaled back up."""
+    full_shape = vis.shape
+    lab = cv2.cvtColor(rect, cv2.COLOR_BGR2LAB).astype(np.float32)
+    # Smoothness is the strongest cue on a patterned floor: on a real frame a gray box, a black
+    # device and a red box were 9-11 robust std devs smoother than the carpet, while their mean
+    # color / lightness was within 2 (gray, black) of it.
+    gx = cv2.Sobel(lab[..., 0], cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(lab[..., 0], cv2.CV_32F, 0, 1)
+    stack = np.dstack([lab, cv2.magnitude(gx, gy)])
+    f = max(1, int(round(0.008 / res)))                    # downsample factor to ~8 mm cells
+    if f > 1:
+        size = (max(1, full_shape[1] // f), max(1, full_shape[0] // f))
+        stack = cv2.resize(stack, size, interpolation=cv2.INTER_AREA)
+        vis = cv2.resize(vis.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST) > 0
+        ppc = cv2.resize(ppc, size, interpolation=cv2.INTER_AREA)
+        res = res * f
+    k = max(3, int(round(win_m / res)) | 1)
+    # stay 2 windows away from the edge of the view: border cells mix in black / smeared pixels
+    valid = cv2.erode(vis.astype(np.uint8), np.ones((2 * k + 1, 2 * k + 1), np.uint8)) > 0
+    if valid.sum() < 300:
+        return np.zeros(full_shape, bool)
+    stack = cv2.blur(stack, (k, k))
+    feats = (stack[..., 0], stack[..., 1], stack[..., 2], np.log(stack[..., 3] + 2.0))
+    edges = np.quantile(ppc[valid], [1 / 3, 2 / 3])
+    band = np.digitize(ppc, edges)
+    z = np.zeros(vis.shape, np.float32)
+    for b in range(3):
+        sel = valid & (band == b)
+        if sel.sum() < 100:
+            continue
+        idx = np.flatnonzero(sel)
+        sub = idx[:: max(1, len(idx) // 20000)]            # statistics from a subsample: fast
+        for j, (feat, wgt, lo_) in enumerate(zip(feats, _FEATURE_WEIGHT, _FEATURE_MIN_SPREAD)):
+            v = feat.ravel()[sub]
+            med = float(np.median(v))
+            mad = max(float(np.median(np.abs(v - med))) * 1.4826, lo_)
+            d = feat[sel] - med
+            # edge energy counts one way only: objects are SMOOTHER than a patterned floor. Being
+            # busier than the floor is just the outline of something (a tag's border, the edge
+            # of the view), which would otherwise give a ring of false hits on a plain floor.
+            d = np.maximum(-d, 0) if j == 3 else np.abs(d)
+            z[sel] = np.maximum(z[sel], wgt * d / mad)
+    mask = (z > z_thr) & valid
+    if mask.shape != full_shape:
+        up = cv2.resize(mask.astype(np.uint8), (full_shape[1] // f * f, full_shape[0] // f * f),
+                        interpolation=cv2.INTER_NEAREST)
+        mask = np.zeros(full_shape, bool)
+        mask[:up.shape[0], :up.shape[1]] = up > 0
+    return mask
+
+
+# --------------------------------------------------------------------------
 # Planning
 # --------------------------------------------------------------------------
 
@@ -1088,20 +1165,38 @@ def _disk(r):
 
 
 def planning_grid(occ, amap, robot_radius=None, plan_res=None):
-    """Downsample the map occupancy to plan_res cells (a cell is blocked if any map pixel in it
-    is) and inflate by the robot radius. Returns (blocked bool array, cell size)."""
+    """Downsample the map occupancy to A* cells (a cell is blocked if any map pixel in it is)
+    and inflate by the robot radius. Returns (blocked bool array, cell size).
+
+    One A* cell is exactly k x k map pixels (k = plan_res / map res, rounded), so cell (c, r)
+    covers map pixels [k*c, k*c + k) and its world position is exact. (Resizing by a
+    fractional factor made the grid drift against the coordinates A* uses: up to one cell
+    off, so a third of obstacle pixels were blocked in a neighbor cell instead of their own.)
+    Map pixels padded past the map edge count as blocked."""
     plan_res = plan_res or amap.arena["plan_resolution_m"]
     robot_radius = amap.arena["robot_radius_m"] if robot_radius is None else robot_radius
-    f = plan_res / amap.res
-    w, h = int(math.ceil(amap.W / f)), int(math.ceil(amap.H / f))
-    small = cv2.resize(occ.astype(np.uint8) * 255, (w, h), interpolation=cv2.INTER_AREA) > 0
-    r = int(math.ceil(robot_radius / plan_res))
+    k = max(1, int(round(plan_res / amap.res)))
+    cell = k * amap.res
+    H, W = occ.shape
+    h, w = -(-H // k), -(-W // k)
+    pad = np.ones((h * k, w * k), bool)
+    pad[:H, :W] = occ
+    small = pad.reshape(h, k, w, k).any(axis=(1, 3))
+    r = int(math.ceil(robot_radius / cell))
     blocked = cv2.dilate(small.astype(np.uint8), _disk(r)) > 0 if r > 0 else small
-    return blocked, plan_res
+    return blocked, cell
+
+
+def grid_to_map(blocked, amap, cell):
+    """A* grid back at map resolution (for drawing), exactly aligned with planning_grid."""
+    k = max(1, int(round(cell / amap.res)))
+    H, W = int(amap.H), int(amap.W)
+    return np.repeat(np.repeat(blocked, k, 0), k, 1)[:H, :W]
 
 
 def _w2g(amap, xy, cell):
-    return (int((xy[0] - amap.x0) / cell), int((amap.y1 - xy[1]) / cell))
+    # floor, not int(): points left of / above the map must map to negative (outside) cells
+    return (int(math.floor((xy[0] - amap.x0) / cell)), int(math.floor((amap.y1 - xy[1]) / cell)))
 
 
 def _g2w(amap, c, r, cell):
@@ -1117,10 +1212,65 @@ def _nearest_free(blocked, c, r):
 
 
 def _line_free(blocked, a, b):
-    n = int(max(abs(b[0] - a[0]), abs(b[1] - a[1]))) * 2 + 1
-    cs = np.round(np.linspace(a[0], b[0], n)).astype(int)
-    rs = np.round(np.linspace(a[1], b[1], n)).astype(int)
-    return not blocked[rs, cs].any()
+    """True if EVERY cell the straight segment between the centers of cells a and b passes
+    through is free (supercover traversal). Point sampling, used before, could step over the
+    corner of a blocked cell, so a shortcut could clip an (inflated) obstacle. A segment going
+    exactly through a cell corner needs both side cells free, as in A* (no corner cutting)."""
+    x, y = int(a[0]), int(a[1])
+    x1, y1 = int(b[0]), int(b[1])
+    dx, dy = abs(x1 - x), abs(y1 - y)
+    sx, sy = (1 if x1 > x else -1), (1 if y1 > y else -1)
+    if blocked[y, x]:
+        return False
+    ix = iy = 0
+    while ix < dx or iy < dy:
+        d = (1 + 2 * ix) * dy - (1 + 2 * iy) * dx      # which cell border the line crosses next
+        if d == 0:
+            if blocked[y, x + sx] or blocked[y + sy, x]:
+                return False
+            x, y, ix, iy = x + sx, y + sy, ix + 1, iy + 1
+        elif d < 0:
+            x, ix = x + sx, ix + 1
+        else:
+            y, iy = y + sy, iy + 1
+        if blocked[y, x]:
+            return False
+    return True
+
+
+def _segment_free(blocked, amap, cell, p, q):
+    """Exact grid traversal (Amanatides-Woo) of the world segment p -> q: True if every A* cell
+    it passes through is free and inside the grid."""
+    H, W = blocked.shape
+    u0, v0 = (p[0] - amap.x0) / cell, (amap.y1 - p[1]) / cell
+    u1, v1 = (q[0] - amap.x0) / cell, (amap.y1 - q[1]) / cell
+    c, r = int(math.floor(u0)), int(math.floor(v0))
+    ce, re = int(math.floor(u1)), int(math.floor(v1))
+
+    def bad(c_, r_):
+        return not (0 <= c_ < W and 0 <= r_ < H) or blocked[r_, c_]
+    if bad(c, r) or bad(ce, re):
+        return False
+    du, dv = u1 - u0, v1 - v0
+    sx, sy = (1 if du > 0 else -1), (1 if dv > 0 else -1)
+    tdx = abs(1.0 / du) if du else math.inf
+    tdy = abs(1.0 / dv) if dv else math.inf
+    tmx = ((c + 1 - u0) if du > 0 else (u0 - c)) * tdx if du else math.inf
+    tmy = ((r + 1 - v0) if dv > 0 else (v0 - r)) * tdy if dv else math.inf
+    for _ in range(abs(ce - c) + abs(re - r) + 2):
+        if (c, r) == (ce, re):
+            return True
+        if abs(tmx - tmy) < 1e-12:                    # exactly through a cell corner
+            if bad(c + sx, r) or bad(c, r + sy):
+                return False
+            c, r, tmx, tmy = c + sx, r + sy, tmx + tdx, tmy + tdy
+        elif tmx < tmy:
+            c, tmx = c + sx, tmx + tdx
+        else:
+            r, tmy = r + sy, tmy + tdy
+        if bad(c, r):
+            return False
+    return True
 
 
 def astar(blocked, start, goal):
@@ -1174,6 +1324,7 @@ def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, bl
     if blocked is None:
         blocked, cell = planning_grid(occ, amap, robot_radius, plan_res)
     else:
+        # plan_res must be the cell size planning_grid returned for this grid
         cell = plan_res or amap.arena["plan_resolution_m"]
     H, W = blocked.shape
     s, g = _w2g(amap, start_xy, cell), _w2g(amap, goal_xy, cell)
@@ -1212,10 +1363,20 @@ def plan_path(occ, amap, start_xy, goal_xy, robot_radius=None, plan_res=None, bl
         i = j
     wps = [_g2w(amap, c, r, cell) for c, r in simple]
     # Snap the ends to the exact requested points (unless they had to move off an obstacle).
+    # The first / last leg then no longer starts at a cell center, so check it again exactly;
+    # if it would clip a blocked cell, go via the (free) start / goal cell's center instead.
     if not moved["start"]:
-        wps[0] = tuple(map(float, start_xy))
+        s_xy = tuple(map(float, start_xy))
+        if len(wps) > 1 and _segment_free(blocked, amap, cell, s_xy, wps[1]):
+            wps[0] = s_xy
+        else:
+            wps.insert(0, s_xy)
     if not moved["goal"]:
-        wps[-1] = tuple(map(float, goal_xy))
+        g_xy = tuple(map(float, goal_xy))
+        if len(wps) > 1 and _segment_free(blocked, amap, cell, wps[-2], g_xy):
+            wps[-1] = g_xy
+        else:
+            wps.append(g_xy)
     length = float(sum(math.dist(a, b) for a, b in zip(wps, wps[1:])))
     return {"status": "ok", "waypoints": [(round(float(x), 4), round(float(y), 4)) for x, y in wps],
             "length_m": round(length, 4), "cells": cells, "notes": notes, "ms": round(dt, 1)}
@@ -1327,12 +1488,7 @@ def render_global(gm, blocked=None, foot=None, plan_cell=None, now=None, fade_s=
         vis[stale] = (vis[stale] * 0.55).astype(np.uint8)
     tint = vis.copy()
     if blocked is not None and plan_cell:
-        f = plan_cell / gm.res
-        up = cv2.resize(blocked.astype(np.uint8), (int(round(blocked.shape[1] * f)), int(round(blocked.shape[0] * f))),
-                        interpolation=cv2.INTER_NEAREST)
-        bf = np.zeros((gm.H, gm.W), bool)
-        hh, ww = min(gm.H, up.shape[0]), min(gm.W, up.shape[1])
-        bf[:hh, :ww] = up[:hh, :ww] > 0
+        bf = grid_to_map(blocked, gm, plan_cell)
         tint[bf & gm.seen] = (0, 165, 255)
     ob = gm.obstacles()
     tint[ob] = (0, 0, 255)

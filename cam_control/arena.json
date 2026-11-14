@@ -2,47 +2,29 @@
   "family": "tag36h11",
   "tag_size": 0.1,
   "floor_tags": {
-    "50": {
-      "x": 0.70987,
-      "y": 0.6142,
-      "yaw_deg": -163.563,
-      "learned": true
-    },
-    "28": {
-      "x": 0.14906,
-      "y": 0.67872,
-      "yaw_deg": -134.512,
-      "learned": true
-    },
-    "38": {
-      "x": -0.76739,
-      "y": -0.11515,
-      "yaw_deg": 26.505,
-      "learned": true
-    },
     "29": {
       "x": 0.0,
       "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 77.526
-    },
-    "31": {
-      "x": 1.10417,
-      "y": 0.0,
-      "z": 0.0,
-      "yaw_deg": 100.539
+      "yaw_deg": -91.846
     },
     "32": {
-      "x": 0.98298,
-      "y": 1.15214,
+      "x": 1.51429,
+      "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 105.879
+      "yaw_deg": 97.705
+    },
+    "31": {
+      "x": 1.57265,
+      "y": 0.92815,
+      "z": 0.0,
+      "yaw_deg": 23.301
     },
     "30": {
-      "x": -0.13777,
-      "y": 1.02062,
+      "x": 0.22221,
+      "y": 1.14378,
       "z": 0.0,
-      "yaw_deg": 102.56
+      "yaw_deg": 85.469
     }
   },
   "objects": {},
@@ -50,32 +32,32 @@
   "arena": {
     "corner_ids": [
       29,
-      31,
       32,
+      31,
       30
     ],
     "tape_m": null,
     "width_m": null,
     "height_m": null,
-    "focal_px": 1059.29,
+    "focal_px": 953.41,
     "positions": null,
     "margin_m": 0.0,
     "max_range_m": 4.0,
     "max_extent_m": 6.0,
     "min_px_per_cell": 0.35,
     "unknown_blocked": true,
-    "learn_anchors": true,
     "map_resolution_m": 0.004,
     "plan_resolution_m": 0.01,
     "robot_id": null,
     "robot_radius_m": 0.1,
     "obstacle_threshold": 30,
     "min_obstacle_area_m2": 0.0004,
+    "appearance_z": 5.0,
     "layout": {
       "origin": 29,
-      "x": 31,
+      "x": 32,
       "y": 30,
-      "opposite": 32
+      "opposite": 31
     },
     "focal_source": "tags",
     "focal_at_px": [
@@ -88,24 +70,24 @@
   "_arena_report": {
     "layout": {
       "origin": 29,
-      "x": 31,
+      "x": 32,
       "y": 30,
-      "opposite": 32
+      "opposite": 31
     },
     "corner_ids": [
       29,
-      31,
       32,
+      31,
       30
     ],
     "camera_distance_m": {
-      "31": 1.1042,
-      "30": 1.0299
+      "32": 1.5143,
+      "30": 1.1652
     },
     "tape_m": {},
-    "fit_px_free": 0.266,
-    "focal_free_px": 1059.29,
-    "source": "printed tag sizes (no tape yet): enter tape distances 29->31 and 29->30 for a precise scale",
+    "fit_px_free": 0.52,
+    "focal_free_px": 953.41,
+    "source": "printed tag sizes (no tape yet): enter tape distances 29->32 and 29->30 for a precise scale",
     "tags": {
       "29": {
         "xy_m": [
@@ -116,58 +98,58 @@
           0.0,
           0.0
         ],
-        "yaw_deg": 77.53
-      },
-      "31": {
-        "xy_m": [
-          1.1042,
-          0.0
-        ],
-        "camera_saw_xy_m": [
-          1.1042,
-          0.0
-        ],
-        "yaw_deg": 100.54
+        "yaw_deg": -91.85
       },
       "32": {
         "xy_m": [
-          0.983,
-          1.1521
+          1.5143,
+          0.0
         ],
         "camera_saw_xy_m": [
-          0.983,
-          1.1521
+          1.5143,
+          0.0
         ],
-        "yaw_deg": 105.88
+        "yaw_deg": 97.71
+      },
+      "31": {
+        "xy_m": [
+          1.5727,
+          0.9281
+        ],
+        "camera_saw_xy_m": [
+          1.5727,
+          0.9281
+        ],
+        "yaw_deg": 23.3
       },
       "30": {
         "xy_m": [
-          -0.1378,
-          1.0206
+          0.2222,
+          1.1438
         ],
         "camera_saw_xy_m": [
-          -0.1378,
-          1.0206
+          0.2222,
+          1.1438
         ],
-        "yaw_deg": 102.56
+        "yaw_deg": 85.47
       }
     },
     "warnings": [],
-    "fit_px": 0.266,
-    "focal_px": 1059.29,
+    "fit_px": 0.52,
+    "focal_px": 953.41,
     "focal_estimated": true,
     "k1": 0.0,
-    "camera_height_m": 1.8908,
+    "camera_height_m": 1.7464,
     "plane_rms_mm": 0.0,
     "focal_estimate": {
-      "f_px": 1059.29,
-      "f_mm_full_frame": 29.71
+      "f_px": 953.41,
+      "f_mm_full_frame": 26.74
     },
     "mm_per_camera_pixel": {
-      "c0": 4.27,
-      "c1": 4.1,
-      "c2": 2.12,
-      "c3": 2.32
+      "c0": 2.64,
+      "c1": 2.31,
+      "c2": 3.82,
+      "c3": 4.23
     }
   }
 }

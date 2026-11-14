@@ -2,18 +2,30 @@
 """
 object_detector.py
 
-Detect objects WITHOUT AprilTags (YOLO26 / YOLOE-26 via Ultralytics) and locate them on the
-floor plane built by arena_map.py.
+Detect objects WITHOUT AprilTags, class-agnostically, and locate them on the floor plane built
+by arena_map.py.
 
-  pip install ultralytics          (first use downloads the weights; YOLOE text prompts also
-                                    install OpenAI-CLIP automatically)
+  pip install ultralytics          (first use downloads the weights)
 
-Models
-  yoloe-26s-seg.pt     open vocabulary: detects whatever you type ("blue block, toy car, box")
-  yoloe-26n-seg.pt     same, smaller and faster
-  yoloe-26s-seg-pf.pt  prompt-free: boxes everything it knows (large, noisy vocabulary)
-  yolo26n.pt / yolo26s.pt   80 fixed COCO classes (person, chair, cup, laptop, ...)
-  your_model.pt        anything you trained with Ultralytics
+What "class-agnostic" means here
+  Nothing is predefined: no list of things to look for, no text prompts, no stored
+  appearance of objects seen before. Every frame, a prompt-free YOLOE model proposes regions
+  that look like distinct objects, and every proposal is just "an object". Whether it counts
+  is decided by geometry on the floor plane, not by what the model thinks it is:
+    * the box must touch the floor at a plausible place (its contact edge projects onto the
+      plane within range) and have a plausible footprint;
+    * boxes covering a large part of the image (the scene itself, the floor) are dropped;
+    * boxes that are really an AprilTag are dropped (the tag is tracked far more precisely);
+    * overlapping proposals are merged (one object, one entry, whatever the label);
+    * a new object must show up in 2 detector cycles before it is reported, so one-frame
+      flickers never become obstacles.
+  Tracks are matched by floor position only. A never-seen object is picked up the first time
+  it appears; the model's own class label is discarded.
+
+Models (prompt-free, no text encoder needed)
+  yoloe-26s-seg-pf.pt   default: segments everything that looks like an object
+  yoloe-26n-seg-pf.pt   smaller and faster
+  your_model.pt         any Ultralytics detection / segmentation model (labels are ignored)
 
 From image box to floor coordinates
   The floor plane is known, so a pixel where an object touches the floor maps to an exact
@@ -27,6 +39,7 @@ Limits (honest)
   * Position is the floor contact point plus half the assumed depth: good to ~1-3 cm for
     compact objects, rougher for long objects seen end-on.
   * Things not standing on the floor (on a table, held in a hand) get wrong floor positions.
+  * Flat things (paper, tape) are proposed too; they become low obstacles.
   * Detection runs at the model's own rate (CPU: a few per second; GPU: real time); positions
     use the newest detections, which can be a few hundred ms old.
 """
@@ -39,28 +52,19 @@ import cv2
 import numpy as np
 
 MODEL_CHOICES = [
-    ("yoloe-26s-seg.pt", "YOLOE-26s: any object you name (text prompts)"),
-    ("yoloe-26n-seg.pt", "YOLOE-26n: any object you name, faster"),
-    ("yolo26n.pt", "YOLO26n: 80 everyday COCO classes, fastest"),
-    ("yolo26s.pt", "YOLO26s: 80 COCO classes, more accurate"),
-    ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: everything it knows (noisy)"),
+    ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: any object, no class list (default)"),
+    ("yoloe-26n-seg-pf.pt", "YOLOE-26n prompt-free: any object, faster"),
 ]
-DEFAULT_PROMPTS = ("person, robot, toy car, box, cardboard box, block, bag, chair, laptop, cup, bottle, "
-                   "shoe, trash can, ball")
 DET_ID_BASE = 1000          # detected objects get ids 1000+ (tags use 0-101)
-
-
-def is_open_vocab(model_name):
-    n = model_name.lower()
-    return "yoloe" in n and "-pf" not in n
+MAX_BOX_FRAC = 0.25         # a box covering more of the image than this is the scene, not an object
 
 
 class ObjectDetector:
-    """Runs a YOLO model on the newest submitted frame in a background thread."""
+    """Runs a prompt-free YOLO model on the newest submitted frame in a background thread.
+    Every detection is a generic object; class labels are discarded."""
 
-    def __init__(self, model_name, prompts=DEFAULT_PROMPTS, conf=0.3, imgsz=640, device=None):
+    def __init__(self, model_name, conf=0.15, imgsz=640, device=None):
         self.model_name, self.conf, self.imgsz, self.device = model_name, conf, imgsz, device
-        self.prompts = [p.strip() for p in str(prompts).split(",") if p.strip()]
         self.model = None
         self.status = "loading model…"
         self.error = None
@@ -84,9 +88,9 @@ class ObjectDetector:
         with self._lock:
             return self._latest
 
-    def configure(self, prompts=None, conf=None, imgsz=None):
-        """Change prompts / confidence / image size without reloading the model."""
-        self._reconfig = (prompts, conf, imgsz)
+    def configure(self, conf=None, imgsz=None):
+        """Change confidence / image size without reloading the model."""
+        self._reconfig = (conf, imgsz)
 
     def stop(self):
         self.running = False
@@ -95,13 +99,19 @@ class ObjectDetector:
     # ---- worker
     def _load(self):
         from ultralytics import YOLO, YOLOE
-        if "yoloe" in self.model_name.lower():
-            m = YOLOE(self.model_name)
-        else:
-            m = YOLO(self.model_name)
-        if is_open_vocab(self.model_name) and self.prompts:
-            m.set_classes(self.prompts)
-        return m
+        return YOLOE(self.model_name) if "yoloe" in self.model_name.lower() else YOLO(self.model_name)
+
+    @staticmethod
+    def _cap_cpu_threads():
+        """The tag detector already uses several cores. Torch (ultralytics sets cores - 1 when
+        the predictor is set up) then oversubscribes the CPU and inference got ~5-10x slower
+        (1.3 s instead of ~0.15-0.3 s per frame). Use half the cores. Called before every
+        predict because ultralytics resets the count while setting up its predictor."""
+        import os
+        import torch
+        n = max(1, (os.cpu_count() or 4) // 2)
+        if not torch.cuda.is_available() and torch.get_num_threads() != n:
+            torch.set_num_threads(n)
 
     def _loop(self):
         try:
@@ -117,19 +127,12 @@ class ObjectDetector:
             if not self.running:
                 break
             if self._reconfig is not None:
-                prompts, conf, imgsz = self._reconfig
+                conf, imgsz = self._reconfig
                 self._reconfig = None
                 if conf is not None:
                     self.conf = conf
                 if imgsz is not None:
                     self.imgsz = imgsz
-                if prompts is not None:
-                    self.prompts = [p.strip() for p in prompts.split(",") if p.strip()]
-                    if is_open_vocab(self.model_name) and self.prompts:
-                        try:
-                            self.model.set_classes(self.prompts)
-                        except Exception as e:
-                            self.error = f"prompts: {e}"
             with self._lock:
                 item, self._frame = self._frame, None
             if item is None:
@@ -137,30 +140,33 @@ class ObjectDetector:
             frame, stamp = item
             t0 = time.perf_counter()
             try:
-                kw = dict(conf=self.conf, imgsz=self.imgsz, verbose=False)
+                # agnostic_nms: overlapping boxes are merged whatever label the model gave them
+                kw = dict(conf=self.conf, imgsz=self.imgsz, verbose=False, agnostic_nms=True)
                 if self.device:
                     kw["device"] = self.device
+                self._cap_cpu_threads()
                 r = self.model.predict(frame, **kw)[0]
-                dets = self._parse(r)
+                dets = self._parse(r, frame.shape)
             except Exception as e:
                 self.error = f"{type(e).__name__}: {e}"
                 continue
             self.infer_ms = (time.perf_counter() - t0) * 1e3
-            self.status = f"{len(dets)} objects, {self.infer_ms:.0f} ms/frame"
+            self.status = f"{len(dets)} proposals, {self.infer_ms:.0f} ms/frame"
             with self._lock:
                 self._latest = (stamp, dets)
 
     @staticmethod
-    def _parse(r):
-        names = r.names
+    def _parse(r, shape):
         out = []
         if r.boxes is None:
             return out
+        img_area = float(shape[0] * shape[1])
         polys = r.masks.xy if getattr(r, "masks", None) is not None else None
-        for k, (b, c, p) in enumerate(zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls.cpu().numpy(),
-                                          r.boxes.conf.cpu().numpy())):
+        for k, (b, p) in enumerate(zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())):
             x1, y1, x2, y2 = [float(v) for v in b]
-            d = {"name": str(names[int(c)]), "conf": float(p), "box": (x1, y1, x2, y2)}
+            if (x2 - x1) * (y2 - y1) > MAX_BOX_FRAC * img_area:
+                continue
+            d = {"name": "object", "conf": float(p), "box": (x1, y1, x2, y2)}
             poly = None
             if polys is not None and k < len(polys) and len(polys[k]) >= 3:
                 poly = np.asarray(polys[k], np.float64)
@@ -168,6 +174,23 @@ class ObjectDetector:
             d["poly"] = poly
             out.append(d)
         return out
+
+
+def drop_tag_boxes(dets, tag_quads):
+    """Remove proposals that are really an AprilTag: a box around a tag's center that is not
+    much bigger than the tag itself. (A box much bigger than a tag inside it is a tagged
+    object, e.g. a crate with a tag on top, and is kept.)"""
+    if not tag_quads:
+        return dets
+    tags = [(np.asarray(q, np.float64).mean(0), cv2.contourArea(np.asarray(q, np.float32))) for q in tag_quads]
+    keep = []
+    for d in dets:
+        x1, y1, x2, y2 = d["box"]
+        area = max((x2 - x1) * (y2 - y1), 1.0)
+        if any(x1 <= c[0] <= x2 and y1 <= c[1] <= y2 and area < 4.0 * max(a, 1.0) for c, a in tags):
+            continue
+        keep.append(d)
+    return keep
 
 
 def bottom_edge(poly, box, bins=12):
@@ -262,17 +285,25 @@ def localize(dets, floor, K, D, max_range=8.0):
 
 def dedupe(objs, tag_points=()):
     """Clean up one frame of floor objects:
-    * the same thing boxed twice (two prompts, or two boxes) -> keep the more confident one;
+    * the same thing proposed twice (whole object and a face / shadow of it, two overlapping
+      boxes) -> keep the more confident one. Decided on the floor: centers close together, or
+      footprints overlapping by more than 30 % of the smaller one;
     * a detection that contains an AprilTag object -> dropped, the tag is far more precise."""
     keep = []
     for o in sorted(objs, key=lambda o: -o["conf"]):
         hull = o["footprint"].astype(np.float32)
         if any(cv2.pointPolygonTest(hull, (float(x), float(y)), True) > -0.02 for x, y in tag_points):
             continue
+        area = cv2.contourArea(hull)
         dup = False
         for k in keep:
             dist = math.hypot(k["x"] - o["x"], k["y"] - o["y"])
             if dist < 0.5 * max(min(k["width_m"], o["width_m"]), 0.05):
+                dup = True
+                break
+            khull = k["footprint"].astype(np.float32)
+            inter, _ = cv2.intersectConvexConvex(khull, hull)
+            if inter > 0.3 * max(min(area, cv2.contourArea(khull)), 1e-6):
                 dup = True
                 break
         if not dup:
@@ -281,11 +312,13 @@ def dedupe(objs, tag_points=()):
 
 
 class FloorTracker:
-    """Keeps detected objects' ids stable: matches each new detection to the nearest track of
-    the same class on the floor, smooths positions, forgets tracks unseen for `ttl` seconds."""
+    """Keeps detected objects' ids stable by floor position alone (labels play no part):
+    each new detection is matched to the nearest track within a gate, positions are smoothed,
+    tracks unseen for `ttl` seconds are forgotten. A new track is reported only once it has
+    been seen `min_hits` times (filters single-cycle false proposals)."""
 
-    def __init__(self, gate_m=0.25, ttl=1.5, alpha=0.5):
-        self.gate, self.ttl, self.alpha = gate_m, ttl, alpha
+    def __init__(self, gate_m=0.25, ttl=1.5, alpha=0.5, min_hits=2):
+        self.gate, self.ttl, self.alpha, self.min_hits = gate_m, ttl, alpha, min_hits
         self.tracks = {}
         self.next_id = DET_ID_BASE
 
@@ -294,7 +327,7 @@ class FloorTracker:
         for o in sorted(objs, key=lambda o: -o["conf"]):
             best, bd = None, None
             for tid, t in self.tracks.items():
-                if tid in used or t["name"] != o["name"]:
+                if tid in used:
                     continue
                 dist = math.hypot(t["x"] - o["x"], t["y"] - o["y"])
                 if dist < max(self.gate, 0.6 * o["width_m"]) and (bd is None or dist < bd):
@@ -302,8 +335,7 @@ class FloorTracker:
             if best is None:
                 best = self.next_id
                 self.next_id += 1
-                self.tracks[best] = dict(o)
-                self.tracks[best]["first"] = now
+                self.tracks[best] = dict(o, first=now, hits=0)
             else:
                 t = self.tracks[best]
                 a = self.alpha
@@ -313,17 +345,19 @@ class FloorTracker:
                 t["footprint"] = o["footprint"] + (np.array([t["x"], t["y"]]) - [o["x"], o["y"]])
                 t["contact"], t["box"] = o["contact"], o["box"]
             self.tracks[best]["seen"] = now
+            self.tracks[best]["hits"] += 1
             used.add(best)
         for tid in [t for t, v in self.tracks.items() if now - v["seen"] > self.ttl]:
             del self.tracks[tid]
-        return {tid: t for tid, t in self.tracks.items() if tid in used or now - t["seen"] <= self.ttl}
+        return {tid: t for tid, t in self.tracks.items()
+                if t["hits"] >= self.min_hits and (tid in used or now - t["seen"] <= self.ttl)}
 
 
 def as_result_objects(tracks, now):
     """Detected objects in the same format as tag objects (so tables, map, A* use them)."""
     out = []
     for tid, t in tracks.items():
-        out.append({"id": tid, "name": t["name"], "frame": "world", "method": "detect",
+        out.append({"id": tid, "name": "object", "frame": "world", "method": "detect",
                     "x": t["x"], "y": t["y"], "z": 0.0, "yaw_deg": 0.0, "tilt_deg": 0.0,
                     "reproj_px": 0.0, "conf": round(t["conf"], 2), "width_m": round(t["width_m"], 3),
                     "depth_m": round(t["depth_m"], 3), "height_m": round(t["height_m"], 3),
@@ -338,7 +372,8 @@ def draw_detections(frame, objs, color=(255, 0, 255)):
         stale = o.get("age_s", 0) > 0.6
         col = (150, 100, 150) if stale else color
         cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
-        txt = f"{o['id']} {o['name']} {o.get('conf', 0):.2f}  ({o['x']:+.2f}, {o['y']:+.2f}) h{o.get('height_m', 0):.2f}"
+        txt = (f"obj {o['id']}  ({o['x']:+.2f}, {o['y']:+.2f})  "
+               f"{o.get('width_m', 0) * 100:.0f}x{o.get('depth_m', 0) * 100:.0f} cm, h {o.get('height_m', 0) * 100:.0f} cm")
         (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), (0, 0, 0), -1)
         cv2.putText(frame, txt, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)

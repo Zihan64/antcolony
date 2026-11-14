@@ -13,17 +13,19 @@ Panels
   Table      per tag pose, jitter (std dev over a rolling window), update rate,
              reprojection error, and error vs ground truth when available.
 
-  Arena/A*   bird's-eye metric map between the 4 corner tags (29-32 by default), obstacles,
-             occupancy grid and A* path. Left click = goal, right click = start.
-             Setup: lay the 4 tags flat at the corners (any order, first id = origin). When all
-             4 are in view the plane is built automatically and drawn on the camera image.
+  Arena/A*   bird's-eye metric map between the 4 pivot tags, obstacles, occupancy grid and
+             A* path. Left click = goal, right click = start.
+             Pivots: the 4 LARGEST tags on the print sheet (29-32, 112 mm) are the only tags that
+             define the floor plane. Lay them flat at the corners (any order). Other tags may be
+             in view at any time: they are objects and never shift the plane. When all 4 pivots
+             are in view the plane is built automatically and drawn on the camera image.
              The log then names the two distances to tape-measure (origin -> +x, origin -> +y);
              enter them and press "Apply tape measurements" (also estimates the focal length
              when no calibration file is loaded). Clear the floor, press "Capture empty floor".
              "Tags lie flat on the floor" locates tags by ray-plane intersection (mm precision).
              The map covers all visible floor out to "Map range" (beyond the tags too), grows
-             as new floor is seen, accumulates obstacle evidence over frames, re-locks the pose
-             after the camera moves, and learns still floor tags as extra anchors.
+             as new floor is seen, accumulates obstacle evidence over frames, and re-locks the
+             pose after the camera moves.
              "UDP out" streams robot pose, path and a steering command as JSON every frame.
 
 Testing tools
@@ -42,7 +44,10 @@ Run
 Keep apriltag_sheet_a4.json next to the scripts: it holds the printed marker sizes.
 AprilTags and ArUco markers are tracked together. IDs are global: AprilTag 0-86 keep their
 number, ArUco 0-14 become 87-101 (the table's Name column shows e.g. "aruco3" for id 90).
-Floor setup: lay 3+ tags flat on the floor, type their IDs under Floor, press Survey floor.
+Layout: the Run tab has what is needed to operate (camera, arena setup, A*, object detection,
+log); calibration and tuning live in the Settings tab.
+Objects without tags: a prompt-free YOLOE model finds any object (no class list, nothing
+learned from earlier sightings) and places it on the floor map.
 """
 
 import argparse
@@ -174,6 +179,11 @@ class SyntheticScene:
         self.tvec = -self.R @ self.C
 
         cfg = m.load_config(None)
+        # The robot carries ArUco DICT_4X4_50 #3 (= global 90). The print sheet only lists the
+        # AprilTags 0-86, so the scene declares that family and the marker's size itself.
+        cfg["families"] = m.normalize_families([{"name": "tag36h11", "offset": 0},
+                                                {"name": "DICT_4X4_50", "offset": 87, "ids": [0, 14]}])
+        cfg["tag_sizes"].setdefault(90, 0.05)
         if raw:
             self.corners = {29: (self.AW, self.AH, 90.0), 30: (self.AW, 0.0, 0.0),
                             31: (0.0, self.AH, 180.0), 32: (0.0, 0.0, -90.0)}
@@ -288,17 +298,6 @@ class SyntheticScene:
 # Worker thread
 # --------------------------------------------------------------------------
 
-def blocked_full(blocked, amap):
-    """Planning grid (coarse, inflated) upsampled back to map pixels, for display."""
-    f = amap.arena["plan_resolution_m"] / amap.res
-    up = cv2.resize(blocked.astype(np.uint8), (int(round(blocked.shape[1] * f)), int(round(blocked.shape[0] * f))),
-                    interpolation=cv2.INTER_NEAREST)
-    out = np.zeros((amap.H, amap.W), np.uint8)
-    h, w = min(amap.H, up.shape[0]), min(amap.W, up.shape[1])
-    out[:h, :w] = up[:h, :w]
-    return out.astype(bool)
-
-
 class Worker(QtCore.QThread):
     frame_ready = pyqtSignal(QtGui.QImage, float)
     arena_ready = pyqtSignal(QtGui.QImage, float, dict)
@@ -331,11 +330,12 @@ class Worker(QtCore.QThread):
         self.udp = None                # (socket, (host, port))
         self._last_plan_t = 0.0
         self._plan = None
-        self.learner = am.AnchorLearner()
-        self.objdet = None             # object_detector.ObjectDetector (objects without tags)
+        self.objdet = None             # object_detector.ObjectDetector (optional YOLO proposals)
+        self.appearance = False        # objects = floor that does not look like floor (no model)
+        self.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=3)
+        self._app_objs = []
         self.tracker = od.FloorTracker()
         self.det_obstacles = True
-        self.det_ignore = set()
         self._det_stamp = None
         self._det_objs = []
         self.pair = None               # (start tag id, goal tag id) for tag-to-tag paths
@@ -375,7 +375,8 @@ class Worker(QtCore.QThread):
         st, dets = self.objdet.latest()
         if st != self._det_stamp:
             self._det_stamp = st
-            dets = [d for d in dets if d["name"].lower() not in self.det_ignore]
+            # a proposal that is really an AprilTag is dropped: the tag itself is tracked precisely
+            dets = od.drop_tag_boxes(dets, [c for _, c in r.get("_dets", [])])
             objs = od.localize(dets, floor, self.mapper.K, self.mapper.D) if floor.valid else []
             tag_pts = [(o["x"], o["y"]) for o in r["objects"]
                        if o.get("frame") == "world" and o.get("method") != "detect"]
@@ -400,18 +401,10 @@ class Worker(QtCore.QThread):
         gm, floor, cfg = self.amap, self.mapper.floor, self.mapper.cfg
         K, D = self.mapper.K, self.mapper.D
         a = gm.arena
-        info = {"valid": False, "events": floor.pop_events(), "learned": {}}
-        # learned anchors: flat tags that stay still on the floor
-        if a.get("learn_anchors") and floor.valid:
-            for tid, spec in self.learner.step(r, floor, cfg).items():
-                size = self.mapper.tag_size(tid)
-                corners = (m.rot_z(spec["yaw_deg"]) @ m.tag_corners_local(size).T).T + [spec["x"], spec["y"], 0.0]
-                floor.add_anchor(tid, corners)
-                cfg["floor_tags"][tid] = spec
-                info["learned"][tid] = spec
+        info = {"valid": False, "events": floor.pop_events()}
         if not floor.valid:
             self.arena_last = info
-            if info["events"] or info["learned"]:
+            if info["events"]:
                 self.arena_ready.emit(QtGui.QImage(), 1.0, info)
             return
         objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world"}
@@ -448,10 +441,29 @@ class Worker(QtCore.QThread):
             g_rad = spec.get("radius") or 0.75 * max(spec.get("footprint", [self.mapper.tag_size(pair[1])]))
             clear.append(am.ArenaMap.body_outline(goal[0], goal[1], g_rad + 0.01,
                                                   max(g_obj.get("z", 0.0), 0.0) + 0.01, floor.camera_position))
+        # Flat tags on the floor (pivots, markers) are paper, not obstacles: their outline, with
+        # the white border, is cleared from the obstacle evidence. Pivots are cleared at their known
+        # floor position whether or not they were detected in this frame.
+        for tid, wc in floor.world_corners.items():
+            ctr = wc[:, :2].mean(0)
+            clear.append(ctr + (wc[:, :2] - ctr) * 1.45)
+        for tid, c in r.get("_dets", []):
+            if tid in floor.world_corners:
+                continue
+            o_ = objs.get(tid)
+            if tid not in floor.world_corners and not (o_ and o_.get("method") == "plane"):
+                continue
+            pts = [floor.pixel_to_floor(u, v, K, D) for u, v in c]
+            if any(p_ is None for p_ in pts):
+                continue
+            pts = np.array(pts)[:, :2]
+            ctr = pts.mean(0)
+            clear.append(ctr + (pts - ctr) * 1.45)
         cap = False
         if self.capture_bg > 0:
             self.capture_bg -= 1
             cap = self.capture_bg == 0
+        gm.detect_appearance = self.appearance
         # Fuse into the map at most ~10x per second; tag tracking keeps running every frame.
         fuse_ok = floor.locked or not floor.auto_lock   # pause while the camera is moving
         info["map_paused"] = not fuse_ok
@@ -459,6 +471,19 @@ class Worker(QtCore.QThread):
             gm.update(raw, floor, K, D, now, clear_polys=clear, max_range=float(a["max_range_m"]),
                       min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap)
             self._fuse_t = now
+            if self.appearance:
+                found = gm.objects_in_view()
+                tag_pts = [(o_["x"], o_["y"]) for o_ in objs.values() if o_.get("method") != "detect"]
+                tracks = self.app_tracker.update(od.dedupe(found, tag_pts), now)
+                self._app_objs = od.as_result_objects(tracks, now)
+                for o_ in self._app_objs:
+                    o_["method"] = "appearance"
+                    o_["obstacle"] = False        # already an obstacle in the map itself
+        if not self.appearance:
+            self._app_objs = []
+        r["objects"].extend(self._app_objs)
+        for o_ in self._app_objs:
+            objs.setdefault(o_["id"], o_)
         if cap:
             info["background_captured"] = True
 
@@ -525,7 +550,7 @@ class Worker(QtCore.QThread):
                 pass
 
         if not draw:
-            if info["events"] or info["learned"] or info.get("background_captured"):
+            if info["events"] or info.get("background_captured"):
                 self.arena_ready.emit(QtGui.QImage(), 1.0, info)
             return
         self._draw_t = now
@@ -550,9 +575,6 @@ class Worker(QtCore.QThread):
                 p_ = tuple(np.round(gm.w2p([(o["x"], o["y"])])[0]).astype(int))
                 cv2.putText(vis, f"{o['id']} {o['name']}", (p_[0] + 6, p_[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
                             0.45, col, 1, cv2.LINE_AA)
-        for tid in floor.learned:
-            c = floor.world_corners[tid][:, :2]
-            cv2.polylines(vis, [np.round(gm.w2p(c)).astype(np.int32)], True, (0, 255, 255), 2)
         if robot is not None:
             p = tuple(np.round(gm.w2p([(robot["x"], robot["y"])])[0]).astype(int))
             cv2.circle(vis, p, int(round(a["robot_radius_m"] / gm.res)), (255, 0, 255), 1)
@@ -628,6 +650,13 @@ class Worker(QtCore.QThread):
                                           max_range=float(self.amap.arena.get("max_range_m", 4.0)))
                         else:
                             m.draw_floor_grid(frame, floor, K, D)
+                    if floor.valid:
+                        for o in self._app_objs:
+                            poly = np.column_stack([o["footprint_poly"], np.zeros(len(o["footprint_poly"]))])
+                            pp = np.round(floor.world_to_pixel(poly, K, D)).astype(np.int32)
+                            cv2.polylines(frame, [pp], True, (255, 0, 255), 2, cv2.LINE_AA)
+                            m._put(frame, f"obj {o['id']} ({o['x']:+.2f}, {o['y']:+.2f})",
+                                   (int(pp[:, 0].min()), int(pp[:, 1].min()) - 6), (255, 0, 255))
                     if self.objdet is not None:
                         od.draw_detections(frame, [o for o in self._det_objs if "box" in o and o.get("frame") == "world"])
                         for o in self._det_objs:
@@ -780,7 +809,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected = None
         self.pins = []
         self.measure = None
-        self.survey = None
         self.arena_setup = None
         self.fitted = False
         self._build_ui()
@@ -790,11 +818,27 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- layout ----------------
     def _build_ui(self):
         a = self.args
-        ctrl = QtWidgets.QWidget()
-        cl = QtWidgets.QVBoxLayout(ctrl)
 
-        src = QtWidgets.QGroupBox("Source")
-        f = QtWidgets.QFormLayout(src)
+        def group(title, parent_layout):
+            box = QtWidgets.QGroupBox(title)
+            form = QtWidgets.QFormLayout(box)
+            parent_layout.addWidget(box)
+            return form
+
+        def hrow(*widgets):
+            row = QtWidgets.QHBoxLayout()
+            for w_ in widgets:
+                row.addWidget(w_)
+            return row
+
+        # Two tabs on the left: "Run" holds only what is needed to operate (camera, arena,
+        # A*, objects, log); "Settings" holds calibration and tuning.
+        run_page = QtWidgets.QWidget()
+        cl = QtWidgets.QVBoxLayout(run_page)
+        set_page = QtWidgets.QWidget()
+        sl = QtWidgets.QVBoxLayout(set_page)
+
+        # ---------------- widgets ----------------
         self.src_combo = QtWidgets.QComboBox()
         self.src_combo.addItems(["Camera", "Video file", "Synthetic"])
         self.cam_combo = QtWidgets.QComboBox(editable=True)
@@ -826,31 +870,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calib_edit = QtWidgets.QLineEdit(a.calib or "")
         self.config_edit = QtWidgets.QLineEdit(a.config or "")
         self.focal_spin = QtWidgets.QDoubleSpinBox(minimum=8, maximum=800, value=a.focal_mm, suffix=" mm")
-        f.addRow("Type", self.src_combo)
-        f.addRow("Connection", self.conn_combo)
-        f.addRow("Camera", cam_row)
-        f.addRow("Backend", self.backend_combo)
-        tools = QtWidgets.QHBoxLayout()
         prev_btn = QtWidgets.QPushButton("Preview all")
         prev_btn.setToolTip("Grab one frame from every camera index so you can see which one is the Sony")
         prev_btn.clicked.connect(self.preview_all)
         diag_btn = QtWidgets.QPushButton("Diagnose")
         diag_btn.setToolTip("Explain why the A7 IV or capture card is not found")
         diag_btn.clicked.connect(self.diagnose)
-        tools.addWidget(prev_btn)
-        tools.addWidget(diag_btn)
-        f.addRow(tools)
         self.cam_tool_btns = (prev_btn, diag_btn)
-        f.addRow("Resolution", self.res_combo)
-        f.addRow("FPS", self.fps_spin)
-        f.addRow("Video", self._with_browse(self.video_edit, "Video (*.mp4 *.mov *.avi *.mkv)"))
-        f.addRow("Calib .npz", self._with_browse(self.calib_edit, "Calibration (*.npz)"))
-        f.addRow("Config .json", self._with_browse(self.config_edit, "Config (*.json)"))
-        f.addRow("Focal (no calib)", self.focal_spin)
         self.start_btn = QtWidgets.QPushButton("Start")
         self.start_btn.clicked.connect(self.toggle_run)
-        f.addRow(self.start_btn)
-        cl.addWidget(src)
         if a.synthetic or getattr(a, "synthetic_raw", False):
             self.src_combo.setCurrentText("Synthetic")
         elif a.video:
@@ -860,12 +888,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.res_combo.addItem(res)
         self.res_combo.setCurrentText(res)
 
-        det = QtWidgets.QGroupBox("Detection")
-        f = QtWidgets.QFormLayout(det)
+        # tag detection
         self.engine_combo = QtWidgets.QComboBox()
         self.engine_combo.addItems(["auto", "pupil", "aruco"])
         self.scale_spin = QtWidgets.QDoubleSpinBox(minimum=0.25, maximum=1.0, singleStep=0.05, value=1.0)
         self.decim_spin = QtWidgets.QDoubleSpinBox(minimum=1.0, maximum=4.0, singleStep=0.25, value=1.5)
+        self.decim_spin.setToolTip("Fast pass only. Small / far tags are still found: a full-resolution "
+                                   "background pass discovers them and they are tracked in upscaled crops.")
         self.smooth_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal, minimum=5, maximum=100, value=50)
         self.smooth_label = QtWidgets.QLabel("0.50")
         sm = QtWidgets.QHBoxLayout()
@@ -873,12 +902,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sm.addWidget(self.smooth_label)
         self.lock_chk = QtWidgets.QCheckBox("Lock floor pose")
         self.grid_chk = QtWidgets.QCheckBox("Floor grid overlay", checked=True)
-        f.addRow("Engine", self.engine_combo)
-        f.addRow("Detect scale", self.scale_spin)
-        f.addRow("Decimate (pupil)", self.decim_spin)
-        f.addRow("Smoothing α", sm)
-        f.addRow(self.lock_chk)
-        f.addRow(self.grid_chk)
         for w in (self.engine_combo,):
             w.currentTextChanged.connect(self._detector_changed)
         for w in (self.scale_spin, self.decim_spin):
@@ -886,30 +909,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smooth_slider.valueChanged.connect(self._smoothing_changed)
         self.lock_chk.toggled.connect(self._lock_toggled)
         self.grid_chk.toggled.connect(lambda v: self.worker and setattr(self.worker, "show_grid", v))
-        cl.addWidget(det)
 
-        flr = QtWidgets.QGroupBox("Floor")
-        f = QtWidgets.QFormLayout(flr)
-        self.floor_ids_edit = QtWidgets.QLineEdit(placeholderText="global IDs, e.g. 29,30,99,100 (blank = all)")
-        self.floor_origin_edit = QtWidgets.QLineEdit(placeholderText="blank = largest tag")
-        self.survey_spin = QtWidgets.QDoubleSpinBox(minimum=0.5, maximum=30, value=3.0, suffix=" s")
-        self.survey_btn = QtWidgets.QPushButton("Survey floor")
-        self.survey_btn.setToolTip("Lay 3+ tags flat on the floor, spread out. Keep the camera still. "
-                                   "Fits one plane through all of them and saves floor_survey.json.")
-        self.survey_btn.clicked.connect(self.start_survey)
-        self.floor_info = QtWidgets.QLabel("")
-        self.floor_info.setWordWrap(True)
-        f.addRow("Floor tag IDs", self.floor_ids_edit)
-        f.addRow("Origin tag", self.floor_origin_edit)
-        f.addRow("Survey for", self.survey_spin)
-        f.addRow(self.survey_btn)
-        f.addRow(self.floor_info)
-        cl.addWidget(flr)
-
-        arg = QtWidgets.QGroupBox("Arena (4 corner tags) and A*")
-        f = QtWidgets.QFormLayout(arg)
-        self.ar_corners = QtWidgets.QLineEdit("29,30,31,32")
-        self.ar_corners.setToolTip("origin, +x, opposite, +y (counter-clockwise seen from above)")
+        # arena calibration
         self.ar_w = QtWidgets.QDoubleSpinBox(minimum=0, maximum=20, decimals=3, singleStep=0.001, suffix=" m")
         self.ar_h = QtWidgets.QDoubleSpinBox(minimum=0, maximum=20, decimals=3, singleStep=0.001, suffix=" m")
         for w_ in (self.ar_w, self.ar_h):
@@ -932,6 +933,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ar_robot_h.setToolTip("Height of the robot's tag above the floor. With it, plane mode "
                                    "locates the robot to ~mm. auto = 3D pose if the tag is above the floor.")
         self.ar_robot_h.valueChanged.connect(self._plane_mode_changed)
+        self.ar_adaptive = QtWidgets.QCheckBox("Adaptive pose (auto lock / re-lock)", checked=True)
+        self.ar_adaptive.setToolTip("Locks the floor pose when the camera is still, unlocks and re-locks "
+                                    "automatically when it is moved or bumped.")
+        self.ar_adaptive.toggled.connect(self._adaptive_changed)
+
+        # map and A*
         self.ar_robot = QtWidgets.QLineEdit(placeholderText="global ID, e.g. 90")
         self.ar_radius = QtWidgets.QDoubleSpinBox(minimum=0.0, maximum=1.0, decimals=3, singleStep=0.005,
                                                   value=0.10, suffix=" m")
@@ -941,80 +948,143 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ar_range = QtWidgets.QDoubleSpinBox(minimum=0.5, maximum=20, decimals=1, value=4.0, suffix=" m")
         self.ar_range.setToolTip("Map the floor out to this horizontal distance from the camera, "
                                  "including beyond the corner tags.")
-        self.ar_adaptive = QtWidgets.QCheckBox("Adaptive pose (auto lock / re-lock)", checked=True)
-        self.ar_adaptive.setToolTip("Locks the floor pose when the camera is still, unlocks and re-locks "
-                                    "automatically when it is moved or bumped.")
-        self.ar_adaptive.toggled.connect(self._adaptive_changed)
-        self.ar_learn = QtWidgets.QCheckBox("Learn new floor tags as anchors", checked=True)
-        self.ar_learn.setToolTip("Tags lying still and flat on the floor become extra anchors, so the plane "
-                                 "stays accurate when corners are hidden or the camera looks elsewhere. "
-                                 "An anchor that later moves is dropped.")
         self.ar_unknown = QtWidgets.QCheckBox("Unseen floor is blocked for A*", checked=True)
-        reset_map = QtWidgets.QPushButton("Reset map")
-        reset_map.clicked.connect(self.reset_global_map)
-        for w_ in (self.ar_learn, self.ar_unknown):
-            w_.toggled.connect(self._arena_params_changed)
+        self.ar_unknown.toggled.connect(self._arena_params_changed)
         self.ar_range.valueChanged.connect(self._arena_params_changed)
         self.ar_plan = QtWidgets.QDoubleSpinBox(minimum=0.5, maximum=10, decimals=1, value=1.0, suffix=" cm")
         self.ar_thr = QtWidgets.QSpinBox(minimum=5, maximum=150, value=30)
         self.ar_thr.setToolTip("Color difference from the empty floor that counts as an obstacle")
-        self.ar_setup_btn = QtWidgets.QPushButton("Set up arena (2 s) / redo")
-        self.ar_setup_btn.setToolTip("Keep the camera still. Finds the 4 corner tags, builds the arena "
-                                     "frame, averages and locks the camera pose, saves arena.json.")
-        self.ar_setup_btn.clicked.connect(self.start_arena_setup)
-        self.ar_bg_btn = QtWidgets.QPushButton("Capture empty floor")
-        self.ar_bg_btn.setToolTip("Clear the arena (robot may stay), then press. Anything that later "
-                                  "differs from this image becomes an obstacle.")
-        self.ar_bg_btn.clicked.connect(self.capture_background)
-        self.ar_auto = QtWidgets.QCheckBox("Replan continuously", checked=True)
-        self.ar_auto.toggled.connect(lambda v: self.worker and setattr(self.worker, "auto_replan", v))
-        clear_goal = QtWidgets.QPushButton("Clear goal")
-        clear_goal.clicked.connect(self.clear_goal)
+        reset_map = QtWidgets.QPushButton("Reset map")
+        reset_map.clicked.connect(self.reset_global_map)
         save_map = QtWidgets.QPushButton("Save map")
         save_map.clicked.connect(self.save_arena_map)
+        self.ar_auto = QtWidgets.QCheckBox("Replan continuously", checked=True)
+        self.ar_auto.toggled.connect(lambda v: self.worker and setattr(self.worker, "auto_replan", v))
         self.ar_udp = QtWidgets.QLineEdit(placeholderText="robot UDP out, e.g. 127.0.0.1:5005")
         self.ar_udp.editingFinished.connect(self._udp_changed)
         for w_ in (self.ar_radius, self.ar_res, self.ar_plan, self.ar_thr):
             w_.valueChanged.connect(self._arena_params_changed)
         self.ar_robot.editingFinished.connect(self._arena_params_changed)
-        f.addRow("Corner IDs", self.ar_corners)
+
+        # ================= Run tab =================
+        f = group("Camera", cl)
+        f.addRow("Type", self.src_combo)
+        f.addRow("Connection", self.conn_combo)
+        f.addRow("Camera", cam_row)
+        f.addRow(self.start_btn)
+
+        f = group("Floor plane (4 pivot tags)", cl)
+        self.pivot_label = QtWidgets.QLabel("Pivots: the 4 largest tags on the print sheet.")
+        self.pivot_label.setWordWrap(True)
+        self.pivot_label.setToolTip("Only these 4 tags define the floor plane. Any other tag in view is "
+                                    "tracked as an object and can never shift the floor.")
+        self.ar_setup_btn = QtWidgets.QPushButton("Set up arena (2 s) / redo")
+        self.ar_setup_btn.setToolTip("Keep the camera still. Uses the 4 pivot tags only (other tags may be in "
+                                     "view), builds the arena frame, locks the pose, saves arena.json. "
+                                     "Runs by itself when all 4 pivots are in view.")
+        self.ar_setup_btn.clicked.connect(self.start_arena_setup)
+        self.ar_bg_btn = QtWidgets.QPushButton("Capture empty floor")
+        self.ar_bg_btn.setToolTip("Optional. Clear the arena (robot may stay), then press: anything that later "
+                                  "differs from this image also becomes an obstacle.")
+        self.ar_bg_btn.clicked.connect(self.capture_background)
+        f.addRow(self.pivot_label)
+        f.addRow(self.ar_setup_btn)
+        f.addRow(self.ar_bg_btn)
+
+        f = group("A* path", cl)
+        self.pair_start = QtWidgets.QComboBox(editable=True)
+        self.pair_goal = QtWidgets.QComboBox(editable=True)
+        for cb in (self.pair_start, self.pair_goal):
+            cb.setToolTip("Any tag (0-101) or detected object (1000+) seen on the floor.")
+        self.pair_btn = QtWidgets.QPushButton("Plan path", checkable=True)
+        self.pair_btn.setToolTip("A* from the start to the goal, replanned live as either moves. The start "
+                                 "is treated as the robot: obstacles are inflated by the robot radius, and a "
+                                 "steering command is computed from its heading.")
+        self.pair_btn.toggled.connect(self.toggle_pair)
+        swap = QtWidgets.QPushButton("Swap")
+        swap.clicked.connect(self._swap_pair)
+        clear_goal = QtWidgets.QPushButton("Clear goal")
+        clear_goal.clicked.connect(self.clear_goal)
+        hint = QtWidgets.QLabel("Or click the Arena / A* view: left = goal, right = start.")
+        hint.setWordWrap(True)
+        self.pair_info = QtWidgets.QLabel("")
+        self.pair_info.setWordWrap(True)
+        f.addRow("Start (robot)", self.pair_start)
+        f.addRow("Goal", self.pair_goal)
+        f.addRow(self.pair_btn)
+        f.addRow(hrow(swap, clear_goal))
+        f.addRow(hint)
+        f.addRow(self.pair_info)
+
+        f = group("Objects without tags", cl)
+        self.det_chk = QtWidgets.QCheckBox("Detect objects (any object, no class list)", checked=True)
+        self.det_chk.setToolTip("Every part of the floor that does not look like the floor (compared with the "
+                                "rest of the floor in the same frame) becomes an object and an A* obstacle. "
+                                "No model, no class list, no stored reference. Optional YOLO in Settings. "
+                                "and places it on the floor map. Needs: pip install ultralytics.")
+        self.det_chk.toggled.connect(self.toggle_detection)
+        self.det_status = QtWidgets.QLabel("off")
+        self.det_status.setWordWrap(True)
+        f.addRow(self.det_chk)
+        f.addRow(self.det_status)
+
+        self.log = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.log.setMaximumBlockCount(500)
+        cl.addWidget(QtWidgets.QLabel("Log"))
+        self.log.setMinimumHeight(220)
+        cl.addWidget(self.log, 1)
+
+        # ================= Settings tab =================
+        f = group("Camera", sl)
+        f.addRow("Backend", self.backend_combo)
+        f.addRow(hrow(prev_btn, diag_btn))
+        f.addRow("Resolution", self.res_combo)
+        f.addRow("FPS", self.fps_spin)
+        f.addRow("Video", self._with_browse(self.video_edit, "Video (*.mp4 *.mov *.avi *.mkv)"))
+        f.addRow("Calib .npz", self._with_browse(self.calib_edit, "Calibration (*.npz)"))
+        f.addRow("Config .json", self._with_browse(self.config_edit, "Config (*.json)"))
+        f.addRow("Focal (no calib)", self.focal_spin)
+
+        f = group("Floor calibration", sl)
         f.addRow(self.ar_w_label, self.ar_w)
         f.addRow(self.ar_h_label, self.ar_h)
         f.addRow(self.ar_apply_btn)
         f.addRow(self.ar_floor_chk)
+        f.addRow(self.ar_adaptive)
+        f.addRow(self.lock_chk)
+
+        f = group("Robot", sl)
         f.addRow("Robot tag", self.ar_robot)
         f.addRow("Robot tag height", self.ar_robot_h)
         f.addRow("Robot radius", self.ar_radius)
+        f.addRow("UDP out", self.ar_udp)
+
+        f = group("Map and A*", sl)
         f.addRow("Map resolution", self.ar_res)
         f.addRow("Map range", self.ar_range)
         f.addRow("A* cell", self.ar_plan)
         f.addRow("Obstacle thresh.", self.ar_thr)
-        f.addRow(self.ar_setup_btn)
-        f.addRow(self.ar_bg_btn)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(clear_goal)
-        row.addWidget(save_map)
-        f.addRow(row)
         f.addRow(self.ar_auto)
-        f.addRow(self.ar_adaptive)
-        f.addRow(self.ar_learn)
         f.addRow(self.ar_unknown)
-        f.addRow(reset_map)
-        f.addRow("UDP out", self.ar_udp)
-        cl.addWidget(arg)
+        copy_wp = QtWidgets.QPushButton("Copy waypoints")
+        copy_wp.setToolTip("Copy the current path (arena meters) as JSON")
+        copy_wp.clicked.connect(self.copy_waypoints)
+        f.addRow(hrow(reset_map, save_map, copy_wp))
 
-        dg = QtWidgets.QGroupBox("Object detection (no tags)")
-        f = QtWidgets.QFormLayout(dg)
-        self.det_chk = QtWidgets.QCheckBox("Detect objects (YOLO)")
-        self.det_chk.setToolTip("Detect objects without AprilTags and locate them on the floor plane. "
-                                "Needs: pip install ultralytics (weights download on first use).")
-        self.det_chk.toggled.connect(self.toggle_detection)
+        f = group("Tag detection", sl)
+        f.addRow("Engine", self.engine_combo)
+        f.addRow("Detect scale", self.scale_spin)
+        f.addRow("Decimate (pupil)", self.decim_spin)
+        f.addRow("Smoothing α", sm)
+        f.addRow(self.grid_chk)
+
+        f = group("Object detection", sl)
         self.det_model = QtWidgets.QComboBox(editable=True)
         for name, desc in od.MODEL_CHOICES:
             self.det_model.addItem(name)
             self.det_model.setItemData(self.det_model.count() - 1, desc, Qt.ItemDataRole.ToolTipRole)
-        self.det_model.setToolTip("YOLOE = any object you name below. YOLO26 = 80 fixed everyday classes. "
-                                  "Or type the path of your own trained .pt")
+        self.det_model.setToolTip("Prompt-free models find any object without a class list. "
+                                  "You can also type the path of your own .pt (its labels are ignored).")
         mb = QtWidgets.QToolButton(text="…")
         mb.clicked.connect(lambda: self.det_model.setEditText(
             QtWidgets.QFileDialog.getOpenFileName(self, "Model", "", "Models (*.pt *.onnx)")[0]
@@ -1024,11 +1094,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ml.setContentsMargins(0, 0, 0, 0)
         ml.addWidget(self.det_model, 1)
         ml.addWidget(mb)
-        self.det_prompts = QtWidgets.QLineEdit(od.DEFAULT_PROMPTS)
-        self.det_prompts.setToolTip("YOLOE: what to look for, comma separated (plain words work: "
-                                    "'blue block, toy car, cardboard box'). YOLO26: ignored.")
-        self.det_prompts.editingFinished.connect(self._det_reconfig)
-        self.det_conf = QtWidgets.QDoubleSpinBox(minimum=0.05, maximum=0.95, singleStep=0.05, value=0.30)
+        self.det_conf = QtWidgets.QDoubleSpinBox(minimum=0.05, maximum=0.95, singleStep=0.05, value=0.15)
+        self.det_conf.setToolTip("Proposal confidence. Prompt-free scores are low; false proposals are "
+                                 "filtered by floor geometry and must persist for 2 detector cycles.")
         self.det_conf.valueChanged.connect(self._det_reconfig)
         self.det_size = QtWidgets.QComboBox()
         self.det_size.addItems(["640", "960", "1280"])
@@ -1036,50 +1104,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.det_size.currentTextChanged.connect(self._det_reconfig)
         self.det_obst = QtWidgets.QCheckBox("Detected objects are A* obstacles", checked=True)
         self.det_obst.toggled.connect(lambda v: self.worker and setattr(self.worker, "det_obstacles", v))
-        self.det_ignore = QtWidgets.QLineEdit(placeholderText="classes to ignore, e.g. person")
-        self.det_ignore.editingFinished.connect(self._det_reconfig)
-        self.det_status = QtWidgets.QLabel("off")
-        self.det_status.setWordWrap(True)
-        f.addRow(self.det_chk)
+        self.det_app_z = QtWidgets.QDoubleSpinBox(minimum=2.0, maximum=15.0, singleStep=0.5, value=5.0)
+        self.det_app_z.setToolTip("How unlike the floor something must look to be an object (robust std devs). "
+                                  "Lower = more sensitive (finds faint objects, more false hits).")
+        self.det_app_z.valueChanged.connect(self._det_reconfig)
+        self.det_yolo = QtWidgets.QCheckBox("Also use YOLO proposals (slow on CPU)")
+        self.det_yolo.setToolTip("Adds a prompt-free YOLOE model's boxes (class-agnostic) on top of the "
+                                 "appearance detector. Needs: pip install ultralytics.")
+        self.det_yolo.toggled.connect(lambda _: self.det_chk.isChecked() and self.toggle_detection(True))
+        f.addRow("Floor contrast", self.det_app_z)
+        f.addRow(self.det_yolo)
         f.addRow("Model", mrow)
-        f.addRow("Look for", self.det_prompts)
         f.addRow("Confidence", self.det_conf)
         f.addRow("Image size", self.det_size)
-        f.addRow("Ignore", self.det_ignore)
         f.addRow(self.det_obst)
-        f.addRow(self.det_status)
-        cl.addWidget(dg)
 
-        pth = QtWidgets.QGroupBox("Path between two tags / objects (robot navigation)")
-        f = QtWidgets.QFormLayout(pth)
-        self.pair_start = QtWidgets.QComboBox(editable=True)
-        self.pair_goal = QtWidgets.QComboBox(editable=True)
-        for cb in (self.pair_start, self.pair_goal):
-            cb.setToolTip("Any tag (0-101) or detected object (1000+) seen on the floor.")
-        self.pair_btn = QtWidgets.QPushButton("Plan path between tags", checkable=True)
-        self.pair_btn.setToolTip("A* from the start tag to the goal tag, replanned live as either moves. "
-                                 "The start tag is treated as the robot: obstacles are inflated by the "
-                                 "robot radius, and a steering command is computed from its heading.")
-        self.pair_btn.toggled.connect(self.toggle_pair)
-        swap = QtWidgets.QPushButton("Swap")
-        swap.clicked.connect(self._swap_pair)
-        copy_wp = QtWidgets.QPushButton("Copy waypoints")
-        copy_wp.setToolTip("Copy the current path (arena meters) as JSON")
-        copy_wp.clicked.connect(self.copy_waypoints)
-        self.pair_info = QtWidgets.QLabel("")
-        self.pair_info.setWordWrap(True)
-        f.addRow("Start (robot)", self.pair_start)
-        f.addRow("Goal", self.pair_goal)
-        f.addRow(self.pair_btn)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(swap)
-        row.addWidget(copy_wp)
-        f.addRow(row)
-        f.addRow(self.pair_info)
-        cl.addWidget(pth)
-
-        tst = QtWidgets.QGroupBox("Testing")
-        f = QtWidgets.QFormLayout(tst)
+        f = group("Testing", sl)
         self.window_spin = QtWidgets.QDoubleSpinBox(minimum=0.5, maximum=30, value=2.0, suffix=" s")
         self.meas_spin = QtWidgets.QDoubleSpinBox(minimum=0.5, maximum=60, value=3.0, suffix=" s")
         self.truth_edit = QtWidgets.QLineEdit(placeholderText="true x, y, z (m), optional")
@@ -1099,17 +1139,21 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.truth_edit)
         f.addRow(self.meas_btn)
         f.addRow(self.rec_btn)
-        row = QtWidgets.QHBoxLayout()
-        for b in (snap, reset, fit):
-            row.addWidget(b)
-        f.addRow(row)
-        cl.addWidget(tst)
+        f.addRow(hrow(snap, reset, fit))
+        sl.addStretch(1)
 
-        self.log = QtWidgets.QPlainTextEdit(readOnly=True)
-        self.log.setMaximumBlockCount(500)
-        cl.addWidget(QtWidgets.QLabel("Log"))
-        self.log.setMinimumHeight(220)
-        cl.addWidget(self.log, 1)
+        for cb in run_page.findChildren(QtWidgets.QComboBox) + set_page.findChildren(QtWidgets.QComboBox):
+            # long entries (camera names, model paths) must not widen the panel past its edge
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(8)
+        self.ctrl_tabs = QtWidgets.QTabWidget()
+        for page, title in ((run_page, "Run"), (set_page, "Settings")):
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidget(page)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.ctrl_tabs.addTab(scroll, title)
+        self.ctrl_tabs.setFixedWidth(340)
 
         # Video
         self.video = VideoView()
@@ -1190,12 +1234,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root = QtWidgets.QWidget()
         hl = QtWidgets.QHBoxLayout(root)
         hl.setContentsMargins(4, 4, 4, 4)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidget(ctrl)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(330)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        hl.addWidget(scroll)
+        hl.addWidget(self.ctrl_tabs)
         hl.addWidget(center, 1)
         self.setCentralWidget(root)
 
@@ -1369,17 +1408,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.source = PacedSource(scene.read, self.fps_spin.value() if self.fps_spin.value() <= 60 else 30)
             else:
                 cfg_path = self.config_edit.text().strip() or None
-                if cfg_path is None and m.default_config_path():
-                    cfg_path = os.path.abspath(m.default_config_path())
+                if cfg_path is None and os.path.exists(am.DEFAULT_ARENA_FILE):
+                    cfg_path = os.path.abspath(am.DEFAULT_ARENA_FILE)
                     self.config_edit.setText(cfg_path)
-                    self.log_msg(f"Using saved floor survey {cfg_path}")
+                    self.log_msg(f"Using saved arena {cfg_path}")
                 self.cfg = m.load_config(cfg_path)
                 if not self.cfg["sheet_loaded"]:
                     self.log_msg(f"WARNING: {m.DEFAULT_SHEET} not found. Tag sizes default to "
                                  f"{self.cfg['tag_size']} m, distances will be wrong.")
-                if len(self.cfg["floor_tags"]) < 3:
-                    self.log_msg(f"Only {len(self.cfg['floor_tags'])} floor tag(s) configured. For a level "
-                                 "floor, lay 3+ tags flat and press Survey floor.")
                 if mode == "Camera":
                     w, h = (int(v) for v in self.res_combo.currentText().split("x"))
                     spec = self._camera_spec()
@@ -1395,6 +1431,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     if (self.source.width, self.source.height) != (w, h):
                         self.log_msg(f"Note: asked for {w}x{h}, the device gives "
                                      f"{self.source.width}x{self.source.height}.")
+                        modes = m.device_formats(name) if name else None
+                        if modes:
+                            self.log_msg("   The camera offers only: " + ", ".join(
+                                f"{a_}x{b_}@{c_}" for a_, b_, c_ in modes) + ". The resolution is set ON the camera."
+                                + (" A7 IV: MENU > Setup > USB > USB Streaming > Output Res/Frame Rate > 1080p "
+                                   "(or 4K); tags far away need the pixels." if m.classify_camera(name) == "sony" else ""))
                     if self.conn_combo.currentData() == "usb" and name and m.classify_camera(name) != "sony":
                         self.log_msg(f"Note: '{name}' is not the Sony. Check the Camera list.")
                     if name and m.classify_camera(name) == "capture":
@@ -1410,6 +1452,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 K, D = m.load_intrinsics(ns, self.source.width, self.source.height)
                 if not ns.calib:
                     self.log_msg("No calibration file: using approximate intrinsics from focal length.")
+            # Only the 4 pivot tags (largest on the sheet) may define the floor plane. Saved floor
+            # tags beyond them (old learned anchors, an old survey) are dropped: they may come from
+            # another coordinate frame or have been moved since, and would bend the plane.
+            piv = am.arena_settings(self.cfg)["corner_ids"]
+            extra = sorted(set(self.cfg["floor_tags"]) - set(piv))
+            if extra:
+                self.log_msg(f"Ignoring saved floor tags {extra}: only the pivot tags {piv} define the "
+                             "floor plane. Those tags are tracked as objects.")
+            self.cfg["floor_tags"] = {k: v for k, v in self.cfg["floor_tags"].items() if k in piv}
+            if len(self.cfg["floor_tags"]) < 4:
+                self.log_msg(f"Pivot tags {piv}: lay them flat at the arena corners. The floor plane is "
+                             "set up automatically once all 4 are in view (other tags may be in view too).")
             self.has_calib = bool((mode == "Synthetic" and not self.scene.raw) or self.calib_edit.text().strip())
             a_ = (self.cfg or {}).get("arena") or {}
             if not self.has_calib and a_.get("focal_px") and mode != "Synthetic":
@@ -1451,12 +1505,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plane_mode_changed()
         self.mapper.floor.auto_lock = self.ar_adaptive.isChecked()
         self.mapper.floor.max_reproj_px = self._fit_limit()
-        self.worker.learner.exclude = {self.cfg["arena"].get("robot_id")} - {None}
         self.worker.auto_replan = self.ar_auto.isChecked()
         if amap is not None:
             self.worker.amap = amap
             self.log_msg("Arena loaded: press Set up arena to re-measure and lock, or Capture empty floor.")
         self._udp_changed()
+        if self.det_chk.isChecked():          # on by default; kept across Stop / Start
+            self.toggle_detection(True)
         self.worker.start()
         self.start_btn.setText("Stop")
         self.src_combo.setEnabled(False)
@@ -1478,10 +1533,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.mapper:
             _DETECTOR_KEEPALIVE.append(self.mapper.detector)
         self.lock_chk.setChecked(False)
-        self.det_chk.blockSignals(True)
-        self.det_chk.setChecked(False)
-        self.det_chk.blockSignals(False)
-        self.det_status.setText("off")
+        self.det_status.setText("on (starts with the camera)" if self.det_chk.isChecked() else "off")
         self.start_btn.setText("Start")
         self.src_combo.setEnabled(True)
         for b in self.cam_tool_btns:
@@ -1556,13 +1608,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- arena / A* ----------------
     def _arena_ui_to_settings(self, base=None):
-        a = am.arena_settings({"arena": dict(base or {})})
-        try:
-            ids = [int(v) for v in self.ar_corners.text().replace(" ", "").split(",") if v]
-            if len(ids) == 4:
-                a["corner_ids"] = ids
-        except ValueError:
-            self.log_msg("Corner IDs must be 4 numbers, e.g. 29,30,31,32")
+        a = am.arena_settings({"arena": dict(base or {}), "tag_sizes": (self.cfg or {}).get("tag_sizes", {})})
         tape = {}
         if self.ar_layout:
             if self.ar_w.value():
@@ -1579,18 +1625,18 @@ class MainWindow(QtWidgets.QMainWindow):
         a["robot_radius_m"] = self.ar_radius.value()
         a["map_resolution_m"] = (self.ar_res.value() / 1000.0) or None
         a["max_range_m"] = self.ar_range.value()
-        a["learn_anchors"] = self.ar_learn.isChecked()
         a["unknown_blocked"] = self.ar_unknown.isChecked()
         a["plan_resolution_m"] = self.ar_plan.value() / 100.0
         a["obstacle_threshold"] = self.ar_thr.value()
         return a
 
     def _arena_settings_to_ui(self, a):
-        widgets = (self.ar_corners, self.ar_w, self.ar_h, self.ar_robot, self.ar_radius,
-                   self.ar_res, self.ar_plan, self.ar_thr, self.ar_range, self.ar_learn, self.ar_unknown)
+        widgets = (self.ar_w, self.ar_h, self.ar_robot, self.ar_radius,
+                   self.ar_res, self.ar_plan, self.ar_thr, self.ar_range, self.ar_unknown)
         for w_ in widgets:
             w_.blockSignals(True)
-        self.ar_corners.setText(",".join(str(i) for i in a["corner_ids"]))
+        self.pivot_label.setText(f"Pivots {', '.join(str(i) for i in sorted(a['corner_ids']))} "
+                                 "(largest tags on the sheet) define the floor plane.")
         self.ar_layout = a.get("layout")
         tape = {int(k): v for k, v in (a.get("tape_m") or {}).items()}
         if self.ar_layout:
@@ -1604,7 +1650,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ar_radius.setValue(a["robot_radius_m"])
         self.ar_res.setValue((a.get("map_resolution_m") or 0) * 1000)
         self.ar_range.setValue(float(a.get("max_range_m", 4.0)))
-        self.ar_learn.setChecked(bool(a.get("learn_anchors", True)))
         self.ar_unknown.setChecked(bool(a.get("unknown_blocked", True)))
         self.ar_plan.setValue(a["plan_resolution_m"] * 100)
         self.ar_thr.setValue(int(a["obstacle_threshold"]))
@@ -1620,7 +1665,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ar_h_label.setText(f"Tape {L['origin']}→{L['y']} (y)" +
                                     (f"\ncam {cam.get(str(L['y'])):.3f}" if cam.get(str(L['y'])) else ""))
         else:
-            o = self.ar_corners.text().split(",")[0].strip() or "origin"
+            ids = ((self.cfg or {}).get("arena") or {}).get("corner_ids") or []
+            o = str(ids[0]) if ids else "origin"
             self.ar_w_label.setText(f"Tape {o}→ +x tag")
             self.ar_h_label.setText(f"Tape {o}→ +y tag")
 
@@ -1685,8 +1731,6 @@ class MainWindow(QtWidgets.QMainWindow):
         new = self._arena_ui_to_settings(self.cfg["arena"])
         rebuild = (new.get("map_resolution_m") or 0) != (self.cfg["arena"].get("map_resolution_m") or 0)
         self.cfg["arena"].update(new)       # shared with the live map
-        if self.worker.learner is not None:
-            self.worker.learner.exclude = {new.get("robot_id")} - {None}
         if rebuild:
             amap = self._make_amap()
             if amap:
@@ -1737,17 +1781,22 @@ class MainWindow(QtWidgets.QMainWindow):
             focal = (rep_["focal_px"], rep_["fit_px"], "tape" if rep_.get("tape_m") else "tags")
             rep_["focal_estimate"] = {"f_px": rep_["focal_px"],
                                       "f_mm_full_frame": round(rep_["focal_px"] / self.source.width * 35.9, 2)}
-        self.cfg["floor_tags"] = {k: v for k, v in self.cfg["floor_tags"].items() if k not in floor_tags}
-        self.cfg["floor_tags"].update(floor_tags)
+        # The plane is defined by the 4 pivots ONLY. (Merging in older floor tags kept tags from
+        # another coordinate frame, e.g. a floor survey, as fixed anchors: that bent the floor
+        # pose and put the whole map and the A* path off.)
+        self.cfg["floor_tags"] = {int(k): v for k, v in floor_tags.items()}
         floor = m.FloorModel(self.cfg["floor_tags"], self.mapper.tag_size, self._fit_limit())
         floor.auto_lock = self.ar_adaptive.isChecked()
         locked = am.averaged_lock(floor, samples, self.mapper.K, self.mapper.D)
         old = self.worker.amap
         new_res = a.get("map_resolution_m")
-        if old is not None and (not new_res or abs(new_res - old.res) < 1e-9):
+        new_corners = np.array([[floor_tags[i]["x"], floor_tags[i]["y"]] for i in a["corner_ids"]])
+        same_frame = (old is not None and old.corners.shape == new_corners.shape
+                      and float(np.abs(old.corners - new_corners).max()) < 0.02)
+        if same_frame and (not new_res or abs(new_res - old.res) < 1e-9):
             # Same frame and resolution: keep the map built so far (floor colors, empty-floor
             # reference, obstacle evidence); only the corner outline changes.
-            old.corners = np.array([[floor_tags[i]["x"], floor_tags[i]["y"]] for i in a["corner_ids"]])
+            old.corners = new_corners
             old.arena = a
             old._cache = None
             amap = old
@@ -1834,17 +1883,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_arena(self, qimg, scale, info):
         for ev in info.get("events", []):
             self.log_msg("Floor: " + ev)
-        if info.get("learned"):
-            for tid, sp in info["learned"].items():
-                self.log_msg(f"Learned floor anchor tag {tid} at ({sp['x']:+.4f}, {sp['y']:+.4f}) m, "
-                             f"heading {sp['yaw_deg']:+.1f}°")
-            self.cfg["floor_tags"].update(info["learned"])
-            if self.src_combo.currentText() != "Synthetic" and os.path.exists(am.DEFAULT_ARENA_FILE):
-                try:
-                    am.save_arena(os.path.abspath(am.DEFAULT_ARENA_FILE), self.cfg, self.cfg["floor_tags"],
-                                  {"note": "learned anchors added"})
-                except OSError:
-                    pass
         if qimg.isNull():
             return
         self.arena_view.set_frame(qimg, scale)
@@ -1854,11 +1892,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_msg("Empty floor captured. Obstacles are now detected.")
         txt = []
         if not info.get("has_background"):
-            txt.append("No empty-floor reference yet: press Capture empty floor (obstacles off).")
+            txt.append("No empty-floor reference (optional): obstacles come from tags and detected objects.")
         mp_ = info.get("map")
         if mp_:
             txt.append(f"map {mp_['known_m2']:.2f} m² known at {mp_['res_mm']:.0f} mm, "
-                       f"{len(mp_['anchors'])} anchors, pose {'locked' if mp_['locked'] else 'live'}"
+                       f"{len(mp_['anchors'])} pivots, pose {'locked' if mp_['locked'] else 'live'}"
                        + (" (map paused while the camera moves)" if info.get("map_paused") else ""))
         rb = info.get("robot")
         txt.append("robot " + (f"({rb['x']:+.3f}, {rb['y']:+.3f}) m, heading {rb['yaw_deg']:+.1f}°"
@@ -1894,38 +1932,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log_msg("Start a source first, then enable detection.")
                 self.det_chk.setChecked(False)
             return
+        # optional YOLO: stop it first, (re)start below if wanted
+        if self.worker.objdet is not None:
+            self.worker.objdet.stop()
+        self.worker.objdet = None
+        self.worker._det_objs = []
+        self.worker.appearance = on
         if not on:
-            if self.worker.objdet is not None:
-                self.worker.objdet.stop()
-            self.worker.objdet = None
-            self.worker._det_objs = []
             self.det_status.setText("off")
+            return
+        self.cfg.setdefault("arena", {})["appearance_z"] = self.det_app_z.value()
+        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=3)
+        self.log_msg("Object detection on: anything on the floor that does not look like the floor becomes "
+                     "an object and an obstacle (compared with the rest of the floor in each frame).")
+        if not self.worker.amap:
+            self.log_msg("Note: objects are found once the arena (floor plane) is set up.")
+        if not self.det_yolo.isChecked():
             return
         try:
             import importlib.util
             if importlib.util.find_spec("ultralytics") is None:
                 raise ImportError("ultralytics")
         except ImportError:
-            self.det_chk.setChecked(False)
-            self.log_msg("Object detection needs Ultralytics: pip install ultralytics")
+            self.det_yolo.setChecked(False)
+            self.log_msg("YOLO proposals need Ultralytics: pip install ultralytics")
             QtWidgets.QMessageBox.information(self, "Install needed", "pip install ultralytics")
             return
         name = self.det_model.currentText().strip()
-        self.worker.det_ignore = {c.strip().lower() for c in self.det_ignore.text().split(",") if c.strip()}
         self.worker.det_obstacles = self.det_obst.isChecked()
         self.worker.tracker = od.FloorTracker()
-        self.worker.objdet = od.ObjectDetector(name, self.det_prompts.text(), self.det_conf.value(),
-                                               int(self.det_size.currentText()))
-        self.log_msg(f"Loading {name} (first use downloads the weights)…" +
-                     (f" Looking for: {self.det_prompts.text()}" if od.is_open_vocab(name) else ""))
-        if not self.worker.amap:
-            self.log_msg("Note: objects get floor coordinates once the floor plane is set up.")
+        self.worker.objdet = od.ObjectDetector(name, self.det_conf.value(), int(self.det_size.currentText()))
+        self.log_msg(f"Also loading {name} for YOLO proposals (class-agnostic)…")
 
     def _det_reconfig(self, *_):
+        if self.cfg and self.cfg.get("arena") is not None:
+            self.cfg["arena"]["appearance_z"] = self.det_app_z.value()   # shared with the live map
         if self.worker and self.worker.objdet is not None:
-            self.worker.det_ignore = {c.strip().lower() for c in self.det_ignore.text().split(",") if c.strip()}
-            self.worker.objdet.configure(self.det_prompts.text(), self.det_conf.value(),
-                                         int(self.det_size.currentText()))
+            self.worker.objdet.configure(self.det_conf.value(), int(self.det_size.currentText()))
 
     def _pair_ids(self):
         out = []
@@ -1944,7 +1987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not on:
             self.worker.pair = None
             self.worker._plan = None
-            self.pair_btn.setText("Plan path between tags")
+            self.pair_btn.setText("Plan path")
             self.pair_info.setText("")
             self.log_msg("Tag-to-tag path stopped.")
             return
@@ -1960,18 +2003,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.goal = None
         self.worker._pair_last = {}
         self.worker._plan = None
-        # Path tags move (robot, target): they must not be floor anchors.
-        fl = self.mapper.floor
         for t in ids:
-            if t in fl.learned:
-                del fl.world_corners[t]
-                fl.learned.discard(t)
-                fl._update_planar()
-                self.cfg["floor_tags"].pop(t, None)
-                self.log_msg(f"Tag {t} was a learned floor anchor; released it so it can move.")
-            if t in self.cfg["floor_tags"] or t in (self.cfg.get("arena") or {}).get("corner_ids", []):
-                self.log_msg(f"Note: tag {t} is one of the floor's corner tags.")
-        self.worker.learner.exclude |= set(ids)
+            if t in (self.cfg.get("arena") or {}).get("corner_ids", []):
+                self.log_msg(f"Note: tag {t} is one of the floor's pivot tags.")
         self.worker.pair = ids
         self.pair_btn.setText(f"Stop path {ids[0]} → {ids[1]}")
         self.tabs.setCurrentIndex(1)
@@ -2049,58 +2083,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             self.log_msg("UDP out must look like 127.0.0.1:5005")
 
-    def start_survey(self):
-        if not self.worker:
-            self.log_msg("Start a source first.")
-            return
-        try:
-            txt = self.floor_ids_edit.text().replace(" ", "")
-            ids = {int(v) for v in txt.split(",") if v} or None
-            otxt = self.floor_origin_edit.text().strip()
-            origin = int(otxt) if otxt else None
-        except ValueError:
-            self.log_msg("Floor IDs must be numbers separated by commas.")
-            return
-        self.survey = {"end": time.perf_counter() + self.survey_spin.value(), "samples": [],
-                       "ids": ids, "origin": origin}
-        self.survey_btn.setEnabled(False)
-        self.log_msg(f"Surveying floor for {self.survey_spin.value():.1f} s"
-                     + (f" using tags {sorted(ids)}" if ids else " using every visible tag")
-                     + ". Keep the camera still.")
-
-    def _finish_survey(self):
-        sv, self.survey = self.survey, None
-        self.survey_btn.setEnabled(True)
-        try:
-            floor_tags, rep = m.survey_floor(sv["samples"], self.mapper.K, self.mapper.D,
-                                             self.mapper.tag_size, sv["ids"], sv["origin"])
-        except Exception as e:
-            self.log_msg(f"Survey failed: {e}")
-            return
-        self.cfg["floor_tags"] = floor_tags
-        new_floor = m.FloorModel(floor_tags, self.mapper.tag_size, self.mapper.floor.max_reproj_px)
-        self.lock_chk.setChecked(False)
-        self.worker.pending_floor = new_floor
-        self._build_floor_items(new_floor)
-        self.fitted = False
-        lines = [f"Survey: {rep['n_tags']} floor tag(s), plane fit RMS {rep['plane_rms_mm']} mm, "
-                 f"origin tag {rep['origin_tag']}, camera {rep['camera_height_m']} m above floor, "
-                 f"tilted {rep['camera_tilt_from_vertical_deg']}° from straight down"]
-        for tid, r in rep["tags"].items():
-            ft = floor_tags[tid]
-            lines.append(f"   tag {tid} ({r['size_mm']} mm): x {ft['x']:+.3f} y {ft['y']:+.3f} "
-                         f"heading {ft['yaw_deg']:+.1f}°  off-plane {r['height_off_plane_mm']:+.1f} mm  "
-                         f"tilt vs plane {r['tilt_vs_plane_deg']}°")
-        lines += ["   WARNING: " + w for w in rep["warnings"]]
-        self.log_msg("\n".join(lines))
-        self.floor_info.setText(f"{rep['n_tags']} tags, plane RMS {rep['plane_rms_mm']} mm"
-                                + (f", {len(rep['warnings'])} warning(s)" if rep["warnings"] else ""))
-        if self.src_combo.currentText() != "Synthetic":
-            path = os.path.abspath(m.DEFAULT_SURVEY)
-            m.save_survey(path, self.cfg, floor_tags, rep)
-            self.config_edit.setText(path)
-            self.log_msg(f"Saved {path}. It loads automatically next time.")
-
     def start_measure(self):
         if self.selected is None:
             self.log_msg("Click a row in the table to select a tag first.")
@@ -2176,10 +2158,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.arena_setup["samples"].append(r.get("_dets", []))
             if time.perf_counter() > self.arena_setup["end"]:
                 self._finish_arena_setup()
-        if self.survey is not None:
-            self.survey["samples"].append(r.get("_dets", []))
-            if time.perf_counter() > self.survey["end"]:
-                self._finish_survey()
         truth = r.get("truth") or {}
         for o in r["objects"]:
             if o["frame"] != "world":
@@ -2243,7 +2221,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for tid, c in floor.world_corners.items():
             xy = np.vstack([c[:, :2], c[:1, :2]])
             line = pg.PlotDataItem(xy[:, 0], xy[:, 1], pen=pg.mkPen(255, 160, 0, width=2))
-            txt = pg.TextItem(f"floor {tid}", color=(255, 160, 0), anchor=(0.5, 1.2))
+            txt = pg.TextItem(f"pivot {tid}", color=(255, 160, 0), anchor=(0.5, 1.2))
             txt.setPos(*c[:, :2].mean(0))
             for it in (line, txt):
                 self.map.addItem(it)
@@ -2255,6 +2233,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._update_pair_choices()
         dt = self.worker.objdet
+        if self.worker.appearance and dt is None:
+            n_ = len(self.worker._app_objs)
+            self.det_status.setText(f"{n_} object(s) on the floor" if self.worker.amap is not None
+                                    else "waiting for the arena (floor plane)")
         if dt is not None:
             if dt.error and dt.status == "failed to load":
                 self.det_status.setText(f"FAILED: {dt.error[:200]}")
@@ -2265,8 +2247,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self.args, "detect", None) and not getattr(self, "_detect_arg_done", False):
             self._detect_arg_done = True
             self.det_model.setEditText(self.args.detect)
-            if getattr(self.args, "look_for", None):
-                self.det_prompts.setText(self.args.look_for)
             self.det_chk.setChecked(True)
         want = getattr(self.args, "path", None)
         if want and not self.pair_btn.isChecked() and not getattr(self, "_path_arg_done", False) \
@@ -2276,6 +2256,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pair_goal.setEditText(str(want[1]))
             self.pair_btn.setChecked(True)
         now = time.perf_counter()
+
+        # pivot tags: how many are in view, plane state
+        piv = sorted((self.cfg.get("arena") or {}).get("corner_ids") or [])
+        if piv:
+            seen = {g for g, _ in r.get("_dets", [])}
+            n_in = sum(1 for t in piv if t in seen)
+            state = (("plane locked" if r["floor_locked"] else "plane ok") if r["floor_valid"]
+                     else "no plane yet")
+            missing = [t for t in piv if t not in seen]
+            self.pivot_label.setText(f"Pivots {', '.join(map(str, piv))}: {n_in}/4 in view, {state}."
+                                     + (f" Not seen: {', '.join(map(str, missing))}." if missing else "")
+                                     + " Other tags are objects.")
 
         # status bar
         if self.lock_chk.isChecked() != bool(r["floor_locked"]):
@@ -2400,9 +2392,8 @@ def main():
     ap.add_argument("--synthetic-raw", action="store_true",
                     help="synthetic scene with nothing preset and a wrong focal length (practice the setup)")
     ap.add_argument("--autostart", action="store_true")
-    ap.add_argument("--detect", metavar="MODEL", nargs="?", const="yoloe-26s-seg.pt",
-                    help="start object detection (default model yoloe-26s-seg.pt)")
-    ap.add_argument("--look-for", help="comma separated objects for YOLOE, e.g. 'blue block, toy car'")
+    ap.add_argument("--detect", metavar="MODEL", nargs="?", const=od.MODEL_CHOICES[0][0],
+                    help=f"start class-agnostic object detection (default model {od.MODEL_CHOICES[0][0]})")
     ap.add_argument("--path", nargs=2, type=int, metavar=("START_TAG", "GOAL_TAG"),
                     help="plan the A* path from START_TAG to GOAL_TAG as soon as the floor is ready, "
                          "e.g. --path 28 50")
