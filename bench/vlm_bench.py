@@ -17,6 +17,8 @@ Needs only Python 3 + Pillow (pip install pillow) and a running Ollama.
   python3 bench/vlm_bench.py --models qwen2.5vl:3b --target "blue block"   # named object
   python3 bench/vlm_bench.py --models some-model --coords norm   # model answers in 0..1
   python3 bench/vlm_bench.py --url http://172.20.1.112:11434 ...  # Ollama on another machine
+  python3 bench/vlm_bench.py --api openai --url http://127.0.0.1:8090 --models qwen2.5vl \
+      --min-pixels 50176 --tag llamaserver   # llama-server --image-min-tokens 64 --image-max-tokens 400
 
 --coords: how the model's box numbers are meant. auto = qwen2.5vl -> pixel, qwen3-vl -> rel1000,
 anything else -> guessed per answer (all <= 1 -> norm, any > image size -> rel1000, else pixel).
@@ -114,21 +116,34 @@ def to_image_px(box, mode, w, h, sw, sh):
     return (min(x1, x2) * sx, min(y1, y2) * sy, max(x1, x2) * sx, max(y1, y2) * sy)
 
 
+API = "ollama"   # set from --api
+
+
 def chat(url, model, jpg_bytes, prompt, max_tokens):
-    body = {"model": model, "stream": False, "keep_alive": -1,
-            "messages": [{"role": "user", "content": prompt,
-                          "images": [base64.b64encode(jpg_bytes).decode()]}],
-            "options": {"temperature": 0, "num_predict": max_tokens}}
-    req = urllib.request.Request(url.rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
+    b64 = base64.b64encode(jpg_bytes).decode()
+    if API == "openai":            # llama-server (what the cars' vlm.py speaks), or Ollama's /v1
+        body = {"model": model, "temperature": 0, "max_tokens": max_tokens, "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+                {"type": "text", "text": prompt}]}]}
+        path = "/v1/chat/completions"
+    else:
+        body = {"model": model, "stream": False, "keep_alive": -1,
+                "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+                "options": {"temperature": 0, "num_predict": max_tokens}}
+        path = "/api/chat"
+    req = urllib.request.Request(url.rstrip("/") + path, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=600) as r:
         out = json.loads(r.read())
-    return out["message"]["content"], time.time() - t0
+    dt = time.time() - t0
+    text = out["choices"][0]["message"]["content"] if API == "openai" else out["message"]["content"]
+    return text, dt
 
 
 def run_model(a, model, photos, manifest):
-    out_dir = os.path.join(HERE, "results", re.sub(r"[^\w.-]+", "_", model))
+    out_dir = os.path.join(HERE, "results", re.sub(r"[^\w.-]+", "_", model + (("_" + a.tag) if a.tag else "")))
     os.makedirs(out_dir, exist_ok=True)
     prompt = PROMPT_ANY if a.target == "any" else PROMPT.format(obj=a.target)
     rows, lat = [], []
@@ -199,6 +214,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", nargs="+", required=True)
     ap.add_argument("--url", default="http://127.0.0.1:11434")
+    ap.add_argument("--api", default="ollama", choices=["ollama", "openai"],
+                    help="openai = llama-server (e.g. --url http://127.0.0.1:8090 --min-pixels 50176)")
+    ap.add_argument("--tag", default="", help="suffix for the results folder, e.g. llamaserver")
     ap.add_argument("--photos", default=os.path.join(HERE, "photos"))
     ap.add_argument("--target", default="any", help='"any" (what the cars use) or an object name')
     ap.add_argument("--img-tokens", type=int, default=400, help="same as the cars' vlm_server.json")
@@ -210,6 +228,8 @@ def main():
     ap.add_argument("--coords", default="auto", choices=["auto", "pixel", "rel1000", "norm"])
     ap.add_argument("--only", nargs="*", help="only these photo names")
     a = ap.parse_args()
+    global API
+    API = a.api
     with open(os.path.join(a.photos, "manifest.json")) as f:
         manifest = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
     photos = a.only or sorted(manifest)
@@ -217,6 +237,7 @@ def main():
     for m in a.models:
         print(f"\n=== {m}  ({len(photos)} photos, target={a.target!r}, img_tokens={a.img_tokens})")
         summaries.append(run_model(a, m, photos, manifest))
+        summaries[-1]["model"] += f" [{a.api}]"
     print("\nmodel                         load   median    p90   hits   false+  coords")
     for s in summaries:
         print(f"{s['model']:28s} {s['load_s']:6.1f}s {s['median_s']:6.2f}s {s['p90_s']:6.2f}s "
