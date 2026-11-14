@@ -66,7 +66,7 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
 | --- | --- | --- | --- | --- |
 | A (arm) | catguard-a | zxz5500 | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
 | B (arm) | catguard-b | mitra | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
-| C (dozer) | — | — | — | not set up yet |
+| C (dozer) | WhiteSky (172.20.1.136) | szk13579 | `~/antcolony/` | wheels, drive, sonar stop (35 cm) tested on the floor; camera (Camera Module 3 Wide) and pan/tilt servos (PCA9685 ch 8/9) work; blade not mounted yet |
 
 Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
 - `chassis.py`: `mirror_lr` in `motor_directions.json` (left/right motor wiring swapped);
@@ -121,8 +121,10 @@ You do not need Freenove's own server code; `hw_freenove.py` drives the expansio
    ```
 3. `i2cdetect -y 1` should show `40` (PCA9685 motor driver) and `48` (battery voltage ADC). If not, check that the expansion board is seated firmly and the battery switch is on.
 4. Copy `robot/agent.py` and `robot/hw_freenove.py` into the same directory on the Pi.
-5. Prop the car up so the wheels are off the ground and run `python3 hw_freenove.py wheels` to confirm each wheel's direction one at a time (run it in your own SSH terminal; it asks y/n). Then put it on the floor and run `python3 hw_freenove.py drive`; it should go forward, backward, turn left, and turn right in that order.
-6. Start the robot service: `python3 agent.py --name C --hw freenove --min-duty 35 --rot-min 55`.
+5. Prop the car up so the wheels are off the ground and run `python3 hw_freenove.py wheels` to confirm each wheel's direction one at a time (run it in your own SSH terminal; it asks y/n). **Front = the end with the ultrasonic sensor and the camera, where the blade goes.** Then put it on the floor and run `python3 hw_freenove.py drive`; it should go forward, backward, turn left, and turn right in that order.
+   If the whole car drives the wrong way (all wheels agreed, but "forward" moves away from the sensor), do not reverse all four wheels — that also mirrors turning. Set `"flip_front": true` in `freenove_directions.json` instead; it flips only forward/back. Car C has this set (2026-11-14).
+6. Start the robot service: `python3 agent.py --name C --hw freenove --min-duty 35 --rot-min 55 --stop-cm 35`.
+   - `--stop-cm 35`: the front ultrasonic (GPIO 27 trigger / 22 echo) blocks forward motion below this distance, except while pushing (`guard: false`). Measured on car C at min-duty 35 (~90 cm/s): about 14 cm of coasting after the stop, so 35 cm left it 10 cm from a wall; 20 cm let it touch the wall. Check `python3 hw_freenove.py sonar` after mounting the blade: a constant few cm means the sensor sees the blade, then add `--no-sonar`.
    - `--min-duty`: the duty cycle (percent) at which the car just starts moving straight.
    - `--rot-min`: the duty cycle at which the car just starts turning in place. Four ordinary wheels turn in place by skidding, so on carpet this value will be noticeably higher, and you need extra margin when pushing things with the blade.
 7. Put a tag on top of the car (flat, not blocked by the camera gimbal), fill in C's tag ID and IP in `config.json`, then measure two dimensions and enter them:
