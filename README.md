@@ -1,172 +1,176 @@
-# AntColony: Multi-Robot Floor Clearing
-
-An overhead camera with AprilTags provides localization, and a single host coordinates three robots: dozer C sweeps far-away debris toward the bin, and arm robots A and B pick the debris up and drop it into the bin.
-
-## HackPrinceton Fall 2026
-
-- **Main track:** Sustainability (smart waste management: a robot team that clears and collects floor litter without a human doing the picking)
-- **Optional track:** Best Hardware Hack
-- **Special tracks:** Best Physical AI Hack; Best Practical AI Innovation (Amazon)
-
-This repository is the **coordination layer**. It sits between the two parts you already have:
+# 电脑跑 VLM + 树莓派小车抓取物体
 
 ```
-Overhead tracker (existing: AprilTag + YOLOE)
-        │  UDP 9100  world snapshot (tag poses + floor objects)
-        ▼
-   coordinator (this repo, runs on the host) ──── http://host:8080 live dashboard
-        │  UDP 9200  velocity / skill commands       ▲ UDP 9201 telemetry
-        ▼                                            │
-   robot/agent.py (one per robot) ── calls masterpi_lite and vlm_grab.py (existing)
+ ┌──────────── Mac (M2 16GB) ─────────────┐        Wi-Fi         ┌────── 树莓派小车 ──────┐
+ │ Ollama: qwen3-vl:4b  (常驻内存)         │                      │ robot_server.py        │
+ │   ↑ 后台线程 0.3~1.5s 一次: 认出+框出目标 │ ◄── JPEG 视频 5555 ── │  摄像头 640x480        │
+ │ grasp.py  15Hz 控制循环                  │                      │  电机 (gpiozero)       │
+ │   OpenCV 跟踪器每帧更新目标位置 (几 ms)   │ ── JSON 指令 5556 ──► │  机械臂 (PCA9685)      │
+ └─────────────────────────────────────────┘                      │  看门狗自动停车        │
+                                                                   └────────────────────────┘
 ```
 
-## Status (2026-11-13)
+**为什么快**：VLM 不放在控制环里。VLM 只负责"认出目标、给出框"，每帧的跟随由 OpenCV 跟踪器完成（几毫秒），所以小车的反应速度取决于跟踪器（约 15Hz），而不是 VLM。视频只取最新一帧，抓取动作序列在树莓派本地执行。
 
-| Component | Status |
-| --- | --- |
-| Coordination, path planning, three-robot state machines, traffic rules, calibration tool | Working in the built-in simulator: in the default mode all 8 random layouts are fully cleared with zero robot-robot contact |
-| UDP messaging, dashboard | Verified with the simulator process and coordinator process running separately |
-| `robot/agent.py` | Working with fake hardware (`--hw mock`) |
-| `robot/hw_masterpi.py` | Wheel directions and reachability checked against your `chassis.py` / `arm.py` using a fake serial port; **never run on a real robot** |
-| `robot/hw_freenove.py` (dozer) | Channel logic checked against Freenove's official `motor.py` using a fake I2C bus; **never run on a real robot** |
-| `tracker_bridge/world_pub.py` | Only the helper functions are tested; you need to wire it into the tracker |
-| VLM triage (`triage.py`) | Not tested against a real VLM server; off by default |
+---
 
-The simulator is toy-grade. It verifies that the coordination logic does not deadlock or collide; it says nothing about real grasp success rates or speeds.
+## 推荐的 VLM（针对你的 M2 16GB Mac）
 
-## Five-minute quick start (no hardware needed)
+| 模型 | 大小 | 预计定位延迟* | 适合 |
+|---|---|---|---|
+| **qwen3-vl:4b-instruct** ⭐ 默认 | ~3 GB | 约 0.5–1.2 s | 速度和框的准确度最平衡，能听懂"左边那个蓝色积木"这种描述 |
+| qwen3-vl:2b-instruct | ~2 GB | 约 0.3–0.7 s | 最快，桌面上单个、颜色明显的物体够用 |
+| qwen3-vl:8b-instruct | ~6 GB | 约 1.5–3 s | 最准，物体多、描述复杂时用 |
+| qwen2.5vl:3b | ~3 GB | 约 0.6–1.3 s | 备选，旧版 Ollama 也能用 |
+
+\* 延迟是估计值，**以第 4 步 `bench_vlm.py` 在你电脑上实测为准**。
+
+选 Qwen-VL 系列是因为它们专门训练过**输出物体框坐标**（grounding），这是抓取最需要的能力；很多其它小模型只会描述图片，不会给准确坐标。
+
+---
+
+## 一步步操作
+
+### 第 1 步：Mac 上安装 Ollama 并下载模型
 
 ```bash
-pip install numpy
-python tests/test_sim.py                 # 8 layouts, about 4 minutes
-# or watch it run:
-python -m antcolony.sim --objects 6      # terminal 1: fake camera + fake robots
-python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://localhost:8080
+brew install ollama
 ```
-
-## Bringing up the real robots
-
-1. **Host**: `pip install numpy`, then set the arena bounds, bin, tag IDs, and the robots' IPs in `config.json` to the real values.
-   Robot IPs change with the network, so they live in named profiles under `networks` in `config.json`. `"network"` picks the active one (currently `hyatt`); you can also override it per run with `ANTCOLONY_NET=school python -m antcolony.coordinator`. A `null` IP falls back to that robot's own `addr`. The coordinator prints the active profile at startup.
-
-   | Profile | A | B | C |
-   | --- | --- | --- | --- |
-   | `hyatt` | 172.20.1.113 | 172.20.1.120 | not set |
-   | `school` | not set | not set | not set |
-2. **Tracker**: add the 5 lines described at the top of `tracker_bridge/world_pub.py` to publish tags and objects to UDP 9100. Requirements are in the next section.
-3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `~/Desktop/"Master Pi5"/masterpi_lite/` (same level as `vlm_grab.py`) and run
-   `python3 agent.py --name A --min-duty 30` (30 on carpet, 18 on smooth floors). For **dozer C**, see the separate section below.
-4. **Calibration** (one minute per robot; put only one robot in the middle of the arena at a time, with 50 cm clear on all sides):
-   `python -m antcolony.calibrate --robot A`; the result is saved to `calib/A.json`. It automatically computes the tag heading offset, the tag-to-turning-center offset, and the signs for left/right turning and strafing, so no measuring is needed.
-5. **Run**: `python -m antcolony.coordinator`; the dashboard is at `http://<host IP>:8080`. Ctrl+C stops all robots.
-
-## Current robot deployment (2026-11-14)
-
-| Robot | Host | User | Code folder | Bench test |
-| --- | --- | --- | --- | --- |
-| A (arm) | catguard-a | zxz5500 | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
-| B (arm) | catguard-b | mitra | `~/Desktop/Master Pi5/masterpi_lite/` | real hardware, wheels off the ground: all drive directions correct |
-| C (dozer) | — | — | — | not set up yet |
-
-Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
-- `chassis.py`: `mirror_lr` in `motor_directions.json` (left/right motor wiring swapped);
-- `arm.py`: `ports` in `arm_directions.json` (servo 3 is plugged into port 2).
-
-The originals are saved next to them as `chassis.py.orig` / `arm.py.orig`. A currently uses B's `vision_calib.json`; recalibrate A's camera if its grasps are off.
-
-Bench-testing a robot's drive directions from a laptop (wheels off the ground, agent running without `--hw mock`):
 
 ```bash
-jog(){ python3 - "$@" <<'PY'
-import socket,json,time,sys
-ip,vx,vy,w=sys.argv[1],*map(float,sys.argv[2:5])
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-for _ in range(10):
-    s.sendto(json.dumps({"type":"vel","vx":vx,"vy":vy,"w":w,"dur":0.4,"guard":False}).encode(),(ip,9200)); time.sleep(0.2)
-PY
-}
-jog <robot IP> 0.3 0 0     # forward; then -0.3 0 0 back, 0 0 0.5 turn left, 0 0 -0.5 turn right, 0 0.3 0 strafe left
+ollama serve
 ```
 
-## Dozer setup (Freenove FNK0043 4WD car + Pi 5)
+上面这个窗口保持开着，另开一个终端：
 
-You do not need Freenove's own server code; `hw_freenove.py` drives the expansion board directly over I2C.
-
-1. Flash 64-bit Raspberry Pi OS with Raspberry Pi Imager. In Imager, pre-fill your router's WiFi, enable SSH, and set a hostname (e.g. `catguard-c`).
-2. Enable I2C, install dependencies, then reboot:
-   ```bash
-   sudo raspi-config nonint do_i2c 0
-   sudo apt install -y python3-smbus2 i2c-tools
-   sudo reboot
-   ```
-3. `i2cdetect -y 1` should show `40` (PCA9685 motor driver) and `48` (battery voltage ADC). If not, check that the expansion board is seated firmly and the battery switch is on.
-4. Copy `robot/agent.py` and `robot/hw_freenove.py` into the same directory on the Pi.
-5. Prop the car up so the wheels are off the ground and run `python3 hw_freenove.py wheels` to confirm each wheel's direction one at a time (run it in your own SSH terminal; it asks y/n). Then put it on the floor and run `python3 hw_freenove.py drive`; it should go forward, backward, turn left, and turn right in that order.
-6. Start the robot service: `python3 agent.py --name C --hw freenove --min-duty 35 --rot-min 55`.
-   - `--min-duty`: the duty cycle (percent) at which the car just starts moving straight.
-   - `--rot-min`: the duty cycle at which the car just starts turning in place. Four ordinary wheels turn in place by skidding, so on carpet this value will be noticeably higher, and you need extra margin when pushing things with the blade.
-7. Put a tag on top of the car (flat, not blocked by the camera gimbal), fill in C's tag ID and IP in `config.json`, then measure two dimensions and enter them:
-   - `blade_fwd`: distance from the body center (midpoint between front and rear axles) to the pushing face of the blade, in meters;
-   - `blade_w`: blade width, in meters; set `radius` to the distance from the body center to the farthest corner of the blade.
-8. `python -m antcolony.calibrate --robot C`. This car cannot strafe, so `strafe_ok` will be false in the calibration result; that is expected.
-
-Two things to watch out for:
-- The Pi 5 is powered by the car's expansion board. Motor current is high when pushing or turning in place; if the Pi reboots or reports undervoltage, give the Pi its own power bank. I could not verify this for you.
-- This car has no hardware watchdog: `agent.py` brakes when it exits normally or is `kill`ed, but if the Pi hangs, the motors keep their last output. Keep the battery switch within reach while debugging.
-
-## What the tracker must provide
-
-- Position (meters) and heading of every robot tag and the bin tag in **one shared floor coordinate frame**, sent every frame, even if the detection network is slow.
-- The position of every floor object; if you have segmentation contours, also give the short side `w`, long side `l`, and long-axis direction `ang` (`floor_rect()` computes these for you). With the long-axis direction, the arm robots approach along the long axis so the gripper grabs the short side (this arm has no wrist rotation).
-- Do not publish arena corner tags as objects; mask out the robot bodies and the bin before doing floor-difference detection.
-
-## Arena layout
-
-- Leave a **30–50 cm lane** around the debris area and around the bin; robots must be able to get behind any object and behind the bin. The dozer cannot get behind an object that is pressed against an edge.
-- The bin rim must be no higher than about 6 cm (the arm releases 18 cm in front and 10 cm high), and the bin must be fixed to the floor.
-- Every piece of debris must be grippable: short side ≤ 5.5 cm (`triage.grasp_max_short`), long side ≤ 16 cm, light enough, and not a thin sheet. Oversized objects are marked red on the dashboard and no robot will touch them.
-
-## What each robot does
-
-- **Arm robots**: the overhead camera guides the robot to 30 cm in front of the object and aligns it → the on-board `vlm_grab.py approach` handles the last stretch (find, approach, align, grab, lift, voltage check) → the overhead camera guides it to the bin → it reaches over the rim and releases → it backs away. Only one robot may be at the bin at a time; the other waits in the outer ring.
-- **Dozer**: picks the object farthest from the bin, gets behind it, and pushes it to a staging spot in front of the bin (arranged in an arc, at least 30 cm apart). The arm robots pick up staged objects from the outside in along the "lanes" and then drive straight to the bin.
-- Idle robots return to their own parking spot and automatically move aside if they block someone else.
-
-Optional mode: set `bin.floor_entry` to `true` in `config.json` if one side of the bin is open at floor level; the dozer then pushes objects straight into the bin and also handles large items the gripper cannot pick up.
-
-## Layout
-
-```
-antcolony/common.py       geometry, messages, config
-antcolony/planner.py      grid A*
-antcolony/control.py      path following: continuous control at a distance, timed pulses for the last few degrees of in-place turns
-antcolony/world.py        world model: tag → body pose, object association, occlusion, disappearance
-antcolony/brains.py       task state machines for arm robots / dozer
-antcolony/coordinator.py  task allocation, bin mutex, traffic rules, main loop, UDP
-antcolony/triage.py       decides grippability by size; optionally asks a VLM as well
-antcolony/dashboard.py    dashboard
-antcolony/calibrate.py    single-robot drive calibration
-antcolony/sim.py          simulator (plays both camera and robots)
-robot/agent.py            on-robot service (watchdog, skills, telemetry)
-robot/hw_masterpi.py      arm robot: adapter for masterpi_lite + vlm_grab.py
-robot/hw_freenove.py      dozer: Freenove FNK0043, direct I2C; built-in wheel direction test
-tracker_bridge/world_pub.py  tracker → coordinator publisher
-tests/test_sim.py         end-to-end test
+```bash
+ollama pull qwen3-vl:4b-instruct
 ```
 
-## Messages (each is one JSON object over UDP)
-
-```
-World snapshot → host:9100   {"t":..,"tags":{"10":[x,y,heading_rad],..},"objects":[{"id","label","x","y","w","l","ang"},..]}
-Velocity       → robot:9200  {"type":"vel","vx":fwd,"vy":left,"w":ccw,"dur":sec,"guard":true}   each in -1..1, auto-stops after at most 0.4 s
-Skill          → robot:9200  {"type":"skill","id":17,"name":"grab|drop|home|open|stop","args":{..}}   resending the same id is harmless
-Telemetry      → host:9201   {"type":"telem","name":"A","batt_mv":..,"sonar_cm":..,"skill":{"id","state","detail"},"holding":..}
+```bash
+ollama pull qwen3-vl:2b-instruct
 ```
 
-The dozer only uses the `vel` message; `vy` is ignored because it cannot strafe.
+> 如果提示找不到 `-instruct` 标签，改用 `qwen3-vl:4b`，并同步修改 `pc/config.py` 里的 `VLM_MODEL`。
+> 如果 Ollama 版本太老不支持 qwen3-vl，先 `brew upgrade ollama`。
 
-## Three things to verify before running on real robots
+### 第 2 步：Mac 上安装 Python 依赖
 
-1. Whether the gripper is still holding after the serial port is reopened at the end of `vlm_grab.py approach` (`hw_masterpi.py` opens and closes the serial port once before and once after grabbing).
-2. Whether the carry pose `CARRY` and the release position (`drop.y_cm`, `drop.z_cm`) clear your bin rim.
-3. Whether `--min-duty` and `--rate-min` (arm robots; `--rot-min` on the dozer) are the minimum values that just get the robot moving on the competition floor; `control.rot_rate0` corrects itself at runtime.
+```bash
+cd robot_vlm/pc && python3 -m pip install -r requirements.txt
+```
+
+### 第 3 步：先只测 VLM（不用小车）
+
+拿一个红色杯子放在 Mac 摄像头前：
+
+```bash
+python3 bench_vlm.py --target "red cup" --models qwen3-vl:2b-instruct qwen3-vl:4b-instruct
+```
+
+会打印每个模型的延迟，并弹窗显示框的位置。**选框得准的里面最快的那个**，写进 `config.py` 的 `VLM_MODEL`。
+
+### 第 4 步：树莓派准备
+
+1. 树莓派和 Mac 连**同一个 Wi-Fi**（最好 5GHz，或者直接网线）。
+2. 树莓派上查 IP：`hostname -I`，填到 Mac 上 `pc/config.py` 的 `PI_IP`。建议在路由器里给树莓派固定 IP。
+3. 把 `pi/` 文件夹拷到树莓派（在 Mac 上执行，`pi@` 换成你的用户名）：
+
+```bash
+scp -r robot_vlm/pi pi@192.168.1.50:~/
+```
+
+4. 在树莓派上安装依赖（CSI 摄像头用系统自带的 picamera2，所以用 `--system-site-packages`）：
+
+```bash
+sudo apt install -y python3-picamera2 python3-opencv python3-zmq python3-gpiozero
+```
+
+```bash
+python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install adafruit-circuitpython-servokit
+```
+
+5. 用了 PCA9685 舵机板的话，打开 I2C：`sudo raspi-config` → Interface Options → I2C → Enable。
+6. **按你的接线修改 `pi/robot_server.py` 顶部**：电机引脚 `LEFT_MOTOR / RIGHT_MOTOR`、舵机通道 `ARM_CHANNELS`、夹爪角度。
+   - 如果你的小车是厂商套件（自带驱动板 / 串口舵机），只需改 `Drive.set()` 和 `Arm._write()` 两个函数，换成厂商提供的控制代码，其它都不用动。
+
+7. 启动：
+
+```bash
+~/venv/bin/python ~/pi/robot_server.py
+```
+
+> 没有接电机/舵机库时会显示"模拟模式"，只打印指令不动作 —— 可以先用这个调通网络。
+
+### 第 5 步：测试连接和延迟
+
+Mac 上：
+
+```bash
+python3 grasp.py --view
+```
+
+窗口里看到小车画面，左上角显示帧率和指令往返时间（局域网正常 < 20 ms）。按 `q` 退出。
+
+### 第 6 步：标定机械臂（第一次必须做，**先把车架空，轮子离地**）
+
+```bash
+python3 arm_calib.py
+```
+
+输入 `shoulder 90`、`elbow 100` 这样一点一点调，找到三个姿态：
+- `home`：手臂收起，**不挡摄像头**
+- `reach`：夹爪伸到车前方地面的抓取点
+- `lift`：抓起后抬高
+
+把角度填回 `pi/robot_server.py` 的 `ARM_POSES`，重启 `robot_server.py`。输入 `grasp` 测试完整抓取动作。
+
+### 第 7 步：标定抓取点
+
+把物体手动放到夹爪 `reach` 姿态正好能抓到的位置，然后：
+
+```bash
+python3 grasp.py --target "red cup" --calib
+```
+
+小车不会动。窗口上方显示 `cx=… bottom=…`，把这两个数字填进 `config.py` 的 `GRASP_X` 和 `GRASP_BOTTOM_Y`。
+
+### 第 8 步：自动抓取 🎉
+
+把物体放到车前 0.5–1 米处：
+
+```bash
+python3 grasp.py --target "red cup"
+```
+
+流程：`SEARCH`（原地转着找）→ `TRACK`（边跟踪边开过去对准紫色十字）→ `GRASP`（树莓派执行抓取）→ VLM 确认是否抓到，失败自动重来。
+**空格键 = 急停/继续，`q` = 退出。** 目标描述用英文效果最好，如 `"blue block"`、`"the bottle on the left"`。
+
+---
+
+## 调参与提速
+
+| 现象 | 调整（`pc/config.py`） |
+|---|---|
+| 轮子不转 / 抖动 | 调大 `MIN_SPEED`（电机死区） |
+| 左右来回摆 | 调小 `KP_TURN` |
+| 冲过头 | 调小 `KP_FWD`、`MAX_FWD` |
+| 总差一点抓不到 | 重新做第 7 步，或收紧 `ALIGN_TOL_X/Y` |
+| VLM 太慢 | 换 2b 模型；或把 `VLM_IMG_W/H` 改成 `384, 288` |
+| 框不准 | 换 8b 模型；或把 `VLM_IMG_W/H` 改成 `640, 480`；目标描述写具体些 |
+| 抓完确认总说失败 | 物体抬起后可能不在摄像头视野里，把 `VERIFY_AFTER_GRASP` 设为 `False` |
+| 画面卡顿 | 树莓派上把 `JPEG_QUALITY` 降到 60；用 5GHz Wi-Fi |
+
+**再进一步提速**（目标是固定几种东西时）：用 VLM 自动标注几百张图，训练一个 YOLO 小模型代替 VLM 做检测，延迟能到 10–20 ms；VLM 只用来理解指令和确认抓取结果。
+
+## 文件说明
+
+```
+pi/robot_server.py   树莓派：摄像头推流 + 电机 + 机械臂 + 看门狗
+pc/config.py         所有参数
+pc/grasp.py          主程序（搜索 → 跟踪 → 抓取 → 确认）
+pc/vlm.py            Ollama VLM 封装，输出物体框
+pc/robot_link.py     网络通信
+pc/bench_vlm.py      模型测速对比
+pc/arm_calib.py      机械臂标定
+```
