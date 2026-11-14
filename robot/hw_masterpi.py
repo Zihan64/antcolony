@@ -18,6 +18,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CARRY = (0, 12, 12)          # cm, gripper-tip pose while driving with an object
+# Pose while driving WITHOUT an object: the same forward pose, not arm.home(). HOME (0, 6, 18)
+# folds the arm back over the chassis - elbow 6 cm and wrist 4 cm BEHIND the base axis, 21 cm
+# up - and an overhead camera that looks at a slant then loses the tag on top of the car as
+# soon as the car turns its front towards the camera (seen 2026-11-14: calibration lost the
+# tag after the turn). In CARRY every joint is in front of the base axis, above the sonar's view.
 TRANS_EPS, ROT_EPS = 0.02, 0.02
 
 
@@ -29,7 +34,7 @@ class MasterPi:
         self.board = self.car = self.arm = self.sonar = None
         self._open()
         if self.use_arm:
-            self.arm.home(1500)
+            self.rest(1500)
 
     # ------------------------------------------------------------------ serial port
     def _open(self):
@@ -58,6 +63,19 @@ class MasterPi:
     def close(self):
         with self.lock:
             self._close()
+
+    def rest(self, ms=1500):
+        """Arm forward and compact, then gripper closed: the pose for driving (see CARRY above).
+        Blocks until done. The jaws close only AFTER the arm has moved, so that right after a
+        drop they do not close on the object that was just let go."""
+        with self.lock:
+            r = self.arm.move_to(*CARRY, pitch=-90, pitch_min=-90, pitch_max=0, ms=ms)
+            if r is None:                        # should not happen: fall back to the factory pose
+                self.arm.home(ms)
+        time.sleep(ms / 1000.0 + 0.1)
+        with self.lock:
+            self.arm.gripper(True)
+        time.sleep(0.5)
 
     # ---------------------------------------------------------------------- driving
     def set_velocity(self, vx, vy, w):
@@ -106,11 +124,15 @@ class MasterPi:
                 self.arm.open(600)
             self.holding = False
             return True, "open"
-        if name == "home":
+        if name == "home":                       # "home" = the driving pose (arm forward), not arm.home()
+            self.rest(1500)
+            self.holding = False
+            return True, "rest pose"
+        if name == "fold":                       # the factory pose, arm folded back (hides the tag from a slanted camera)
             with self.lock:
                 self.arm.home(1500)
             time.sleep(1.6)
-            return True, "home"
+            return True, "folded"
         return False, f"unknown skill {name}"
 
     def grab(self, args, cancel):
@@ -144,9 +166,7 @@ class MasterPi:
                 self.arm.move_to(*CARRY, pitch=-90, pitch_min=-90, pitch_max=0, ms=1200)
             time.sleep(1.3)
         else:
-            with self.lock:
-                self.arm.home(1500)              # also closes the (empty) gripper; clears the camera's view
-            time.sleep(1.6)
+            self.rest(1500)                      # closes the (empty) gripper; arm forward so the tag stays visible
         return ok, last or f"exit {p.returncode}"
 
     def drop(self, args):
@@ -163,7 +183,5 @@ class MasterPi:
             self.arm.open(600)
         time.sleep(0.9)
         self.holding = False
-        with self.lock:
-            self.arm.home(1500)
-        time.sleep(1.6)
+        self.rest(1500)                          # lift first, close the jaws afterwards
         return True, "dropped"
