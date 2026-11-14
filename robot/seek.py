@@ -29,8 +29,8 @@ drives towards a small thing on the floor until its lower edge is 40 % down the 
 Skill `dock` (same file): the last centimetres to a low white tray / basket that the sonar does
 not see. Arm in vlm_grab's calibrated LOOK pose (camera looks down at the floor 8-22 cm ahead),
 the nearest carpet-to-white edge straight ahead is measured in cm with the table calibration,
-and the car creeps until that edge is `edge_cm` (12; the look-down picture covers 9.4-24 cm) in
-front of the arm base. `drop` with y_cm 21 then lets go about 9 cm inside the rim.
+and the car creeps until that edge is `edge_cm` (13; the look-down picture covers 9.4-24 cm) in
+front of the arm base. `drop` with y_cm 22 then lets go about 9 cm inside the rim. See dock().
 `{"look_only": true}` moves only the arm: one photo, says where the target is.
 Every photo is saved next to this file: seek_01.jpg, seek_02.jpg ... (box drawn in when found),
 seek.jpg = the last one.
@@ -50,6 +50,20 @@ VIEW_FAR = (0, 10, 20, -12)                   # nearly level: the whole floor to
                                               # {"view": "far"} - for a landmark that may be across the room (2026-11-14: a
                                               # tray 2 m away was never in the lower view during a full turn)
 HFOV_DEG = 66.0                               # guess; only sets how big the first turn is
+# Rough distance from the picture, for things standing on the floor: where the camera is in each
+# view (cm ahead of the arm base, cm above the floor, deg it looks down), worked out from the
+# "camera" entry of vision_calib.json (LOOK pose) and the arm geometry; focal length from the same
+# calibration (10 cm on the floor = 388 px at 11 cm). Good to maybe +-20 %: enough to decide how
+# far the car may still drive before it has to look again, not for the last centimetres (dock).
+F_PX = 430.0
+GEOM = {VIEW: (13.3, 14.9, 33.0), VIEW_FAR: (13.4, 20.2, 12.0)}
+
+
+def floor_cm(geom, row, h=480):
+    """cm ahead of the arm base of the floor point seen at picture row `row`; None near / above the horizon."""
+    cam_y, cam_h, down = geom
+    ang = math.radians(down) + math.atan((row - h / 2.0) * (480.0 / h) / F_PX)
+    return None if ang < math.radians(4) else cam_y + cam_h / math.tan(ang)
 
 
 HUES = {"red": [(0, 9), (171, 180)], "orange": [(8, 22)], "yellow": [(20, 35)], "green": [(36, 85)],
@@ -110,10 +124,12 @@ class Eye:
 
     def pose(self, view, slack):
         x, y, z, pitch = view
+        self.geom = GEOM.get(tuple(view))
         with self.hw.lock:
             ok = self.hw.arm.move_to(x, y, z, pitch=pitch, pitch_min=pitch - slack, pitch_max=pitch + slack, ms=1500)
             if ok is None:                                # out of reach: the driving view is better than none
                 print(f"  seek: view {view} out of reach - using the far driving view", flush=True)
+                self.geom = None
                 self.hw.arm.set_pulses(1500, dict(FAR))
                 if hasattr(self.hw.arm, "pos"):
                     self.hw.arm.pos = None
@@ -150,7 +166,8 @@ class Eye:
             x1, y1, x2, y2 = box
             fx = (w / 2) / math.tan(math.radians(HFOV_DEG / 2))
             out = {"bearing": math.degrees(math.atan((w / 2 - (x1 + x2) / 2) / fx)),
-                   "wide": (x2 - x1) / w, "bottom": y2 / h}
+                   "wide": (x2 - x1) / w, "bottom": y2 / h,
+                   "dist": floor_cm(self.geom, y2, h) if self.geom else None}     # its foot on the floor, cm ahead
             self.cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
         self.n += 1
         self.cv2.imwrite(os.path.join(HERE, "seek.jpg"), frame)
@@ -251,13 +268,20 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             if bstop is not None and s["bottom"] >= float(bstop):      # edge is this far down the picture
                 return finish(True, f"close to the {target}: lower edge at {100 * s['bottom']:.0f} % of the picture, "
                                     f"{looks} looks, drove {drove:.0f} cm")
+            # The car must NEVER touch the target (user, 2026-11-14: it lunged at the tray). So this skill
+            # only brings it to `arrive_cm` in front of the target, by the picture: the stretch driven
+            # before the next look is at most half of what is left to that line, and `dock` does the rest.
+            dist, arrive = s.get("dist"), float(args.get("arrive_cm", 40))
+            if bstop is None and dist is not None and dist <= arrive:
+                return finish(True, f"in front of the {target}: about {dist:.0f} cm ahead by the picture, "
+                                    f"{looks} looks, drove {drove:.0f} cm")
             # centred: forward, sonar first
             near_by_eye = s["wide"] >= 0.75 or (s["bottom"] >= 0.92 and s["wide"] >= 0.4)
-            # the closer it looks, the shorter the stretch driven before the next look (a low
-            # tray is not seen by the sonar: only the picture keeps the car from driving into it)
             seg_now = seg if (s["wide"] < 0.3 and s["bottom"] < 0.6) else seg / 2 if (s["wide"] < 0.5 and s["bottom"] < 0.8) else 6.0
             if bstop is not None:
                 seg_now = min(seg_now, 20.0 if s["bottom"] < float(bstop) - 0.15 else 8.0)
+            elif dist is not None:
+                seg_now = max(5.0, min(seg, 0.5 * (dist - arrive) + 3.0))
             gone = 0.0
             while gone < seg_now:
                 if cancel.is_set():
@@ -273,6 +297,10 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                                         f"{looks} looks, drove {drove:.0f} cm")
                 if drove >= max_cm:
                     return finish(False, f"drove {drove:.0f} cm and never reached the {target}")
+                if seg_now - gone >= 15 and (d is None or d > stop_cm + 40) and hasattr(hw, "cruise"):
+                    went = hw.cruise(u, seg_now - gone, cancel, guard_cm=stop_cm + 12)     # far from everything: one
+                    gone, drove = gone + max(went, 1.0), drove + went                     # smooth move, not stop-and-go
+                    continue
                 t = step if d is None else min(step, max(0.12, (d - stop_cm + 2) / cm_s))
                 hw.pulse(u, 0.0, t, cancel)
                 gone, drove = gone + cm_s * t, drove + cm_s * t
@@ -287,8 +315,9 @@ LOOK = {3: 565, 4: 2271, 5: 1627, 6: 1500}    # vlm_grab.LOOK_PULSES: the pose t
 
 
 class EdgeEye:
-    """Camera in the calibrated LOOK pose. edge() -> what measure() says about the white thing in
-    front of the car. Saves dock.jpg with the edge drawn."""
+    """The camera for docking. view() + blob(): the lower search view, where the tray is roughly
+    (sideways offset and distance, good to a few cm); look() + edge(): the calibrated LOOK pose,
+    what measure() says about the white edge right in front of the car. Saves dock_view.jpg / dock.jpg."""
 
     def __init__(self, hw):
         import json
@@ -298,23 +327,45 @@ class EdgeEye:
         with open(os.path.join(HERE, "masterpi_lite", "vision_calib.json"), encoding="utf-8") as f:
             self.H = np.array(json.load(f)["H"], dtype=np.float64)
         self.cap = open_cam(cv2)
-        with hw.lock:
-            hw.arm.set_pulses(1500, dict(LOOK))
-            if hasattr(hw.arm, "pos"):
-                hw.arm.pos = None
-        time.sleep(2.3)
         for _ in range(20):
             self.cap.read()
 
-    def edge(self):
-        cv2 = self.cv2
+    def frame(self):
         frame = None
+        time.sleep(0.3)                                   # let the arm stop swaying
         for _ in range(10):
             ok, f = self.cap.read()
             if ok:
                 frame = f
         if frame is None:
             raise RuntimeError("camera: no picture (USB cable?)")
+        return frame
+
+    def view(self):
+        x, y, z, pitch = VIEW
+        with self.hw.lock:
+            self.hw.arm.move_to(x, y, z, pitch=pitch, pitch_min=pitch - 12, pitch_max=pitch + 12, ms=1200)
+        time.sleep(1.8)
+
+    def look(self):
+        with self.hw.lock:
+            self.hw.arm.set_pulses(1500, dict(LOOK))
+            if hasattr(self.hw.arm, "pos"):
+                self.hw.arm.pos = None
+        time.sleep(2.3)
+
+    def blob(self):
+        cv2, frame = self.cv2, self.frame()
+        b = white_blob(cv2, self.np, frame)
+        if b is not None:
+            x1, y1, x2, y2 = b["box"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"off {b['off']:+.1f} cm, near edge {b['dist']:.0f} cm", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imwrite(os.path.join(HERE, "dock_view.jpg"), frame)
+        return b
+
+    def edge(self):
+        cv2, frame = self.cv2, self.frame()
         m = measure(cv2, self.np, frame, self.H)
         if m.get("row") is not None:
             cv2.line(frame, (0, m["row"]), (frame.shape[1], m["row"]), (0, 255, 0), 2)
@@ -325,6 +376,32 @@ class EdgeEye:
 
     def close(self):
         self.cap.release()
+
+
+def white_blob(cv2, np, frame):
+    """The nearest big white, smooth thing in the lower search view (VIEW) -> None or
+    {"off": cm it lies to the LEFT of the car's line (+) / right (-), "dist": cm from the arm base to
+    its near edge (21 = at the bottom of the picture or nearer), "area": share of the picture, "box"}."""
+    h, w = frame.shape[:2]
+    m = cv2.morphologyEx(white_mask(cv2, np, frame).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m[int(0.86 * h):, int(0.2 * w): int(0.9 * w)] = 0     # what the gripper holds shows here, and a pale block passes for white
+    n, _, stats, cent = cv2.connectedComponentsWithStats(m, 8)
+    best = None
+    for i in range(1, n):
+        x, y, bw, bh, area = (int(v) for v in stats[i])
+        if area < 0.04 * h * w or y + bh < 0.3 * h:       # too small, or only up in the background (walls, heater)
+            continue
+        if best is None or y + bh > best[1]:
+            best = (i, y + bh)
+    if best is None:
+        return None
+    i = best[0]
+    x, y, bw, bh, area = (int(v) for v in stats[i])
+    geom = GEOM[VIEW]
+    near = floor_cm(geom, y + bh - 1, h) or 300.0
+    mid = floor_cm(geom, float(cent[i][1]), h) or 300.0
+    off = (mid - geom[0]) * (w / 2.0 - float(cent[i][0])) / F_PX        # sideways, at the blob's middle
+    return {"off": off, "dist": near, "area": area / float(h * w), "box": (x, y, x + bw, y + bh)}
 
 
 def white_mask(cv2, np, frame):
@@ -353,14 +430,14 @@ def measure(cv2, np, frame, H):
         return {"state": "none"}
     side = 1 if m[:, : w // 2].sum() > m[:, w // 2:].sum() else -1
     row = m[:, w // 2 - 70: w // 2 + 70].mean(axis=1) > 0.6
-    edge = None
-    for r in range(h - 1, 12, -1):                        # from the car outwards: the first white stretch
+    edge, low = None, int(0.93 * h)                       # (below that row: what the gripper holds)
+    for r in range(low, 12, -1):                          # from the car outwards: the first white stretch
         if row[r - 11: r + 1].sum() >= 10:
             edge = r
             break
     if edge is None:
         return {"state": "side", "side": side}
-    if edge >= h - 6:
+    if edge >= low - 6:
         return {"state": "close", "side": side}
     to_cm = lambda v: float(cv2.perspectiveTransform(np.array([[[w / 2.0, float(v)]]]), H)[0, 0, 1])
     y = to_cm(edge)
@@ -369,10 +446,17 @@ def measure(cv2, np, frame, H):
 
 
 def dock(hw, args, cancel, eye=None, carry_pose=None):
-    """Creep until the near edge of the white tray is `edge_cm` in front of the arm base, sliding
-    sideways first if the tray is off to one side (2026-11-14: the car arrived 7 deg off and
-    crept past the tray's corner). -> (ok, detail)."""
-    want, tol = float(args.get("edge_cm", 12)), float(args.get("tol_cm", 1.5))
+    """The last ~45 cm to the white tray, without ever touching it. -> (ok, detail).
+    1. lower search view: the tray is found as the nearest big white smooth thing; the car slides
+       sideways (mecanum) until it is on the car's line and creeps up - at most 6 cm at a time, each
+       step from a fresh photo - until its near edge is about 24 cm ahead. No tray in the photo =
+       no move at all.
+    2. calibrated LOOK pose: the edge on the car's line in cm; creep until it is `edge_cm` (13) in
+       front of the arm base (the chassis ends ~6 cm in front of the arm base: ~7 cm of air), sliding again if the
+       tray is off to one side or there is not 10 cm of tray beyond the edge. At most 3 moves of
+       4 cm with nothing white in view, then it gives up rather than push on blind.
+    (2026-11-14: an earlier version crept 25 cm blind past the tray's corner.)"""
+    want, tol = float(args.get("edge_cm", 13)), float(args.get("tol_cm", 1.5))
     cm_s, side_cm_s, u = float(args.get("cm_s", 17)), float(args.get("side_cm_s", 15)), float(args.get("u", 0.05))
     say = lambda msg: print(f"  dock: {msg}", flush=True)
     made = eye is None
@@ -388,20 +472,40 @@ def dock(hw, args, cancel, eye=None, carry_pose=None):
 
     def slide(side, cm):
         say(f"the tray is to the {'left' if side > 0 else 'right'} - sliding {cm:.0f} cm that way")
-        hw.pulse(0.0, side * u, cm / side_cm_s, cancel)
+        hw.pulse(0.0, side * u, max(0.08, cm / side_cm_s), cancel)
 
     try:
-        blind = slides = 0
+        eye.view()
+        for i in range(16):
+            if cancel.is_set():
+                return finish(False, "cancelled")
+            b = eye.blob()
+            if b is None:
+                return finish(False, "no white tray in front of the car" + (" - nothing moved" if i == 0 else " any more"))
+            say(f"tray {abs(b['off']):.0f} cm to the {'left' if b['off'] > 0 else 'right'}, near edge about {b['dist']:.0f} cm ahead")
+            if i == 0 and b["dist"] > float(args.get("max_start_cm", 75)):
+                return finish(False, f"the tray is still about {b['dist']:.0f} cm away - seek first (nothing moved)")
+            if abs(b["off"]) > 3.0:
+                slide(1 if b["off"] > 0 else -1, min(6.0, 0.8 * abs(b["off"])))
+            elif b["dist"] <= 25.0:
+                break
+            else:
+                hw.pulse(u, 0.0, max(0.10, min(6.0, b["dist"] - 22.0) / cm_s), cancel)
+        else:
+            return finish(False, "could not line up with the tray")
+
+        eye.look()
+        blind, slides, prev = 0, 0, None
         for i in range(int(args.get("max_moves", 20))):
             if cancel.is_set():
                 return finish(False, "cancelled")
             m = eye.edge()
             if m["state"] == "none":
                 blind += 1
-                if blind > int(args.get("max_blind", 5)):
-                    return finish(False, "no white edge in front of the car")
-                say("nothing white in the picture yet - forward 5 cm")
-                hw.pulse(u, 0.0, 5.0 / cm_s, cancel)
+                if blind > 3:
+                    return finish(False, "the tray's edge did not come into the look-down picture - stopped")
+                say("nothing white under the camera yet - forward 4 cm")
+                hw.pulse(u, 0.0, 4.0 / cm_s, cancel)
             elif m["state"] == "side" or (m["state"] == "edge" and not m["deep"] and slides < 8):
                 slides += 1
                 if slides > 8:
@@ -413,6 +517,9 @@ def dock(hw, args, cancel, eye=None, carry_pose=None):
             else:
                 err = m["y"] - want
                 say(f"edge {m['y']:.1f} cm ahead (want {want:.0f})")
+                if prev is not None and err * prev < 0:   # went past it: the smallest move is too big for this
+                    tol = min(3.0, tol + 0.75)            # tolerance - accept a little more rather than rock to and fro
+                prev = err
                 if abs(err) <= tol:
                     return finish(True, f"docked: edge {m['y']:.1f} cm in front of the arm base"
                                         + ("" if m["deep"] else " (not much tray behind it)"))

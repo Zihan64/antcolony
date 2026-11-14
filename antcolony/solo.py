@@ -117,7 +117,7 @@ def main():
     ap.add_argument("--find-bottom", type=float, default=0.40,
                     help="find: drive towards the object until its lower edge is this far down the picture (0-1)")
     ap.add_argument("--dock", default="{}", help='dock settings as JSON, e.g. \'{"edge_cm": 9}\'')
-    ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base")
+    ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base (22 after `dock`: ~9 cm inside the tray)")
     ap.add_argument("--drop-z", type=float, default=4, help="cm above the floor")
     a = ap.parse_args()
     cfg = load_config(a.config)

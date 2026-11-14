@@ -45,6 +45,7 @@ class FakeCar(hw_masterpi.MasterPi):
         self.v, self.w, self.vs, self.hit, self.looks, self.posed = 0.0, 0.0, 0.0, False, 0, 0
         self.cancel, self.cancel_at = threading.Event(), cancel_at
         self.sonar_sees_set = True
+        self.gives_dist, self.dist_err, self.closest = True, 1.0, 1e9
 
     # geometry: bearing of the box from the car's nose line, + = left; distance to its face
     def rel(self):
@@ -67,6 +68,8 @@ class FakeCar(hw_masterpi.MasterPi):
         self.x += -math.sin(self.th) * self.v * h - math.cos(self.th) * self.vs * h
         self.y += math.cos(self.th) * self.v * h - math.sin(self.th) * self.vs * h
         b, d = self.rel()
+        if d is not None:
+            self.closest = min(self.closest, d)
         if d is not None and self.sonar_sees_set and d < 6:      # (dock cases creep right up to the edge on purpose)
             self.hit = True
         if self.cancel_at is not None and math.hypot(self.x, self.y) >= self.cancel_at:
@@ -85,12 +88,14 @@ class FakeCar(hw_masterpi.MasterPi):
         if d is None or abs(b) > 33 or (self.miss_every and self.looks % self.miss_every == 0):
             return None
         wide = min(1.0, math.degrees(2 * math.atan(BOX_W / 2 / max(d, 1.0))) / 66.0)
-        return {"bearing": b * 0.9 + 1.5, "wide": wide, "bottom": min(1.0, 0.05 + 30.0 / max(d, 1.0))}
+        return {"bearing": b * 0.9 + 1.5, "wide": wide, "bottom": min(1.0, 0.05 + 30.0 / max(d, 1.0)),
+                "dist": (d + 6.0) * self.dist_err if self.gives_dist else None}     # arm base is 6 cm behind the sonar
 
 
-def run(box, args=None, **kw):
+def run(box, args=None, dist_err=1.0, **kw):
     clock = Clock()
     car = FakeCar(box, **kw)
+    car.dist_err = dist_err
     clock.car = car
     hw_masterpi.time = seek.time = clock
 
@@ -123,6 +128,8 @@ CASES = [
     ("aim only: turns to it, does not drive", (-50, 70), {"stop": "aim"}, {}, lambda c, ok: ok and math.hypot(c.x, c.y) < 1 and abs(c.rel()[0]) < 15),
     ("small block 1.5 m away to the left: turn, drive until it is low in the picture", (-70, 135),
      {"bottom_stop": 0.4, "stop_cm": 12}, {"sonar_sees": False}, lambda c, ok: ok and 50 <= c.rel()[1] + 12.5 <= 95 and abs(c.rel()[0]) < 20),
+    ("tray 1.6 m away, picture distance 20 % too long: still stops well before it", (20, 160), {}, {"sonar_sees": False},
+     lambda c, ok: ok and c.closest >= 14),
     ("low tray 1.2 m away that the sonar never sees", (30, 115), {}, {"sonar_sees": False}, lambda c, ok: ok and near(c, 8, 45)),
     ("low tray behind the car, sonar blind, VLM misses every 4th look", (-20, -90), {}, {"sonar_sees": False, "miss_every": 4},
      lambda c, ok: ok and near(c, 8, 45)),
@@ -130,10 +137,24 @@ CASES = [
 
 
 class FakeEdge:
-    """The look-down camera: sees the tray's near edge when it is 7-23 cm in front of the arm base."""
+    """The docking camera. Lower view (blob): the tray's sideways offset and near-edge distance, 12 % off.
+    Look-down view (edge): its near edge when that is 7-23 cm in front of the arm base."""
 
     def __init__(self, car, noise=0.0):
         self.car, self.noise, self.n = car, noise, 0
+
+    def view(self):
+        pass
+
+    def look(self):
+        pass
+
+    def blob(self):
+        c = self.car
+        d, lat = (c.box[1] - BOX_W / 2 - c.y) + 6.0, c.x - c.box[0]
+        if d > 150 or abs(lat) > 0.7 * max(d, 21) + BOX_W / 2:
+            return None
+        return {"off": lat * 0.88, "dist": max(21.0, d * 1.12)}
 
     def edge(self):
         self.n += 1
@@ -167,7 +188,8 @@ DOCK = [("dock from 30 cm (edge not in the look-down picture yet)", 30, 0.0, 0),
         ("dock from 4 cm (too close: backs up)", 0.5, 0.0, 0), ("dock with +-1 cm measuring noise", 22, 1.0, 0),
         ("dock: tray 15 cm to the right of the car's line (slides over first)", 12, 0.0, 15),
         ("dock: tray 9 cm to the left, only its edge region under the camera", 20, 0.0, -9),
-        ("dock: nothing white within reach - gives up without bumping anything", 90, 0.0, 0)]
+        ("dock: tray 40 cm ahead and 12 cm to the left", 40, 0.0, -12),
+        ("dock: tray 90 cm away - refuses, does not move", 90, 0.0, 0)]
 
 
 if __name__ == "__main__":
@@ -180,7 +202,7 @@ if __name__ == "__main__":
             print(f"--- {name}")
         car, ok, detail, secs = run(box, args, **kw)
         b, d = car.rel()
-        good = check(car, ok) and not car.hit and car.posed == 1
+        good = check(car, ok) and not car.hit and car.posed == 1 and (box is None or car.closest >= 14)   # never within 14 cm
         bad += not good
         where = "" if d is None else f", box face {d:.0f} cm away, {b:+.0f} deg"
         print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  "
@@ -190,8 +212,10 @@ if __name__ == "__main__":
             print(f"--- {name}")
         car, ok, detail = run_dock(start, noise, off)
         edge, lat = (car.box[1] - BOX_W / 2 - car.y) + 6.0, abs(car.x - car.box[0])
-        good = ((ok and 10 <= edge <= 14 and lat < BOX_W / 2 - 4) if start < 60 else (not ok and edge > 40)) and car.posed == 1
+        good = ((ok and 11 <= edge <= 15 and lat < BOX_W / 2 - 4) if start < 60 else (not ok and edge > 40)) and car.posed == 1 \
+            and car.closest + 6.0 >= min(9.5, start + 6.0) - 0.3    # chassis ends 6 cm in front of the arm base: never nearer than 3.5 cm
         bad += not good
-        print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  [edge really {edge:.1f} cm from the arm base]")
+        print(f"{'ok  ' if good else 'FAIL'} {name}: {'ok' if ok else 'fail'} - {detail}  [edge really {edge:.1f} cm from the arm base, "
+              f"never nearer than {car.closest + 6.0:.1f}]")
     print(f"\n{len(CASES) + len(DOCK) - bad}/{len(CASES) + len(DOCK)} cases ok")
     sys.exit(1 if bad else 0)

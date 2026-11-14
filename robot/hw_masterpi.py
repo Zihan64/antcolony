@@ -231,6 +231,24 @@ class MasterPi:
         self.stop()
         time.sleep(0.25)
 
+    def cruise(self, u, cm, cancel, guard_cm=None, cm_s=22.0, ramp_s=0.075):
+        """One smooth forward move of about `cm` instead of stop-and-go pulses, for stretches with
+        nothing near. The front sonar is read on the way: two readings in a row under guard_cm end it.
+        -> cm driven, from the time (22 cm/s at this duty once rolling; a 0.33 s pulse = 5.7 cm)."""
+        secs, t0, low = cm / cm_s + ramp_s, time.monotonic(), 0
+        self.set_velocity(u, 0.0, 0.0)
+        while time.monotonic() - t0 < secs and not cancel.is_set():
+            time.sleep(0.05)
+            if guard_cm:
+                d = self.sonar_cm()
+                low = low + 1 if (d is not None and d < guard_cm) else 0
+                if low >= 2:
+                    break
+        self.stop()
+        t = time.monotonic() - t0
+        time.sleep(0.25)
+        return max(0.0, cm_s * (t - ramp_s))
+
     def carry(self, args, cancel):
         """Drive `dist_cm` forward (default 20) with whatever the gripper holds, going round
         anything tall in the way. No tracker: the distance is counted from the drive pulses
