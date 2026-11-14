@@ -1,6 +1,8 @@
 """Host-side task state machines, one per robot.
 
 ArmBrain  : NAV_PICK -> GRAB (on-board skill) -> NAV_BIN -> DROP (skill) -> RETREAT
+            deliver.mode "edge": NAV_DROP (to a free spot at the arena edge) instead of NAV_BIN
+            pick.max_tries N: after a missed grab, back off and go again, up to N misses in a row
 DozerBrain: NAV_BEHIND -> PUSH (one or two stages) -> RETREAT
 Both      : IDLE / PARK when there is nothing to do.
 
@@ -26,6 +28,9 @@ class Brain:
         self.skill, self.sid = None, random.randrange(1000, 900000)
         self.yield_since = self.blocked_since = None
         self.evade_until, self.evade_goal = -1e9, None
+        self.next_state, self.next_note = "IDLE", ""
+        self.done_n, self.fail_streak, self.retired = 0, 0, False     # delivered / misses in a row / gave up
+        self.drop_spot = self.drop_land = None                        # edge mode: where to stand / where it lands
 
     # ------------------------------------------------------------- bookkeeping
     def set(self, state, now, note=""):
@@ -39,12 +44,18 @@ class Brain:
     def free(self):
         return self.state in ("IDLE", "PARK")
 
+    @property
+    def available(self):
+        """May this robot be given a (new) object? Not after giving up, not once its quota is met."""
+        quota = self.co.cfg.get("deliver", {}).get("per_robot", 0)
+        return not self.retired and not (quota and self.done_n >= quota)
+
     def priority(self):
         if self.state in ("GRAB", "DROP"):
             return 5                      # under on-board control: everyone else keeps clear
         if self.state == "PUSH":
             return 4
-        if self.state in ("NAV_BIN", "RETREAT"):
+        if self.state in ("NAV_BIN", "NAV_DROP", "RETREAT"):
             return 3
         return 1 if self.free else 2
 
@@ -131,6 +142,8 @@ class Brain:
         return vel(-0.5, 0, 0, guard=False), False
 
     def park(self, now):
+        if self.r.home is None:
+            return dict(ZERO)
         cmd, done = self.goto(self.r.home, None, now)
         return dict(ZERO) if done else cmd
 
@@ -161,6 +174,8 @@ class ArmBrain(Brain):
         self.obj, o.state, o.owner = o, "assigned", self.name
         self.beta, self.beta_at, self.bad, self.tries, self.drop_b = None, None, [], 0, None
         self.lock_t, self.no_lock_until = None, -1e9
+        self.drop_spot = self.drop_land = None
+        self.bad_spots = []
         self.set("NAV_PICK", now, f"pick #{o.id}")
 
     def pick_pose(self, o):
@@ -215,6 +230,52 @@ class ArmBrain(Brain):
                 best = (dist(r.xy, goal), a)
         return best[1] if best else wrap(b.th + math.pi)
 
+    def edge_spot(self):
+        """Edge mode: (x, y, heading) to stand at so that the arm, reaching straight ahead, puts
+        the object down `deliver.inset` inside the arena boundary - the nearest such place that
+        is free, not on a floor tag and not where another object lies or is about to be put."""
+        if self.drop_spot is not None:
+            return self.drop_spot
+        co, r, w = self.co, self.r, self.co.world
+        a, dc = co.cfg["arena"], co.cfg["deliver"]
+        reach = r.rc.get("base_fwd", 0.055) + dc.get("y_cm", 16) / 100.0     # robot centre -> landing point
+        inset, gap, step = dc.get("inset", 0.08), dc.get("spacing", 0.20), 0.06
+        d = reach + inset
+        lying = [x.xy for x in w.delivered] + [(p[0], p[1]) for p in w.parked]
+        claimed = [b.drop_land for b in co.brains if b is not self and b.drop_land is not None]
+        tags = list(w.floor_tags.values())
+        sides = dc.get("sides") or ("bottom", "top", "left", "right")
+        cands = []
+        for k in range(int((a["xmax"] - a["xmin"]) / step) + 1):
+            x = a["xmin"] + k * step
+            if "bottom" in sides:
+                cands.append(((x, a["ymin"] + d), -math.pi / 2, (x, a["ymin"] + inset)))
+            if "top" in sides:
+                cands.append(((x, a["ymax"] - d), math.pi / 2, (x, a["ymax"] - inset)))
+        for k in range(int((a["ymax"] - a["ymin"]) / step) + 1):
+            y = a["ymin"] + k * step
+            if "left" in sides:
+                cands.append(((a["xmin"] + d, y), math.pi, (a["xmin"] + inset, y)))
+            if "right" in sides:
+                cands.append(((a["xmax"] - d, y), 0.0, (a["xmax"] - inset, y)))
+        cfg = co.cfg
+        g = Grid(cfg["arena"], cfg["cell"], cfg["wall_margin"], co.obstacles_for(self, robots=False))
+        best = None
+        for stand, th, land in cands:
+            if any(dist(land, q) < gap for q in lying) or any(dist(land, q) < 0.25 for q in tags):
+                continue
+            if any(dist(land, q) < 0.45 for q in claimed) or any(dist(stand, q) < 0.20 for q in self.bad_spots):
+                continue
+            if not g.free(stand):
+                continue
+            cost = dist(r.xy, stand)
+            if best is None or cost < best[0]:
+                best = (cost, (stand[0], stand[1], th), land)
+        if best is None:
+            return None
+        self.drop_spot, self.drop_land = best[1], best[2]
+        return self.drop_spot
+
     def _tick(self, now):
         co, r, o, st = self.co, self.r, self.obj, self.state
         pc, bc = co.cfg["pick"], co.cfg["bin"]
@@ -256,12 +317,31 @@ class ArmBrain(Brain):
             if res is None:
                 return None                              # the car drives itself for the last few cm
             ok, detail = res
+            tries = pc.get("max_tries", 0)               # 0 = old behaviour: hand it back after every miss
             if ok:
                 o.state = "held"
-                co.log(f"{self.name} grabbed #{o.id} ({o.label})")
-                self.set("NAV_BIN", now, f"carry #{o.id}")
+                n = self.fail_streak + 1
+                self.fail_streak = 0
+                co.grabbed(o)
+                co.log(f"{self.name} grabbed #{o.id} ({o.label})" + (f" on try {n}" if tries and n > 1 else ""))
+                self.set("NAV_DROP" if co.world.edge else "NAV_BIN", now, f"carry #{o.id}")
+                return None
+            o.fails += 1
+            self.fail_streak += 1
+            if tries and self.fail_streak < tries:       # same object again, from where it lies now
+                co.log(f"{self.name} missed #{o.id}: {detail} (try {self.fail_streak} of {tries}) - trying again")
+                o.state, self.beta = "assigned", None
+                self.next_state, self.next_note = "NAV_PICK", f"pick #{o.id} (try {self.fail_streak + 1} of {tries})"
+                self.set("RETREAT", now, f"missed #{o.id} - back off and try again")
+            elif tries:
+                co.log(f"{self.name} GIVES UP on #{o.id} after {tries} missed grabs: {detail}")
+                o.ban[self.name] = float("inf")
+                self.release(o, now)
+                self.retired = pc.get("give_up", "park") == "park"
+                self.fail_streak = 0
+                self.next_state = "IDLE"
+                self.set("RETREAT", now, f"gave up after {tries} tries")
             else:
-                o.fails += 1
                 if o.fails >= pc["max_fails"] and bc.get("floor_entry") and co.has_dozer(now):
                     o.cls = "push"                       # (floor-level bin mouth only) hand it to the bulldozer
                 co.log(f"{self.name} missed #{o.id}: {detail} (fail {o.fails})")
@@ -269,6 +349,26 @@ class ArmBrain(Brain):
                 self.next_state = "IDLE"
                 self.set("RETREAT", now, "back off after a miss")
             return None
+        if st == "NAV_DROP":                             # edge mode: carry it to a free spot at the boundary
+            o.x, o.y = r.front(r.rc.get("base_fwd", 0.055) + 0.12)        # it rides in the gripper
+            spot = self.edge_spot()
+            if spot is None:
+                self.note = "no free spot at the edge - waiting"
+                self.bad_spots = []
+                return dict(ZERO)
+            cmd, done = self.goto(spot[:2], spot[2], now)
+            if self.blocked_since and now - self.blocked_since > 4.0:     # cannot get there: another place
+                self.bad_spots.append(spot[:2])
+                self.drop_spot = self.drop_land = self.goal = None
+                self.blocked_since = None
+                return dict(ZERO)
+            if done:
+                dc = co.cfg["deliver"]
+                self.skill_start("drop", {"y_cm": dc.get("y_cm", 16), "z_cm": dc.get("z_cm", 4)},
+                                 now, co.cfg["drop"]["timeout"])
+                self.set("DROP", now, f"put #{o.id} down at the edge")
+                return None
+            return cmd
         if st == "NAV_BIN":
             b = co.world.bin
             o.x, o.y = r.front(r.rc.get("base_fwd", 0.055) + 0.12)        # it rides in the gripper
@@ -304,18 +404,25 @@ class ArmBrain(Brain):
             if res is None:
                 return None
             if res[0]:
+                if self.drop_land is not None:
+                    o.x, o.y = self.drop_land            # edge mode: it now lies where the arm put it
+                self.done_n += 1
                 co.deliver(o, self.name, now)
             else:
                 co.log(f"{self.name} drop failed: {res[1]}")
                 co.world.drop(o)
             self.obj, self.next_state = None, "IDLE"
-            self.set("RETREAT", now, "leave the bin")
+            self.drop_spot = self.drop_land = None
+            self.set("RETREAT", now, "back away from the object" if co.world.edge else "leave the bin")
             return None
         if st == "RETREAT":
-            cmd, done = self.retreat(now, 0.15)
+            # before another try, back off a little past the pre-grasp distance: the car then only
+            # has to creep forward again (a goal behind it would make it turn right round first)
+            cmd, done = self.retreat(now, 0.22 if self.next_state == "NAV_PICK" else 0.15)
             if done:
                 co.unlock(self.name)
-                self.set(self.next_state, now)
+                self.set(self.next_state, now, self.next_note)
+                self.next_note = ""
             return cmd
         return dict(ZERO)
 

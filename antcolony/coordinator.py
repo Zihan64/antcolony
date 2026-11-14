@@ -2,7 +2,10 @@
 
     python -m antcolony.coordinator --config config.json            # real robots
     python -m antcolony.coordinator --config config.json --sim      # against `python -m antcolony.sim`
-Dashboard: http://localhost:8080
+    python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
+                                    # two arm cars, each puts one block at the arena edge
+    ... --objects 0.50,0.40 1.00,0.70     # block positions typed by hand (tracker detections ignored)
+Dashboard: http://localhost:8080      Check everything first: python -m antcolony.check
 """
 import argparse
 import json
@@ -67,8 +70,12 @@ class UdpBus:
 
 
 class Coordinator:
-    def __init__(self, cfg, bus, log_path=None, quiet=False):
+    def __init__(self, cfg, bus, log_path=None, quiet=False, manual=None):
         self.cfg, self.bus, self.quiet = cfg, bus, quiet
+        # block positions given by hand instead of detected: [(x, y)] -> fixed "detections"
+        self.manual = None if manual is None else [{"id": 9001 + i, "label": "block", "x": x, "y": y}
+                                                   for i, (x, y) in enumerate(manual)]
+        self.pending, self.snap_t, self.warn_t, self.first_t = False, None, -1e9, None
         self.triage = Triage(cfg)
         self.world = World(cfg, self.triage.classify)
         self.brains = [make_brain(self, r) for r in self.world.robots.values()]
@@ -101,7 +108,13 @@ class Coordinator:
 
     def deliver(self, o, by, now):
         self.world.deliver(o)
-        self.log(f"{by} delivered #{o.id} ({o.label})  [{len(self.world.delivered)} in the bin]")
+        where = "at the edge" if self.world.edge else "in the bin"
+        self.log(f"{by} delivered #{o.id} ({o.label})  [{len(self.world.delivered)} {where}]")
+
+    def grabbed(self, o):
+        """An object is in a gripper: a hand-typed position for it is no longer true."""
+        if self.manual:
+            self.manual = [m for m in self.manual if m["id"] != o.src]
 
     def obstacles_for(self, brain, bin_pad=0.02, objects=True, robots=True):
         """Discs the centre of `brain`'s robot must stay out of: other robots, objects, the bin."""
@@ -115,7 +128,13 @@ class Coordinator:
         if objects:                                          # clearance is set by the car's half width
             obs += [(o.x, o.y, o.r + tc["obj_gap"]) for o in w.objects
                     if o.state in ("free", "assigned", "pushing", "grabbing")]
-        obs.append((w.bin.x, w.bin.y, w.bin.r + me.radius + bin_pad))
+        if w.bin.on:
+            obs.append((w.bin.x, w.bin.y, w.bin.r + me.radius + bin_pad))
+        if w.edge:                                           # what already lies at the edge stays where it is
+            lying = [(p[0], p[1]) for p in w.parked]
+            lying += [o.xy for o in w.delivered if all(dist(o.xy, q) > 0.08 for q in lying)]
+            obs += [(x, y, 0.02 + tc["obj_gap"]) for x, y in lying]
+        obs += [(x, y, tc.get("tag_gap", 0.10) + me.radius) for x, y in w.floor_tags.values()]   # paper: keep off
         return obs
 
     def has_dozer(self, now):
@@ -142,16 +161,26 @@ class Coordinator:
         free = [o for o in w.objects if o.state == "free"]
         busy_pts = [b.obj.xy for b in self.brains if b.obj is not None and not b.free]
         idle = [b for b in self.brains if b.free and b.r.fresh(now, self.cfg["control"]["pose_timeout"])]
+        # is there still something a robot may do later (temporary bans run out, permanent ones do not)?
+        self.pending = any(b.available and b.role == "arm" and o.cls != "push"
+                           and o.ban.get(b.name, 0) != float("inf") for b in self.brains for o in free)
         for b in sorted(idle, key=lambda b: b.role == "dozer"):          # arm cars choose first
+            if not b.available:                                          # gave up, or has done its share
+                if b.state == "IDLE" and b.r.home is not None and dist(b.r.xy, b.r.home) > 0.12 \
+                        and now > b.evade_until + 3.0:
+                    b.set("PARK", now, "gave up" if b.retired else "done")
+                continue
             best = None
             for o in free:
                 if o.ban.get(b.name, 0) > now or any(dist(o.xy, p) < ac["spacing"] for p in busy_pts):
                     continue
-                d_bin = dist(o.xy, w.bin.xy)
+                d_bin = dist(o.xy, w.bin.xy) if w.bin.on else 0.0
                 if b.role == "arm":
                     if o.cls == "push":
                         continue                                         # too big for the gripper
                     cost = dist(b.r.xy, o.xy) + 0.5 * d_bin
+                elif not w.bin.on:
+                    continue                                             # edge mode: nothing for a dozer to do
                 elif mouth:                                              # optional mode: push straight into the bin
                     if o.cls != "push" and not ac["dozer_helps"]:
                         continue
@@ -167,7 +196,8 @@ class Coordinator:
                 b.assign(best[1], now)
                 free.remove(best[1])
                 busy_pts.append(best[1].xy)
-            elif b.state == "IDLE" and dist(b.r.xy, b.r.home) > 0.12 and now > b.evade_until + 20.0:
+            elif b.state == "IDLE" and b.r.home is not None and dist(b.r.xy, b.r.home) > 0.12 \
+                    and now > b.evade_until + 20.0:
                 b.set("PARK", now, "nothing to do")
 
     # ------------------------------------------------------------------ traffic
@@ -211,6 +241,9 @@ class Coordinator:
         self.now = now
         snap = self.bus.world()
         if snap is not None:
+            self.snap_t = now
+            if self.manual is not None:                      # positions typed by hand replace the detector
+                snap = dict(snap, objects=[dict(m) for m in self.manual])
             self.world.update(snap, now)
             if self.t0 is None and self.world.n_seen:
                 self.t0 = now
@@ -226,12 +259,41 @@ class Coordinator:
                 rc = b.r.rc
                 self.bus.send(b.name, dict(c, type="vel", vy=c["vy"] * rc.get("vy_sign", 1),
                                            w=c["w"] * rc.get("w_sign", 1)))
+        self.health(now)
         todo = any(o.state in ACTIVE for o in self.world.objects)
+        limited = bool(self.cfg["pick"].get("max_tries") or self.cfg.get("deliver", {}).get("per_robot"))
+        if limited:                                          # finished = nobody is working and nobody may start
+            todo = self.pending or any(not b.free for b in self.brains)
         if self.t0 is not None and self.t_done is None:
             self.t_clear = None if todo else (self.t_clear or now)
             if self.t_clear and now - self.t_clear > 3.0 and all(b.free for b in self.brains):
                 self.t_done = self.t_clear
-                self.log(f"ARENA CLEAR: {len(self.world.delivered)} objects in {self.t_done - self.t0:.0f} s")
+                if limited:
+                    per = ", ".join(f"{b.name}: " + (f"{b.done_n} delivered" if b.done_n else
+                                                     "gave up" if b.retired else "nothing delivered")
+                                    for b in self.brains if b.role == "arm")
+                    self.log(f"FINISHED in {self.t_done - self.t0:.0f} s - {per}")
+                else:
+                    self.log(f"ARENA CLEAR: {len(self.world.delivered)} objects in {self.t_done - self.t0:.0f} s")
+
+    def health(self, now):
+        """Every 5 s, say what is missing (tracker data, a robot's tag, a robot's telemetry)."""
+        self.first_t = now if self.first_t is None else self.first_t
+        if self.quiet or now - self.warn_t < 5.0 or now - self.first_t < 3.0:
+            return
+        self.warn_t = now
+        bad = []
+        if self.snap_t is None or now - self.snap_t > 2.0:
+            bad.append(f"no tracker data on UDP {self.cfg.get('world_port', PORT_WORLD)}")
+        else:
+            for b in self.brains:
+                if not b.r.fresh(now, 2.0):
+                    bad.append(f"{b.name}: tag {b.r.rc['tag']} not seen")
+        for b in self.brains:
+            if b.r.x is not None and self.bus.telem(b.name) is None:
+                bad.append(f"{b.name}: no telemetry from {self.cfg['robots'][b.name]['addr'][0]} (agent.py running?)")
+        if bad:
+            print("  [waiting] " + "; ".join(bad), flush=True)
 
     def state(self):
         """Everything the dashboard draws."""
@@ -239,8 +301,11 @@ class Coordinator:
         return {
             "t": round((self.t_done or self.now) - (self.t0 or self.now), 1), "done": self.t_done is not None,
             "arena": self.cfg["arena"],
-            "bin": {"x": w.bin.x, "y": w.bin.y, "th": w.bin.th, "r": w.bin.r,
+            "bin": {"x": w.bin.x, "y": w.bin.y, "th": w.bin.th, "r": w.bin.r, "on": w.bin.on,
                     "mouth": bool(self.cfg["bin"].get("floor_entry"))},
+            "edge": w.dc.get("edge_zone", 0.20) if w.edge else None,
+            "lying": [[p[0], p[1]] for p in w.parked] + [list(o.xy) for o in w.delivered] if w.edge else [],
+            "floor_tags": [list(p) for p in w.floor_tags.values()],
             "robots": [{"name": b.name, "role": b.role, "x": b.r.x, "y": b.r.y, "th": b.r.th, "r": b.r.radius,
                         "state": b.state, "note": b.note, "path": b.path[:20],
                         "batt": (b.r.telem or {}).get("batt_mv")} for b in self.brains if b.r.x is not None],
@@ -250,15 +315,52 @@ class Coordinator:
         }
 
 
+def arena_from_tags(bus, cfg, wait_s=15.0, log=print):
+    """Set cfg["arena"] to the rectangle spanned by the tracker's arena-corner floor tags.
+    True if the tracker sent them within `wait_s`."""
+    t_end = time.monotonic() + wait_s
+    while time.monotonic() < t_end:
+        s = bus.world()
+        floor = (s or {}).get("floor") or {}
+        ids = [str(i) for i in (s or {}).get("corners") or []] or list(floor)
+        pts = [floor[i] for i in ids if i in floor]
+        if len(pts) >= 3:
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            cfg["arena"].update(xmin=round(min(xs), 3), xmax=round(max(xs), 3),
+                                ymin=round(min(ys), 3), ymax=round(max(ys), 3))
+            a = cfg["arena"]
+            log(f"[arena] from floor tags {ids}: x {a['xmin']}..{a['xmax']} m, y {a['ymin']}..{a['ymax']} m "
+                f"({a['xmax'] - a['xmin']:.2f} x {a['ymax'] - a['ymin']:.2f} m)")
+            return True
+        time.sleep(0.05)
+    log(f"[arena] the tracker sent no floor tags in {wait_s:.0f} s - keeping the arena from the config: {cfg['arena']}")
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.json")
+    ap.add_argument("--overlay", help="JSON with only the keys that differ from the config, e.g. profiles/edge2.json")
     ap.add_argument("--sim", action="store_true", help="robots are simulated on localhost (python -m antcolony.sim)")
+    ap.add_argument("--arena-from-tags", action="store_true",
+                    help="arena = rectangle of the tracker's corner floor tags (instead of config 'arena')")
+    ap.add_argument("--objects", nargs="+", metavar="X,Y",
+                    help="object positions typed by hand, metres in the tracker frame; the tracker's own "
+                         "object detections are then ignored (its tags are still used)")
     ap.add_argument("--no-dash", action="store_true")
     ap.add_argument("--log", default="run_log.jsonl")
     a = ap.parse_args()
-    cfg = load_config(a.config)
-    co = Coordinator(cfg, UdpBus(cfg, a.sim), a.log)
+    cfg = load_config(a.config, a.overlay)
+    bus = UdpBus(cfg, a.sim)
+    if a.arena_from_tags:
+        arena_from_tags(bus, cfg)
+    manual = [tuple(float(v) for v in o.split(",")) for o in a.objects] if a.objects else None
+    co = Coordinator(cfg, bus, a.log, manual=manual)
+    dv, pk = cfg.get("deliver", {}), cfg["pick"]
+    print(f"robots: {', '.join(cfg['robots'])} | deliver: {dv.get('mode', 'bin')}"
+          + (f", {dv['per_robot']} per robot" if dv.get("per_robot") else "")
+          + (f" | up to {pk['max_tries']} grab tries" if pk.get("max_tries") else "")
+          + (f" | {len(manual)} objects typed by hand" if manual else ""))
     if not a.no_dash:
         from .dashboard import serve
         serve(co)

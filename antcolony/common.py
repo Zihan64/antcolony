@@ -84,10 +84,27 @@ def apply_network(cfg):
     return net
 
 
-def load_config(path):
-    """config.json + per-robot calibration from calib/<name>.json next to it."""
+def merge(base, over):
+    """Deep-merge `over` into `base` (dicts merge key by key, everything else is replaced)."""
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_config(path, overlay=None):
+    """config.json (+ an optional overlay file with only the keys that differ, e.g.
+    profiles/edge2.json) + per-robot calibration from calib/<name>.json next to it."""
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
+    if overlay:
+        with open(overlay, encoding="utf-8") as f:
+            merge(cfg, {k: v for k, v in json.load(f).items() if not k.startswith("_")})
+        print(f"[config] overlay: {overlay}")
+    if cfg.get("only_robots"):
+        cfg["robots"] = {n: rc for n, rc in cfg["robots"].items() if n in cfg["only_robots"]}
     apply_network(cfg)
     cdir = os.path.join(os.path.dirname(os.path.abspath(path)), "calib")
     for name, rc in cfg["robots"].items():

@@ -23,9 +23,11 @@ TAU, LAT_EFF, WATCHDOG, R_BODY = 0.12, 0.6, 0.4, 0.12
 
 
 class SimRobot:
-    def __init__(self, name, rc, rng, quirks):
+    def __init__(self, name, rc, rng, quirks, start=None):
         self.name, self.rc, self.role = name, rc, rc["role"]
-        (self.x, self.y), self.th = rc["home"], rng.uniform(-math.pi, math.pi)
+        home = rc["home"] if isinstance(rc.get("home"), (list, tuple)) else start   # "start": wherever it stands
+        (self.x, self.y), self.th = home, rng.uniform(-math.pi, math.pi)
+        self.start = tuple(home)
         self.cmd, self.cmd_until, self.v = (0.0, 0.0, 0.0), -1.0, [0.0, 0.0, 0.0]
         self.skill = {"id": 0, "state": "idle", "detail": ""}
         self.job = self.hold = self.target = None
@@ -58,17 +60,27 @@ class SimObj:
 
 
 class SimWorld:
-    def __init__(self, cfg, seed=0, n_objects=6, quirks=False, p_grasp=0.75, big_frac=0.35, latency=0.15):
+    def __init__(self, cfg, seed=0, n_objects=6, quirks=False, p_grasp=0.75, big_frac=0.35, latency=0.15,
+                 floor_tags=False):
         self.cfg, self.rng, self.t, self.dt = cfg, random.Random(seed), 0.0, 0.02
         self.p_grasp, self.latency = p_grasp, latency
-        self.robots = {n: SimRobot(n, rc, self.rng, quirks) for n, rc in cfg["robots"].items()}
+        a, n = cfg["arena"], len(cfg["robots"])
+        self.edge = cfg.get("deliver", {}).get("mode", "bin") == "edge"      # no bin: put things at the boundary
+        self.zone = cfg.get("deliver", {}).get("edge_zone", 0.20)
+        self.robots = {name: SimRobot(name, rc, self.rng, quirks,
+                                      (a["xmin"] + (i + 1) * (a["xmax"] - a["xmin"]) / (n + 1), a["ymin"] + 0.25))
+                       for i, (name, rc) in enumerate(cfg["robots"].items())}
         bc = cfg["bin"]
         self.bx, self.by, self.bth, self.br = bc["pose"][0], bc["pose"][1], math.radians(bc["pose"][2]), bc["radius"]
-        self.objs, a = [], cfg["arena"]
+        # paper tags at the arena corners, as the real tracker reports them (ids as in cam_control/arena.json)
+        self.floor = {"29": [a["xmin"], a["ymin"]], "32": [a["xmax"], a["ymin"]],
+                      "31": [a["xmax"], a["ymax"]], "30": [a["xmin"], a["ymax"]]} if floor_tags else None
+        self.grabs = {name: 0 for name in self.robots}                       # grab attempts per robot
+        self.objs = []
         while len(self.objs) < n_objects:
             m = cfg.get("field_margin", 0.30)            # debris only inside the taped field, never against the edge
             x, y = self.rng.uniform(a["xmin"] + m, a["xmax"] - m), self.rng.uniform(a["ymin"] + m, a["ymax"] - m)
-            if dist((x, y), (self.bx, self.by)) < self.br + 0.25 or \
+            if (not self.edge and dist((x, y), (self.bx, self.by)) < self.br + 0.25) or \
                     any(dist((x, y), r.xy) < 0.30 for r in self.robots.values()) or \
                     any(dist((x, y), o.xy) < 0.16 for o in self.objs):
                 continue
@@ -111,8 +123,13 @@ class SimWorld:
     def _end(self, r, ok, detail=""):
         r.skill["state"], r.skill["detail"], r.target = ("ok" if ok else "fail"), detail, None
 
+    def _edge_dist(self, p):
+        a = self.cfg["arena"]
+        return min(p[0] - a["xmin"], a["xmax"] - p[0], p[1] - a["ymin"], a["ymax"] - p[1])
+
     def _grab(self, r, args):
         bf = r.rc.get("base_fwd", 0.055)
+        self.grabs[r.name] += 1
         yield from self._wait(2.0)                                  # camera looks ahead, VLM call
         base = to_world(r.pose, bf)
         seen = []
@@ -146,7 +163,11 @@ class SimWorld:
     def _drop(self, r, args):
         yield from self._wait(4.0)
         o, bf = r.hold, r.rc.get("base_fwd", 0.055)
-        if o:
+        if o and self.edge:                                         # it lands where the arm reaches to
+            o.x, o.y = to_world(r.pose, bf + args.get("y_cm", 16) / 100.0)
+            o.state = "parked" if self._edge_dist(o.xy) < self.zone else "free"
+            r.hold = None
+        elif o:
             base = to_world(r.pose, bf)
             d, dd = dist(base, (self.bx, self.by)), self.cfg["bin"]["drop_dist"]
             facing = abs(wrap(math.atan2(self.by - base[1], self.bx - base[0]) - r.th))
@@ -192,7 +213,7 @@ class SimWorld:
             lim = self.br + R_BODY
             if r.role == "dozer" and self._mouth(r.xy):
                 lim = r.rc.get("blade_fwd", 0.14) - 0.03             # the blade may go into the mouth
-            if 1e-6 < d < lim and not self.solo:
+            if 1e-6 < d < lim and not self.solo and not self.edge:
                 r.x, r.y = self.bx + (r.x - self.bx) * lim / d, self.by + (r.y - self.by) * lim / d
         touch = set()
         for i, p in enumerate(rs):
@@ -206,7 +227,7 @@ class SimWorld:
         self.collisions += len(touch - self._touch)
         self._touch = touch
         for o in self.objs:
-            if o.state != "free" or self.solo:
+            if o.state not in ("free", "parked") or self.solo:
                 continue
             for r in rs:
                 if r.target is o:
@@ -223,6 +244,9 @@ class SimWorld:
                     o.x, o.y = to_world(r.pose, ex * k, ey * k)
                     self.bump_s += self.dt
             o.x, o.y = clamp(o.x, a["xmin"] + 0.01, a["xmax"] - 0.01), clamp(o.y, a["ymin"] + 0.01, a["ymax"] - 0.01)
+            if self.edge:                                           # lying in the edge band = delivered
+                o.state = "parked" if self._edge_dist(o.xy) < self.zone else "free"
+                continue
             d = dist(o.xy, (self.bx, self.by))
             if d < self.br + o.r * 0.5:
                 if self._mouth(o.xy):
@@ -266,13 +290,16 @@ class SimWorld:
         tags[str(self.cfg["bin"]["tag"])] = [self.bx, self.by, self.bth]
         objs = []
         for o in self.objs:
-            if o.state != "free" or any(dist(o.xy, r.xy) < 0.10 for r in self.robots.values()):
+            if o.state not in ("free", "parked") or any(dist(o.xy, r.xy) < 0.10 for r in self.robots.values()):
                 continue
             if self.rng.random() < 0.05:
                 continue                                            # detector missed it this frame
             objs.append({"id": 1000 + o.id, "label": "debris", "x": o.x + g(0, 0.003), "y": o.y + g(0, 0.003),
                          "w": o.w, "l": o.l, "ang": o.ang})
-        return {"t": self.t, "tags": tags, "objects": objs}
+        snap = {"t": self.t, "tags": tags, "objects": objs}
+        if self.floor:
+            snap["floor"], snap["corners"] = self.floor, [29, 32, 31, 30]
+        return snap
 
     def delayed(self):
         """Newest snapshot that is at least `latency` old (what the camera pipeline would deliver now)."""
@@ -283,7 +310,7 @@ class SimWorld:
         return best
 
     def left(self):
-        return sum(1 for o in self.objs if o.state != "binned")
+        return sum(1 for o in self.objs if o.state not in ("binned", "parked"))
 
 
 class SimBus:
@@ -315,9 +342,13 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--objects", type=int, default=6)
     ap.add_argument("--quirks", action="store_true", help="random tag mounting / motor wiring (run calibrate.py first)")
+    ap.add_argument("--overlay", help="same overlay file as the coordinator, e.g. profiles/edge2.json")
+    ap.add_argument("--p-grasp", type=float, default=0.75, help="chance that a grab holds (0 = every grab misses)")
+    ap.add_argument("--floor-tags", action="store_true", help="also report paper tags at the arena corners")
     a = ap.parse_args()
-    cfg = load_config(a.config)
-    sim = SimWorld(cfg, a.seed, a.objects, a.quirks)
+    cfg = load_config(a.config, a.overlay)
+    sim = SimWorld(cfg, a.seed, a.objects, a.quirks, p_grasp=a.p_grasp, floor_tags=a.floor_tags,
+                   big_frac=0.0 if cfg.get("deliver", {}).get("mode") == "edge" else 0.35)
     socks = {}
     for i, n in enumerate(cfg["robots"]):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

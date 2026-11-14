@@ -1,0 +1,38 @@
+{
+  "_about": "Two-arm-car test (2026-11-14): a few blocks on the floor, cars A and B each bring ONE block to the arena edge. A missed grab is tried again, up to 5 misses in a row, then that car gives up and goes home. Use with: python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags",
+
+  "only_robots": ["A", "B"],
+
+  "deliver": {
+    "mode": "edge",
+    "_mode": "edge = put objects down at the arena boundary (no bin). An object lying within edge_zone of the boundary counts as delivered and is never picked up.",
+    "edge_zone": 0.20,
+    "inset": 0.08,
+    "_inset": "the arm puts the object down this far inside the boundary (metres)",
+    "per_robot": 1,
+    "spacing": 0.20,
+    "y_cm": 16,
+    "z_cm": 4,
+    "_y_z": "drop skill: reach 16 cm ahead of the arm base, fingertips 4 cm above the floor, then open"
+  },
+
+  "pick": {
+    "max_tries": 5,
+    "give_up": "park",
+    "_give_up": "park = after max_tries misses in a row the car stops for good; next = it may take another object",
+    "grab_timeout": 130
+  },
+
+  "robots": {
+    "A": {"home": "start"},
+    "B": {"home": "start"}
+  },
+
+  "triage": {
+    "_why": "the overhead camera over-estimates small blocks; do not let a size guess stop a grab in this test",
+    "grasp_max_short": 0.10,
+    "grasp_max_long": 0.20
+  },
+
+  "alloc": {"spacing": 0.30}
+}

@@ -60,6 +60,55 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
    `python -m antcolony.calibrate --robot A`; the result is saved to `calib/A.json`. It automatically computes the tag heading offset, the tag-to-turning-center offset, and the signs for left/right turning and strafing, so no measuring is needed.
 5. **Run**: `python -m antcolony.coordinator`; the dashboard is at `http://<host IP>:8080`. Ctrl+C stops all robots.
 
+## Two-car edge test on two computers (2026-11-14)
+
+Task: a few blocks of different colours on the floor; arm cars **A and B each bring one block to the arena edge**. A missed grab is tried again; after **5 misses in a row** that car gives up and drives home. No bin, no dozer. Everything specific to this test is in `profiles/edge2.json` (an overlay on `config.json`).
+
+```
+Computer 1 (VLM)                    Computer 2 (overhead camera)                 cars A, B
+llama-server :8090  ◄── HTTP ───────────────────────────────────────────────── vlm_grab.py (last 30 cm + grab)
+                                    apriltag_tracker_gui.py --antcolony 127.0.0.1
+                                         │ UDP 9100 (tags, objects, floor tags)
+                                         ▼
+                                    python -m antcolony.coordinator ── UDP 9200 ──► agent.py
+                                         ▲────────────────────── UDP 9201 telemetry ──┘
+```
+
+The coordinator can run on either computer; on the camera computer the tag data never crosses Wi-Fi. If it runs elsewhere, start the tracker with `--antcolony <that computer's IP>`.
+
+**Status: the coordination logic for this task passes in the simulator (`python tests/test_edge.py`: 18/18 runs, arena 1.55 × 1.19 m). It has not been run on the real cars or with the real tracker yet.**
+
+### Before the first run
+
+1. **Network.** All four devices on the same LAN. Put the cars' IPs into the `lan` profile under `networks` in `config.json` and set `"network": "lan"` (or run with `ANTCOLONY_NET=lan`).
+2. **VLM (computer 1).** `llama-server` with `--host 0.0.0.0 --port 8090 -np 1` (see "Arm robots' VLM"). On **each car** set `masterpi_lite/masterpi_lite/vlm_server.json` to `{"url": "http://<computer 1's new IP>:8090", "img_tokens": 256}` — the old hotel address no longer works on the new LAN.
+3. **Tags.** Put the tag id that is on each car into `robots.A.tag` / `robots.B.tag` in `config.json` (defaults 10 and 11). In the tracker's `arena.json` give each car's tag its height so it is located precisely: `"objects": {"10": {"name": "car A", "height_m": 0.17}, "11": {"name": "car B", "height_m": 0.17}}` (tag face above the floor, measure it).
+4. **Tracker (computer 2).** `python cam_control/apriltag_tracker_gui.py --antcolony 127.0.0.1` (plus your usual camera options), set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects.
+5. **Cars.** Copy the current `robot/agent.py` and `robot/hw_masterpi.py` next to `vlm_grab.py`, then on each car: `python3 agent.py --name A --min-duty 30` (`--name B` on B; 30 on carpet).
+6. **Drive calibration**, one car at a time, alone in the middle with ~50 cm free: `python -m antcolony.calibrate --robot A --u 0.3` (then B). The default `--u 0.6` makes larger test moves than a 1.5 × 1.2 m arena may allow; start with 0.3 and raise it if the tool says the car barely moved (not tried on the real cars yet). Saves `calib/A.json`.
+7. **Check.** `python -m antcolony.check --overlay profiles/edge2.json --vlm http://<computer 1>:8090` — nothing moves; it lists what is missing (tracker data, a car's tag, calibration, agent, VLM, objects too big or already at the edge).
+
+### Run
+
+```bash
+python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
+# dashboard: http://<coordinator computer>:8080      Ctrl+C stops both cars
+```
+
+- `--arena-from-tags`: the arena is the rectangle of the tracker's corner tags (otherwise `arena` in `config.json` must match the tracker's frame by hand).
+- Put the blocks **more than 20 cm inside the boundary** (`deliver.edge_zone`): anything nearer counts as already delivered and is left alone. Keep them 30 cm or more apart if both cars should work at the same time.
+- Keep feet, cables and bags out of the arena: whatever the tracker reports inside it is a target. If a car's own arm shows up as an object next to it (the check lists such cases), raise that robot's `mask_r` in `config.json` above the default 0.22 m.
+- Each car parks 30 cm in front of its block, `vlm_grab.py approach` does the rest, the car carries the block to the nearest free place at the boundary, puts it down 8 cm inside it (`deliver.inset`), backs off and returns to where it started. The cars stay off the paper floor tags.
+- The log shows `missed #3: ... (try 2 of 5) - trying again`, `GIVES UP on #3 after 5 missed grabs`, and at the end `FINISHED in 94 s - A: 1 delivered, B: gave up`.
+- If the tracker does not detect the small blocks reliably, type their positions (tracker frame, metres; hover over them in the tracker GUI): `--objects 0.50,0.40 1.00,0.70`. The tracker's own detections are then ignored; the cars' cameras still do the final approach.
+
+### Known gaps (found in the review, not fixable in software alone)
+
+- **Car A's grasp is off**: A still uses car B's camera calibration (`vision_calib.json`); on 2026-11-14 its jaws came down beside the block. Run `python3 vlm_grab.py calib --object "<small flat thing>"` on A, or expect A to use up its 5 tries.
+- `approach` + grab has only been run on carpet once (car A, missed) and never on car B on carpet; `agent.py` → `hw_masterpi.py` → `vlm_grab.py` as one chain has never run on a real car.
+- The driving controller's gains (`control` in `config.json`) have only ever run in the simulator.
+- The tracker's own "UDP out" (single-robot path following) crashes its worker thread once an object is detected (`json.dumps(..., default=float)` on a numpy outline). `--antcolony` does not use it; leave "UDP out" empty.
+
 ## Current robot deployment (2026-11-14)
 
 | Robot | Host | User | Code folder | Bench test |
@@ -183,18 +232,23 @@ antcolony/coordinator.py  task allocation, bin mutex, traffic rules, main loop, 
 antcolony/triage.py       decides grippability by size; optionally asks a VLM as well
 antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
+antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
+profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
+cam_control/              overhead tracker (AprilTag floor frame, YOLOE objects); antcolony_pub.py sends it to the coordinator
 antcolony/sim.py          simulator (plays both camera and robots)
 robot/agent.py            on-robot service (watchdog, skills, telemetry)
 robot/hw_masterpi.py      arm robot: adapter for masterpi_lite + vlm_grab.py
 robot/hw_freenove.py      dozer: Freenove FNK0043, direct I2C; built-in wheel direction test
 tracker_bridge/world_pub.py  tracker → coordinator publisher
 tests/test_sim.py         end-to-end test
+tests/test_edge.py        end-to-end test of the edge task (one block each, 5 tries, give up)
 ```
 
 ## Messages (each is one JSON object over UDP)
 
 ```
-World snapshot → host:9100   {"t":..,"tags":{"10":[x,y,heading_rad],..},"objects":[{"id","label","x","y","w","l","ang"},..]}
+World snapshot → host:9100   {"t":..,"tags":{"10":[x,y,heading_rad],..},"objects":[{"id","label","x","y","w","l","ang"},..],
+                              "floor":{"29":[x,y],..},"corners":[29,32,31,30]}     floor / corners are optional
 Velocity       → robot:9200  {"type":"vel","vx":fwd,"vy":left,"w":ccw,"dur":sec,"guard":true}   each in -1..1, auto-stops after at most 0.4 s
 Skill          → robot:9200  {"type":"skill","id":17,"name":"grab|drop|home|open|stop","args":{..}}   resending the same id is harmless
 Telemetry      → host:9201   {"type":"telem","name":"A","batt_mv":..,"sonar_cm":..,"skill":{"id","state","detail"},"holding":..}
