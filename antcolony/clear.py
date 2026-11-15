@@ -483,14 +483,16 @@ def main():
     if low:
         sys.exit(f"battery below {a.min_volt} V: {', '.join(low)} - grabs miss at that voltage. Charge, or --min-volt 0 to start anyway.")
     fence = None
-    if a.fence_m > 0:
+    if True:                                             # the tracker listener also feeds the tray guide
         try:
-            fence = Fence(links, {n: cfg["robots"][n]["tag"] for n in names}, a.fence_m, say_to)
+            fence = Fence(links, {n: cfg["robots"][n]["tag"] for n in names}, a.fence_m if a.fence_m > 0 else float("inf"), say_to)
             fence.start()
             time.sleep(1.5)
+            if a.fence_m <= 0:
+                print("  fence OFF (--fence-m 0): no car is stopped for leaving the arena - watch them")
             if not fence.poly:
                 print("  fence: no arena from the overhead camera yet - the fence starts when its data arrives")
-            for n in names:
+            for n in names if a.fence_m > 0 else []:
                 print(f"  fence: {n} " + (f"is {100 * fence.where[n]:.0f} cm outside the corner tags (limit {100 * a.fence_m:.0f})"
                                           if n in fence.where else "- tag not seen by the overhead camera (no fence for it until it is)"))
         except OSError as e:
