@@ -12,6 +12,7 @@ Per-car defaults: grab_defaults.json next to this file holds options that THIS c
 e.g. {"--y-offset": 1.8}. Each one is added unless the command line gives that option itself.
 (vlm_grab.py's arm reach table was measured on car B; car A's arm stops about 1.8 cm short of
 it, 2026-11-14 - without the offset its jaws close on air between the car and the block.)
+"_colour_track": false in that file switches off colour_track() below.
 """
 import json
 import os
@@ -21,17 +22,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
-def car_defaults(argv, path=None):
-    """argv plus this car's options from grab_defaults.json that argv does not set itself."""
-    path = path or os.path.join(HERE, "grab_defaults.json")
+def _defaults(path=None):
+    """grab_defaults.json as a dict ({} if there is none)."""
     try:
-        with open(path) as f:
-            defaults = json.load(f)
+        with open(path or os.path.join(HERE, "grab_defaults.json")) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
     except FileNotFoundError:
-        return list(argv)
+        return {}
     except (OSError, ValueError) as e:
         print(f"  grab_defaults.json ignored ({e})")
-        return list(argv)
+        return {}
+
+
+def car_defaults(argv, path=None):
+    """argv plus this car's options from grab_defaults.json that argv does not set itself."""
+    defaults = _defaults(path)
     out, given = list(argv), {a.split("=")[0] for a in argv if a.startswith("--")}
     for opt, val in defaults.items():
         if not opt.startswith("--") or opt in given:        # "_note" and the like are comments
@@ -45,9 +51,55 @@ def car_defaults(argv, path=None):
     return out
 
 
+def _iou(a, b):
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    return w * h / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - w * h)
+
+
+def colour_track(vlm, blob=None, log=print):
+    """Fewer waits for the VLM while the car creeps up to a coloured object. vlm_grab asks the VLM
+    again after every 1-2 cm nudge (3-5 s each, the car standing still: 2026-11-14, five questions
+    in one grab). Here the first answer is checked against the object's colour blob in the same
+    photo; if both frame the same thing (overlap >= 0.6), the following photos are answered from the
+    colour alone (milliseconds). No colour word in the name, no matching blob, or the blob gone:
+    the VLM is asked as before. `blob(img, name)` -> box or None (default: seek.colour_blob)."""
+    real, state = vlm.detect_all, {"name": None}
+    if blob is None:
+        try:
+            import cv2
+            import numpy as np
+            import seek
+        except Exception as e:               # no seek.py on this car: plain VLM
+            log(f"  (colour tracking off: {e})")
+            return
+        if not hasattr(seek, "colour_blob") or not hasattr(seek, "HUES"):
+            return
+        hues = seek.HUES
+        blob = lambda img, name: seek.colour_blob(cv2, np, img, name) if any(k in name.lower() for k in hues) else None
+
+    def detect_all(img, obj, verbose=True):
+        b = blob(img, obj) if isinstance(obj, str) else None
+        if b is not None and state["name"] == obj:
+            if verbose:
+                log(f"  colour: {[int(v) for v in b]}  (same thing the VLM named - not asked again)")
+            return [{"box": tuple(float(v) for v in b), "label": obj, "raw": "colour"}]
+        dets = real(img, obj, verbose)
+        agree = b is not None and any(_iou(b, d["box"]) >= 0.6 for d in dets)
+        state["name"] = obj if agree else None
+        return dets
+
+    vlm.detect_all = detect_all
+
+
 def main():
     import detector
     detector.install()                       # masterpi_lite.vlm.detect_all -> the configured backend
+    from masterpi_lite import vlm
+    if _defaults().get("_colour_track", True):
+        colour_track(vlm)
     import vlm_grab                          # its `from masterpi_lite import vlm` sees the swapped function
     sys.argv = [os.path.join(HERE, "vlm_grab.py")] + car_defaults(sys.argv[1:])
     vlm_grab.main()

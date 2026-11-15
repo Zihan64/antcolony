@@ -137,11 +137,15 @@ def vivid_blobs(cv2, np, frame):
 
 def nearest_thing(cv2, np, frame, name):
     """The NEAREST vivid thing (lowest in the picture) of the colour named in `name`; no colour word =
-    any colour. Things lying in the tray do not count. -> {"box", "colour"} or None."""
-    want = next((k for k in HUES if k in name.lower()), None)
+    any colour. Things lying in the tray do not count. -> {"box", "colour"} or None.
+    "object not red" / "object not red not blue": any colour but those (two cars: the other car has
+    claimed the red one, antcolony/duo.py)."""
+    low = name.lower()
+    skip = [k for k in HUES if "not " + k in low]
+    want = next((k for k in HUES if k in low and k not in skip), None)
     best = None
     for b in vivid_blobs(cv2, np, frame):
-        if want and b["colour"] != want:
+        if (want and b["colour"] != want) or b["colour"] in skip:
             continue
         if best is None or b["box"][3] > best["box"][3]:
             best = b
@@ -192,7 +196,7 @@ class Eye:
         self.pan_deg, self.box, self.colour = 0.0, None, None
         self.now = self.views.pop(0)
         self.pose(*self.now)
-        self.n = 0
+        self.n = self.skipped = 0
         for f in glob.glob(os.path.join(HERE, "seek_[0-9][0-9].jpg")):
             os.remove(f)
         for _ in range(20):                               # exposure / white balance
@@ -244,6 +248,9 @@ class Eye:
         if self.detector == "colour":
             t = nearest_thing(self.cv2, self.np, frame, self.target)
             box, self.colour = (t["box"], t["colour"]) if t else (None, self.colour)
+        elif "white" in self.target.lower() and not white_things(self.cv2, self.np, frame, min_area=0.001):
+            box = None                                    # nothing white in the photo: no need to ask the VLM (3 s saved per look)
+            self.skipped += 1
         else:
             det = self.vlm.detect(frame, self.target, verbose=False)
             box = det["box"] if det else None
