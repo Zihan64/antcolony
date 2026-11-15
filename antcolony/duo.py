@@ -36,7 +36,7 @@ class Hub:
         self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx.bind(("0.0.0.0", PORT_TELEM))
         self.rx.settimeout(0.2)
-        self.latest, self.alive = {}, True
+        self.latest, self.heard, self.alive = {}, {}, True
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -48,6 +48,7 @@ class Hub:
                 continue
             if isinstance(m, dict) and m.get("name"):
                 self.latest[(m["name"], src[0])] = m
+                self.heard[(m["name"], src[0])] = time.monotonic()
 
 
 class HubLink(Link):

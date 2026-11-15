@@ -26,7 +26,7 @@ class FakeCar:
 
     def __init__(self, name, world, dist, cannot_grab=(), leave_after=None):
         self.name, self.w, self.dist, self.cannot, self.leave_after = name, world, dist, set(cannot_grab), leave_after
-        self.out, self.hold, self.n = threading.Event(), None, 0
+        self.out, self.hold, self.n, self.silent = threading.Event(), None, 0, False
 
     def skill(self, skill, args, timeout):
         if self.out.is_set():
@@ -37,7 +37,7 @@ class FakeCar:
             return False, "outside the arena - stopped", 0
         time.sleep(0.01)
         with LOCK:
-            if skill == "seek" and args.get("detector") == "colour":
+            if skill == "seek" and args.get("detector") in ("colour", "yolo"):
                 skip = [c for c in COLOURS if "not " + c in args["target"]]
                 want = next((c for c in COLOURS if c in args["target"] and c not in skip), None)
                 c = sorted((self.dist.get(o, 99), o) for o in set(self.w.objects) if o not in skip and (want is None or o == want))
@@ -82,7 +82,7 @@ class FakeCar:
 
 
 ARGS = types.SimpleNamespace(noun="block", obj_height=3.0, tries=2, back_cm=18, find_bottom=0.4, target="white tray",
-                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80)
+                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80, finder="yolo", classes="block")
 
 
 def play(objects, a_kw=None, b_kw=None, da=None, db=None):

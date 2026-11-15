@@ -59,7 +59,7 @@ class FenceLink(HubLink):
 
     def __init__(self, name, addr, hub):
         super().__init__(name, addr, hub)
-        self.out = threading.Event()
+        self.out, self.silent, self.silent_s = threading.Event(), False, 15.0
 
     def halt(self):
         self.send({"type": "skill", "id": int(time.time() * 10) % 2_000_000_000 + 3, "name": "stop", "args": {}})
@@ -80,8 +80,22 @@ class FenceLink(HubLink):
             s = (self.pump(0.1) or {}).get("skill") or {}
             if s.get("id") == sid and s.get("state") in ("ok", "fail"):
                 return s["state"] == "ok", s.get("detail", ""), time.monotonic() - t0
+            heard = self.hub.heard.get((self.name, self.ip), 0.0)
+            if time.monotonic() - max(heard, t0) > self.silent_s:      # flat battery, Wi-Fi gone, agent not running
+                self.silent = True
+                return False, f"the car does not answer ({self.silent_s:.0f} s without telemetry)", time.monotonic() - t0
         self.send({"type": "skill", "id": sid + 1, "name": "stop", "args": {}})
         return False, f"no answer within {timeout:.0f} s", time.monotonic() - t0
+
+    def wait_alive(self, say, every=4.0):
+        """Block until the car answers again (battery swapped, agent restarted)."""
+        say("my car does not answer - waiting for it to come back (the other car carries on)")
+        while not self.out.is_set():
+            if self.status(2.0) is not None:
+                self.silent = False
+                say("my car answers again - carrying on")
+                return
+            time.sleep(every)
 
     def back_up(self, cm, cm_per_pulse=5.7, secs=0.33):
         for _ in range(max(1, round(cm / cm_per_pulse))):
@@ -213,9 +227,17 @@ class Guide:
         return abs(err) <= 2 * self.tol
 
 
+def finder(a):
+    """seek arguments that say how objects are found: the trained detector (what is a block is
+    decided by its shape; colour only tells them apart) or, as before, any vivid colour."""
+    if getattr(a, "finder", "colour") == "yolo":
+        return {"detector": "yolo", "classes": [c.strip() for c in a.classes.split(",") if c.strip()]}
+    return {"detector": "colour"}
+
+
 class Team:
     def __init__(self):
-        self.claims, self.choosing, self.tray = {}, threading.Lock(), threading.Lock()
+        self.claims, self.choosing, self.tray, self.done = {}, threading.Lock(), threading.Lock(), {}
         self.started = threading.Event()                     # the first car has made its first choice
 
 
@@ -229,14 +251,17 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
         while True:
             if link.out.is_set():
                 return delivered
+            if getattr(link, "silent", False):
+                team.claims[name] = None
+                link.wait_alive(say)
+                continue
             with team.choosing:                              # one car chooses at a time
                 avoid = set(skip)
                 if other and team.claims.get(other):
                     avoid.add(team.claims[other])
                 target = "object" + "".join(f" not {c}" for c in sorted(avoid))
                 say("find: the nearest object" + (f" (not {', '.join(sorted(avoid))})" if avoid else "") + " ...")
-                ok, detail, secs = link.skill("seek", {"target": target, "detector": "colour",
-                                                       "bottom_stop": a.find_bottom, "stop_cm": 12}, 390)
+                ok, detail, secs = link.skill("seek", dict(finder(a), target=target, bottom_stop=a.find_bottom, stop_cm=12), 390)
                 m = re.search(r"colour=(\w+)", detail)
                 colour = m[1] if ok and m and m[1] not in ("None", "coloured") else None
                 say(f"  {'ok' if ok else 'nothing'} - {detail}  ({secs:.0f} s)")
@@ -244,6 +269,8 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 team.started.set()
             if link.out.is_set():
                 return delivered
+            if getattr(link, "silent", False):
+                continue
             if not ok:
                 misses += 1
                 if "not found" in detail or misses >= 2:
@@ -269,9 +296,11 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 if i < a.tries:
                     link.back_up(a.back_cm)
                     if colour:
-                        ok2, d2, s2 = link.skill("seek", {"target": f"{colour} object", "detector": "colour",
-                                                          "bottom_stop": a.find_bottom, "stop_cm": 12}, 120)
+                        ok2, d2, s2 = link.skill("seek", dict(finder(a), target=f"{colour} object",
+                                                               bottom_stop=a.find_bottom, stop_cm=12), 120)
                         say(f"  lined up on it again: {'ok' if ok2 else 'FAILED'} - {d2}  ({s2:.0f} s)")
+            if not held and getattr(link, "silent", False):
+                continue
             if not held:
                 say(f"gave up on the {label} ({a.tries} grabs) - leaving it to the other car, choosing again")
                 if colour:
@@ -308,6 +337,7 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                     say(f"STOPPING: could not deliver - I still hold the {label}")
                     return delivered
                 delivered += 1
+                team.done[name] = delivered
                 say(f"in the tray: {label}  (my {delivered}.)  backing away {a.away_cm:.0f} cm")
                 link.back_up(a.away_cm)
             team.claims[name] = None
@@ -333,6 +363,9 @@ def main():
     ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
+    ap.add_argument("--finder", choices=["yolo", "colour"], default="yolo",
+                    help="how objects are found: the trained detector (default) or any vivid colour")
+    ap.add_argument("--classes", default="block", help="detector classes that count as objects to fetch")
     ap.add_argument("--tray-tag", type=int, nargs="+", default=[54, 53],
                     help="AprilTag(s) on the tray, read by the overhead camera; the first one in view counts (54 = on top, 53 = on the front)")
     ap.add_argument("--no-guide", action="store_true", help="do not turn the cars to the tray by the overhead camera")
@@ -420,7 +453,8 @@ def main():
             l.halt()
         if why == "finished":
             why = "stopped by hand"
-    total = sum(result.get(n, 0) for n in names)
+    result = {n: team.done.get(n, 0) for n in names}             # also right when stopped by hand
+    total = sum(result.values())
     print(f"{time.monotonic() - t0:5.0f}s === {why}: {total} object(s) in the tray  (" +
           ", ".join(f"{n}: {result.get(n, 0)}" + (" - LEFT THE ARENA" if links[n].out.is_set() else "") for n in names) + ")")
     sys.exit(0 if why == "finished" and not any(l.out.is_set() for l in links.values()) else 2)

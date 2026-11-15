@@ -109,6 +109,65 @@ def colour_blob(cv2, np, frame, name):
     return None
 
 
+def in_tray(cv2, np, frame, box):
+    """Does the thing in `box` lie in the white tray? (The same test as in colour_blob: smooth,
+    uncoloured surface all round it.)"""
+    H, W = frame.shape[:2]
+    x, y, x2, y2 = (int(v) for v in box)
+    w, h = max(1, x2 - x), max(1, y2 - y)
+    gx, gy = max(6, int(0.6 * w)), max(6, int(0.6 * h))
+    X1, Y1, X2, Y2 = max(0, x - gx), max(0, y - gy), min(W, x + w + gx), min(H, y + h + gy)
+    part = frame[Y1:Y2, X1:X2]
+    gray = cv2.cvtColor(part, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    sat = cv2.cvtColor(part, cv2.COLOR_BGR2HSV)[:, :, 1]
+    white = (cv2.blur(np.abs(gray - cv2.blur(gray, (9, 9))), (15, 15)) < 3.0) & (sat < 90)
+    inner = white[max(0, y - Y1): y - Y1 + h, max(0, x - X1): x - X1 + w].sum()
+    return (white.sum() - inner) / float(max(1, white.size - w * h)) > IN_TRAY
+
+
+def thing_colour(cv2, np, frame, box):
+    """The colour word (HUES) of the thing in `box`, from the vivid pixels in its middle; None = not coloured."""
+    x1, y1, x2, y2 = (int(v) for v in box)
+    w, h = x2 - x1, y2 - y1
+    part = frame[max(0, y1 + h // 5): max(y1 + h // 5 + 1, y2 - h // 5), max(0, x1 + w // 5): max(x1 + w // 5 + 1, x2 - w // 5)]
+    if part.size == 0:
+        return None
+    hsv = cv2.cvtColor(part, cv2.COLOR_BGR2HSV).reshape(-1, 3)
+    vivid = hsv[(hsv[:, 1] > 80) & (hsv[:, 2] > 60)]
+    if len(vivid) < 0.2 * len(hsv):
+        return None
+    hue = vivid[:, 0].astype(np.float32)
+    if ((hue < 12) | (hue > 168)).mean() > 0.5:            # red wraps round 0 / 180: the median would land in the middle
+        return "red"
+    return colour_name(float(np.median(hue)))
+
+
+def nearest_object(cv2, np, frame, name, yolo, conf=0.5, classes=None):
+    """As nearest_thing(), but WHAT counts as an object is decided by the trained detector (shape),
+    not by colour: a coloured wall, a shirt or a hand is not a block (2026-11-15: a car kept aiming
+    at the red wall behind the tray). Colour only says WHICH object: "red block" = the nearest red
+    one, "object not blue" = the nearest that is not blue. Things lying in the tray do not count.
+    -> {"box", "colour", "label", "conf"} or None."""
+    low = name.lower()
+    skip = [k for k in HUES if "not " + k in low]
+    want = next((k for k in HUES if k in low and k not in skip), None)
+    best = None
+    for x1, y1, x2, y2, s, n in yolo.infer(frame):
+        if s < 0.6 * conf or (classes and n.lower() not in classes):
+            continue
+        box = (int(x1), int(y1), int(x2), int(y2))
+        col = thing_colour(cv2, np, frame, box)
+        # A block 1.5 m away is ~25 px and scores 0.3-0.45; a grey wall panel scored 0.43 too. So below
+        # `conf` only a vividly coloured thing counts (photos 2026-11-15).
+        if s < conf and col is None:
+            continue
+        if (want and col != want) or (col in skip) or in_tray(cv2, np, frame, box):
+            continue
+        if best is None or box[3] > best["box"][3]:
+            best = {"box": box, "colour": col, "label": n, "conf": float(s)}
+    return best
+
+
 IN_TRAY = 0.35                                # share of smooth, uncoloured surface around a coloured blob that means "it lies
                                               # in the tray" (photos 2026-11-14: in the tray 0.75-0.82, on the carpet 0.00-0.04)
 
@@ -188,6 +247,15 @@ class Eye:
         import numpy as np
         from masterpi_lite import vlm
         self.cv2, self.np, self.vlm, self.hw, self.target, self.detector = cv2, np, vlm, hw, target, detector
+        self.yolo, self.conf, self.classes = None, 0.5, None
+        if detector == "yolo":                            # the team's trained model, as installed for the grab (detector.py)
+            try:
+                import detector as det
+                cfg = det.load_config(os.path.join(HERE, "detector.warehouse.json"))
+                self.yolo, self.conf = det.Yolo(cfg), float(cfg.get("conf", 0.5))
+            except Exception as e:                        # no model on this car: colour, as before
+                print(f"  seek: YOLO not available ({e}) - finding objects by colour", flush=True)
+                self.detector = "colour"
         self.tokens0 = vlm.model_size.__defaults__
         if img_tokens:                                    # (the default is bound when vlm.py is imported)
             vlm.model_size.__defaults__ = (int(img_tokens),)
@@ -203,6 +271,12 @@ class Eye:
             os.remove(f)
         for _ in range(20):                               # exposure / white balance
             self.cap.read()
+
+    def nearest(self, frame, name):
+        """The nearest object to fetch: by the trained detector ("yolo") or by vivid colour ("colour")."""
+        if self.detector == "yolo":
+            return nearest_object(self.cv2, self.np, frame, name, self.yolo, self.conf, self.classes)
+        return nearest_thing(self.cv2, self.np, frame, name)
 
     def pose(self, view, slack, ms=1500):
         x, y, z, pitch = view
@@ -247,8 +321,8 @@ class Eye:
                 break
             time.sleep(0.4)                               # the arm is still swaying: wait, take it again
         h, w = frame.shape[:2]
-        if self.detector == "colour":
-            t = nearest_thing(self.cv2, self.np, frame, self.target)
+        if self.detector in ("colour", "yolo"):
+            t = self.nearest(frame, self.target)
             box, self.colour = (t["box"], t["colour"]) if t else (None, self.colour)
         elif "white" in self.target.lower() and not white_things(self.cv2, self.np, frame, min_area=0.0003):
             # (0.0003 = ~90 px, not 0.001: a tray 2 m away in the level view is 90x32 px to the VLM but only
@@ -290,8 +364,8 @@ class Eye:
         if frame is None or self.box is None:
             return None
         h, w = frame.shape[:2]
-        if self.detector == "colour":
-            t = nearest_thing(self.cv2, self.np, frame, self.colour or self.target)
+        if self.detector in ("colour", "yolo"):
+            t = self.nearest(frame, self.colour or self.target)
             box = t["box"] if t else None
         else:
             cands = [(overlap(self.box, b), b) for b in white_things(self.cv2, self.np, frame)]
@@ -348,6 +422,8 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     if made:                                              # (2026-11-14: these checks ran on eye=None, so on the car
         eye = Eye(hw, target, args.get("view"), args.get("detector", "vlm"), args.get("img_tokens"))   # neither the
                                                           # arm pan nor the smooth rolling was ever switched on)
+        if args.get("classes") and hasattr(eye, "classes"):      # detector "yolo": only these classes are objects to fetch
+            eye.classes = {str(c).lower() for c in args["classes"]}
     # Searching: the ARM looks left and right first (the camera rides on it) - the car stands still and
     # three looks cover the 170 deg in front of it; only if nothing is there does the car turn, by a
     # third of a circle. Without an arm that can pan (tests): the car turns 30 deg per look as before.
