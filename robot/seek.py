@@ -344,6 +344,10 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     w_cmd, u = float(args.get("w", 0.3)), float(args.get("u", 0.05))
     cm_s, step = float(args.get("cm_s", 17)), float(args.get("step_s", 0.33))
     seg, max_cm = float(args.get("seg_cm", 30)), float(args.get("max_cm", 200))
+    made = eye is None                                    # the camera first: what it can do decides how to search
+    if made:                                              # (2026-11-14: these checks ran on eye=None, so on the car
+        eye = Eye(hw, target, args.get("view"), args.get("detector", "vlm"), args.get("img_tokens"))   # neither the
+                                                          # arm pan nor the smooth rolling was ever switched on)
     # Searching: the ARM looks left and right first (the camera rides on it) - the car stands still and
     # three looks cover the 170 deg in front of it; only if nothing is there does the car turn, by a
     # third of a circle. Without an arm that can pan (tests): the car turns 30 deg per look as before.
@@ -357,9 +361,6 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     timeout = float(args.get("timeout", 360))
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
-    made = eye is None
-    if made:
-        eye = Eye(hw, target, args.get("view"), args.get("detector", "vlm"), args.get("img_tokens"))
 
     def turn(deg):
         """Turn about `deg` (+ = left) with one timed pulse. -> seconds it lasted."""

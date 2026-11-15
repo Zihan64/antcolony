@@ -46,7 +46,7 @@ class FakeCar(hw_masterpi.MasterPi):
         self.cancel, self.cancel_at = threading.Event(), cancel_at
         self.sonar_sees_set = True
         self.gives_dist, self.dist_err, self.closest = True, 1.0, 1e9
-        self.pan_deg, self.glances, self.can_follow, self.steer = 0, 0, True, 0.0
+        self.pan_deg, self.glances, self.can_follow, self.steer, self.pans = 0, 0, True, 0.0, 0
 
     # geometry: bearing of the box from the car's nose line, + = left; distance to its face
     def rel(self):
@@ -67,6 +67,9 @@ class FakeCar(hw_masterpi.MasterPi):
 
     def stop(self):
         self.v = self.w = self.vs = 0.0
+
+    def close(self):                                              # the camera being released
+        pass
 
     def move(self, h):
         if self.w:
@@ -95,6 +98,7 @@ class FakeCar(hw_masterpi.MasterPi):
     def pan(self, deg):                                           # the arm turns, the car does not
         if deg != self.pan_deg:
             self.pan_deg = deg
+            self.pans += deg != 0
             hw_masterpi.time.sleep(0.7)
 
     def glance(self):                                             # one camera frame while moving: time passes
@@ -125,7 +129,13 @@ def run(box, args=None, dist_err=1.0, **kw):
 
     def posed():
         car.posed += 1
-    ok, detail = seek.run(car, dict(args or {}), car.cancel, eye=car, carry_pose=posed)
+    # eye=None and a stand-in for seek.Eye: the same path as on the car, where seek.run makes its own camera
+    # (2026-11-14: passing eye=car hid that the arm pan and the rolling were decided before the camera existed)
+    real_eye, seek.Eye = seek.Eye, lambda *a, **k: car
+    try:
+        ok, detail = seek.run(car, dict(args or {}), car.cancel, eye=None, carry_pose=posed)
+    finally:
+        seek.Eye = real_eye
     return car, ok, detail, clock.t
 
 
@@ -135,9 +145,9 @@ def near(c, lo=14, hi=36):
 
 
 CASES = [
-    ("box straight ahead, 70 cm", (0, 70), {}, {}, lambda c, ok: ok and near(c)),
+    ("box straight ahead, 70 cm: one smooth roll, tracked frame by frame", (0, 70), {}, {}, lambda c, ok: ok and near(c) and c.glances > 5),
     ("box 25 deg to the left, 90 cm", (-38, 82), {}, {}, lambda c, ok: ok and near(c)),
-    ("box to the right, outside the picture", (60, 40), {}, {}, lambda c, ok: ok and near(c)),
+    ("box to the right, outside the picture: found by panning the arm", (60, 40), {}, {}, lambda c, ok: ok and near(c) and c.pans >= 1),
     ("box behind the car", (10, -80), {}, {}, lambda c, ok: ok and near(c)),
     ("box already right in front (20 cm)", (0, 32), {}, {}, lambda c, ok: ok and near(c) and math.hypot(c.x, c.y) < 3),
     ("the car turns half as fast as guessed", (-60, 60), {}, {"turn_deg_s": 120}, lambda c, ok: ok and near(c)),
