@@ -21,6 +21,14 @@ and takes no further part (it is not driven back: the tag does not say which way
 reliably enough). No tracker data, or a car's tag not seen: no fence for it - the walls and the
 car's own sonar (it never drives up to something tall while looking for objects) are the first line.
 
+Dozer (--dozer C): a third car, the Freenove wheel loader, at the same time as the arm cars. It does
+not grab: its skill "clean" (robot/cleaner.py on the car) finds the irregular trash with its own
+camera (YOLO on its Pi), never cargo (cubes / boxes), and pushes it into the open cardboard box - a
+different box from the arm cars' tray. The overhead camera keeps it apart from the arm cars: every
+0.2 s this program sends it where cars A and B are relative to itself ("peers", from the three tags);
+on the car they are never taken for trash or for the box, and it does not drive towards one closer
+than 55 cm ahead (30 cm anywhere) - it waits, then backs off and turns away. It is fenced like them.
+
 Tray (shared knowledge): an AprilTag on the tray (--tray-tag, default bin.tag) that only the
 overhead camera reads. A car holding an object is first turned to face the tray by it (class
 Guide), then finds, approaches and docks at the tray with its own camera as before. Tag not in
@@ -211,6 +219,56 @@ class Guide:
         return abs(err) <= 2 * self.tol
 
 
+def peers_of(snap, me, others, tags, calib):
+    """[{"name", "dist" m, "bearing_deg" (+ = left of `me`'s nose)}] of the other cars seen by the
+    overhead camera, or None when `me`'s own tag is not in the snapshot."""
+    tg = (snap or {}).get("tags") or {}
+    mine = tg.get(str(tags[me]))
+    if not mine:
+        return None
+    c = calib.get(me) or {}
+    th = wrap(c.get("th_sign", 1) * mine[2] + c.get("th_off", 0.0))
+    ox, oy = c.get("tag_off", (0.0, 0.0))
+    x = mine[0] - (math.cos(th) * ox - math.sin(th) * oy)
+    y = mine[1] - (math.sin(th) * ox + math.cos(th) * oy)
+    out = []
+    for n in others:
+        p = tg.get(str(tags[n]))
+        if p:
+            out.append({"name": n, "dist": round(math.hypot(p[0] - x, p[1] - y), 3),
+                        "bearing_deg": round(math.degrees(wrap(math.atan2(p[1] - y, p[0] - x) - th)), 1)})
+    return out
+
+
+class PeerFeed(threading.Thread):
+    """Tells the dozer where the arm cars are, every 0.2 s, from the newest tracker snapshot."""
+
+    def __init__(self, snapshot, link, me, others, tags, calib):
+        super().__init__(daemon=True)
+        self.snapshot, self.link, self.me, self.others, self.tags, self.calib = snapshot, link, me, others, tags, calib
+        self.sent = 0
+
+    def run(self):
+        while True:
+            p = peers_of(self.snapshot(0.6), self.me, self.others, self.tags, self.calib)
+            if p is not None:
+                self.link.send({"type": "peers", "peers": p})
+                self.sent += 1
+            time.sleep(0.2)
+
+
+def run_dozer(name, link, a, say):
+    """The wheel loader: one long skill "clean" on the car. -> number of pieces it pushed into the box."""
+    say(f"clean: irregular trash into the cardboard box, up to {a.max_min:.0f} min ...")
+    args = {"minutes": a.max_min}
+    if a.brain_url:
+        args["brain_url"] = a.brain_url
+    ok, detail, secs = link.skill("clean", args, 60 * a.max_min + 120)
+    m = re.search(r"(\d+) pieces", detail)
+    say(f"  {'done' if ok else 'stopped'} - {detail}  ({secs:.0f} s)")
+    return int(m[1]) if m else 0
+
+
 class Team:
     def __init__(self):
         self.claims, self.choosing, self.tray = {}, threading.Lock(), threading.Lock()
@@ -335,6 +393,9 @@ def main():
     ap.add_argument("--no-guide", action="store_true", help="do not turn the cars to the tray by the overhead camera")
     ap.add_argument("--max-min", type=float, default=20, help="stop everything after this many minutes")
     ap.add_argument("--min-volt", type=float, default=7.0, help="do not start below this battery voltage (0 = start anyway)")
+    ap.add_argument("--dozer", default=None, help="a third car, the wheel loader (e.g. C): pushes irregular trash into the cardboard box")
+    ap.add_argument("--dozer-min-volt", type=float, default=6.6, help="the dozer's own battery limit (two cells, no arm)")
+    ap.add_argument("--brain-url", default=None, help="the 4B VLM the dozer asks before pushing (default: its own setting)")
     a = ap.parse_args()
     cfg = load_config(a.config)
     try:
@@ -348,26 +409,28 @@ def main():
             print(f"{time.monotonic() - t0:5.0f}s [{name}] {msg}", flush=True)
 
     names = (a.first, a.second)
-    links = {n: FenceLink(n, tuple(cfg["robots"][n]["addr"]), hub) for n in names}
+    every = names + ((a.dozer,) if a.dozer else ())
+    links = {n: FenceLink(n, tuple(cfg["robots"][n]["addr"]), hub) for n in every}
     low = []
     for n, l in links.items():
         t = l.status() or l.status(3.0) or l.status(3.0)
         say_to(n, show(t))
         if t is None:
             sys.exit(1)
-        if a.min_volt and (t.get("batt_mv") or 0) < 1000 * a.min_volt:
+        limit = a.dozer_min_volt if n == a.dozer else a.min_volt
+        if limit and (t.get("batt_mv") or 0) < 1000 * limit:
             low.append(f"{n} {(t.get('batt_mv') or 0) / 1000:.2f} V")
     if low:
         sys.exit(f"battery below {a.min_volt} V: {', '.join(low)} - grabs miss at that voltage. Charge, or --min-volt 0 to start anyway.")
     fence = None
     if a.fence_m > 0:
         try:
-            fence = Fence(links, {n: cfg["robots"][n]["tag"] for n in names}, a.fence_m, say_to)
+            fence = Fence(links, {n: cfg["robots"][n]["tag"] for n in every}, a.fence_m, say_to)
             fence.start()
             time.sleep(1.5)
             if not fence.poly:
                 print("  fence: no arena from the overhead camera yet - the fence starts when its data arrives")
-            for n in names:
+            for n in every:
                 print(f"  fence: {n} " + (f"is {100 * fence.where[n]:.0f} cm outside the corner tags (limit {100 * a.fence_m:.0f})"
                                           if n in fence.where else "- tag not seen by the overhead camera (no fence for it until it is)"))
         except OSError as e:
@@ -392,6 +455,34 @@ def main():
             if w_:
                 print(f"  guide: from {n} the tray is {abs(math.degrees(w_[0])):.0f} deg {'left' if w_[0] > 0 else 'right'}, {100 * w_[1]:.0f} cm")
     result = {}
+    if a.dozer:
+        import os
+        cdir = os.path.join(os.path.dirname(os.path.abspath(a.config)), "calib")
+        dcal = {}
+        for n in every:
+            try:
+                with open(os.path.join(cdir, n + ".json")) as f:
+                    dcal[n] = json.load(f)
+            except (OSError, ValueError):
+                pass
+        if fence is None:
+            print(f"  dozer {a.dozer}: NO overhead camera - it cannot be told where {a.first} and {a.second} are; "
+                  "only its own checks (no robot as trash, sonar) keep it off them")
+        else:
+            if a.dozer not in dcal:
+                print(f"  dozer {a.dozer}: no calib/{a.dozer}.json - its heading is taken straight from the tag (run antcolony.calibrate)")
+            PeerFeed(fence.newest, links[a.dozer], a.dozer, names, {n: cfg["robots"][n]["tag"] for n in every}, dcal).start()
+            first_peers = peers_of(fence.newest(), a.dozer, names, {n: cfg["robots"][n]["tag"] for n in every}, dcal)
+            print(f"  dozer {a.dozer}: " + ("its tag is not in the overhead camera's view yet" if first_peers is None else
+                  "the arm cars from it: " + (", ".join(f"{p['name']} {100 * p['dist']:.0f} cm at {p['bearing_deg']:+.0f} deg"
+                                                        for p in first_peers) or "not in view")))
+
+    def dozer_job():
+        try:
+            result[a.dozer] = run_dozer(a.dozer, links[a.dozer], a, lambda m: say_to(a.dozer, m))
+        except Exception as e:
+            say_to(a.dozer, f"stopped: {e}")
+            result.setdefault(a.dozer, 0)
 
     def job(n, other, first):
         try:
@@ -403,6 +494,8 @@ def main():
 
     ths = [threading.Thread(target=job, args=(a.first, a.second, True), daemon=True),
            threading.Thread(target=job, args=(a.second, a.first, False), daemon=True)]
+    if a.dozer:
+        ths.append(threading.Thread(target=dozer_job, daemon=True))
     why = "finished"
     try:
         for th in ths:
@@ -419,7 +512,9 @@ def main():
             why = "stopped by hand"
     total = sum(result.get(n, 0) for n in names)
     print(f"{time.monotonic() - t0:5.0f}s === {why}: {total} object(s) in the tray  (" +
-          ", ".join(f"{n}: {result.get(n, 0)}" + (" - LEFT THE ARENA" if links[n].out.is_set() else "") for n in names) + ")")
+          ", ".join(f"{n}: {result.get(n, 0)}" + (" - LEFT THE ARENA" if links[n].out.is_set() else "") for n in names) + ")"
+          + (f"; dozer {a.dozer}: {result.get(a.dozer, 0)} piece(s) of trash in the cardboard box"
+             + (" - LEFT THE ARENA" if links[a.dozer].out.is_set() else "") if a.dozer else ""))
     sys.exit(0 if why == "finished" and not any(l.out.is_set() for l in links.values()) else 2)
 
 

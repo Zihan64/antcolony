@@ -153,7 +153,8 @@ class Cleaner(Dozer):
         img = self.eye.photo()
         self.shots += 1
         img.save(os.path.join(dz.LOG_DIR, f"{self.shots % 50:02d}_survey_p{self.pan}_t{self.tilt}.jpg"))
-        binb = self.bin_vlm.find(img)
+        binb = [b for b in self.bin_vlm.find(img)
+                if not self.near_peer((90 - self.pan) + (0.5 - (b[0] + b[2]) / 2) * dz.HFOV)]
         if self.a.fast:                                                 # YOLO: all classes in ~0.1 s
             labelled = [(lab, b) for lab, b in yolo_all(self.a.yolo3_url, img) if lab != "bin"]
             labelled = [("cargo" if lab in ("cargo", "block") else "trash", b) for lab, b in labelled]
@@ -167,7 +168,10 @@ class Cleaner(Dozer):
             if binb and (iou(b, binb[0]) > 0.3 or (binb[0][0] < (b[0] + b[2]) / 2 < binb[0][2]
                                                    and b[3] < binb[0][3] + 0.03 and b[1] > binb[0][1] - 0.03)):
                 continue                                                # the box itself / already inside it
-            bearing = self.heading + (90 - self.pan) + (0.5 - (b[0] + b[2]) / 2) * dz.HFOV
+            rel = (90 - self.pan) + (0.5 - (b[0] + b[2]) / 2) * dz.HFOV
+            if self.near_peer(rel):
+                continue                                                # car A / B, or behind it
+            bearing = self.heading + rel
             is_cargo = (lab == "cargo") if lab else self.brain.is_cargo(img, b)
             (cargo if is_cargo else trash).append((bearing, b[3], b, img))
         bn = None
@@ -322,9 +326,13 @@ class Cleaner(Dozer):
 
     # ---------------------------------------------------------------- carry the trash to the box
     def burst(self, secs, w=0.0, vx=None):
-        """Drive forward a moment and stop (looks happen standing: rolling photos are blurred)."""
+        """Drive forward a moment and stop (looks happen standing: rolling photos are blurred).
+        Not at all while another car is in the way."""
+        if self.peer_in_the_way():
+            self.give_way()
+            return
         t_end = time.time() + secs
-        while time.time() < t_end:
+        while time.time() < t_end and not self.peer_in_the_way():
             self.car.set_velocity(self.a.vx if vx is None else vx, 0, max(-0.6, min(0.6, w)))
             time.sleep(0.03)
         self.car.stop()
@@ -480,6 +488,8 @@ def main():
     ap.add_argument("--stop-cm", type=float, default=25)
     ap.add_argument("--min-mv", type=int, default=5800)
     ap.add_argument("--fast", action="store_true", help="3-class YOLO finds/judges/tracks; push without stopping")
+    ap.add_argument("--peers", default=None,
+                    help="file with the other cars' positions (agent.py writes /tmp/antcolony_peers.json in the team run)")
     ap.add_argument("--fixed-head", action="store_true", help="the pan/tilt servos do not work: turn the body to look round")
     ap.add_argument("--no-verify", dest="verify", action="store_false", help="--fast: skip the 4B cargo check")
     a = ap.parse_args()

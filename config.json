@@ -18,7 +18,7 @@
           "radius": 0.15, "base_fwd": 0.055, "holonomic": false},
     "B": {"tag": 36, "role": "arm", "addr": ["192.168.50.12", 9200], "home": [1.60, 0.20],
           "radius": 0.15, "base_fwd": 0.055, "holonomic": false},
-    "C": {"tag": 12, "role": "dozer", "addr": ["192.168.50.13", 9200], "home": [0.90, 0.18],
+    "C": {"tag": 34, "role": "dozer", "addr": ["192.168.50.13", 9200], "home": [0.90, 0.18],
           "radius": 0.15, "blade_fwd": 0.14, "blade_w": 0.22, "holonomic": false, "mecanum": false}
   },
   "control": {"hz": 15, "k_v": 3.0, "k_w": 2.0, "u_min": 0.05, "u_max": 0.8,

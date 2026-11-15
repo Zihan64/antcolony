@@ -16,6 +16,11 @@ Protocol (JSON datagrams, coordinator -> UDP 9200, telemetry -> coordinator UDP 
         carry (arm cars): {"dist_cm": 20} forward with the object, round tall things (front sonar)
         seek (arm cars): {"target": "white box", "stop_cm": 22} find it with the camera + VLM, drive up to it
         arm (arm cars): {"x": 0, "y": 15, "z": 10, "pitch": -45, "ms": 250, "grip": "open"} one step of live arm control
+        clean (dozer C): {"minutes": 15} push every piece of irregular trash into the open cardboard box
+              (robot/cleaner.py); detail at the end: "<n> pieces in the box"
+  {"type":"peers","peers":[{"name":"A","dist":0.8,"bearing_deg":30}, ..]}
+        where the other cars are, relative to this one (from the overhead camera, antcolony.clear --dozer).
+        Written to PEERS_FILE for cleaner.py: it keeps away from them and never takes them for trash.
         Re-sending the same id is harmless. A new id cancels a running skill.
   telemetry, 10 Hz: {"type":"telem","name":"A","batt_mv":7900,"sonar_cm":35.0,
                      "skill":{"id":17,"state":"running|ok|fail","detail":".."},"holding":false}
@@ -29,6 +34,7 @@ import threading
 import time
 
 PORT_CMD, PORT_TELEM, WATCHDOG = 9200, 9201, 0.4
+PEERS_FILE = "/tmp/antcolony_peers.json"     # the other cars' positions, for a skill running in another process
 
 
 class MockHW:
@@ -79,7 +85,21 @@ class Agent:
     def busy(self):
         return self.worker is not None and self.worker.is_alive()
 
+    def on_peers(self, m):
+        """Store where the other cars are (atomic write: the clean skill reads it at any time)."""
+        try:
+            import os
+            tmp = PEERS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"t": time.time(), "peers": m.get("peers", [])}, f)
+            os.replace(tmp, PEERS_FILE)
+        except OSError:
+            pass
+
     def on_msg(self, m, now):
+        if m.get("type") == "peers":
+            self.on_peers(m)
+            return
         if m.get("type") == "vel":
             if not self.busy():
                 dur = min(float(m.get("dur", WATCHDOG)), WATCHDOG)

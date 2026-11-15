@@ -65,6 +65,9 @@ class Freenove:
                  sonar=True, sonar_trig=27, sonar_echo=22):
         """Duties are in percent (0..100). min_duty: smallest value that moves the car straight;
         rot_min: smallest value that turns it on the spot; steer: left/right difference at w = 1."""
+        self.released = False
+        self._args = dict(min_duty=min_duty, max_duty=max_duty, rot_min=rot_min, rot_max=rot_max, steer=steer,
+                          pcb=pcb, bus=bus, sonar=sonar, sonar_trig=sonar_trig, sonar_echo=sonar_echo)
         self.min_duty, self.max_duty, self.rot_min, self.rot_max, self.steer = min_duty, max_duty, rot_min, rot_max, steer
         self.reverse, self.flip_front, self.flip_turn, self.pan_center = load_directions()
         self.pcb, self.lock = pcb, threading.Lock()
@@ -153,10 +156,14 @@ class Freenove:
             self.stop()
 
     def stop(self):
+        if getattr(self, "released", False):                 # the clean skill's process owns the motors now
+            return
         self.tank(0, 0)
 
     def battery_mv(self):
         """Battery voltage from the shield's ADS7830 (channel 2), or None."""
+        if self.released:
+            return None
         try:
             with self.lock:
                 self.bus.write_byte(ADC, 0x84 | ((((2 << 2) | (2 >> 1)) & 0x07) << 4))
@@ -216,17 +223,69 @@ class Freenove:
             return None
 
     def skill(self, name, args, cancel):
+        if name == "clean":
+            return self.clean(args, cancel)
         return (name in ("home", "open")), "bulldozer: no arm"
 
+    def clean(self, args, cancel):
+        """Skill "clean": cleaner.py (another process: it needs the camera, the I2C bus and the sonar
+        pins, so this object lets go of them meanwhile and takes them back after). Its YOLO servers
+        (yolo_pi.py, the car's own Pi) are started here if they are not up. -> (ok, "<n> pieces in the box")."""
+        import re
+        import signal as sig
+        import subprocess
+        import urllib.request
+        for port, model, conf in ((11447, "models/warehouse_yolo26.onnx", 0.5), (11448, "models/box.onnx", 0.15)):
+            try:
+                urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/detect", b"{}"), timeout=2)
+            except urllib.error.HTTPError:
+                continue                                     # 500 to an empty request = the server is up
+            except OSError:
+                subprocess.Popen([os.path.expanduser("~/yolo_env/bin/python"), "yolo_pi.py", "serve", "--model", model,
+                                  "--port", str(port), "--conf", str(conf)], cwd=HERE, start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(6)
+        cmd = [sys.executable, "-u", os.path.join(HERE, "cleaner.py"), "run", "--fast",
+               "--minutes", str(float(args.get("minutes", 15))), "--peers", args.get("peers", "/tmp/antcolony_peers.json"),
+               "--yolo-url", "http://127.0.0.1:11448/detect", "--yolo3-url", "http://127.0.0.1:11447/detect"]
+        if args.get("brain_url"):
+            cmd += ["--brain-url", args["brain_url"]]
+        self.close()
+        cleaned, last = 0, ""
+        try:
+            p = subprocess.Popen(cmd, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in p.stdout:
+                print("  [clean]", line.rstrip(), flush=True)
+                last = line.strip() or last
+                m = re.search(r"trash #(\d+) is in the box", line)
+                if m:
+                    cleaned = int(m[1])
+                if cancel.is_set():
+                    p.send_signal(sig.SIGTERM)                # cleaner.py stops the motors on SIGTERM
+                    break
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        finally:
+            self.__init__(**self._args)                       # take the hardware back
+        if cancel.is_set():
+            return False, f"cancelled - {cleaned} pieces in the box"
+        return p.returncode == 0, f"{cleaned} pieces in the box" + ("" if p.returncode == 0 else f" ({last[:80]})")
+
     def close(self):
+        if getattr(self, "released", False):
+            return
         try:
             self.stop()
         finally:
+            self.released = True
             self.bus.close()
             for d in self.sonar or ():
                 d.close()
             for s in getattr(self, "_ir", None) or ():
                 s.close()
+            self.sonar, self._ir = None, None
 
 
 def main():

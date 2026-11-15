@@ -64,6 +64,11 @@ ALIGN_DEG = 9                           # good enough to drive at it
 FAST_BURST_S = 0.15                     # --fast push: drive this long between looks
 SONAR_RECOVER_S = 1.3                   # sonar deaf after the motors ran (see sonar_settled)
 GUARD_HOP_S = 0.5                       # guarded forward drive: hop length between sonar checks (~18 cm)
+PEER_FRESH_S = 1.5                      # peers file older than this = no information about the other cars
+PEER_HALF_M = 0.20                      # half the size of an arm car (MasterPi 185 x 162 mm + wheels, margin)
+PEER_STOP_AHEAD_M, PEER_AHEAD_DEG = 0.55, 50   # another car this near, this far off the nose: no forward motion
+PEER_STOP_ANY_M = 0.30                  # ...this near in any direction: no forward motion either
+PEER_WAIT_S = 6.0                       # wait this long for it to move away before backing off
 STILL_DIFF = 4.0                        # wander: mean grey change (0-255) below this after a hop = did not move
 BIN_ALIGN = 10                          # box this close to the line car -> debris: push
 
@@ -191,6 +196,8 @@ class Dozer:
         self.shots, self.pushes, self.side, self.tall = 0, 0, 1, False
         self.heading = 0.0                           # deg, + = left; sum of commanded turns (drifts)
         self.bin_vlm = VLM(a.url, a.bin, small=False)
+        self.peers_file = getattr(a, "peers", None)            # the other cars (agent.py writes it), or None
+        self._peers, self._peers_t = [], 0.0
         os.makedirs(LOG_DIR, exist_ok=True)
         self.head(90, TILT_SEARCH)
 
@@ -214,10 +221,65 @@ class Dozer:
         out = []
         for b in boxes:
             u = (b[0] + b[2]) / 2
-            out.append(((90 - self.pan) + (0.5 - u) * HFOV, b[3], b))
+            bearing = (90 - self.pan) + (0.5 - u) * HFOV
+            if self.near_peer(bearing):
+                continue                                   # another car (or right behind one): never a target
+            out.append((bearing, b[3], b))
         say(f"  see[{tag}] pan {self.pan} tilt {self.tilt}: "
             + (", ".join(f"{d[0]:+.0f}deg v={d[1]:.2f}" for d in out) or "nothing") + f"  ({vlm.ms} ms)")
         return out
+
+    # ---------------------------------------------------------------- the other cars
+    def peers(self):
+        """[(name, distance m, bearing deg + = left of the nose)] of the other cars, from the overhead
+        camera via antcolony.clear -> agent.py -> peers file. [] when unknown or stale."""
+        if not self.peers_file:
+            return []
+        now = time.time()
+        if now - self._peers_t > 0.15:                     # read at most ~7 times a second
+            self._peers_t = now
+            try:
+                with open(self.peers_file) as f:
+                    d = json.load(f)
+                self._peers = [(p.get("name", "?"), float(p["dist"]), float(p["bearing_deg"])) for p in d.get("peers", [])] \
+                    if now - float(d.get("t", 0)) < PEER_FRESH_S else []
+            except (OSError, ValueError, KeyError, TypeError):
+                self._peers = []
+        return self._peers
+
+    def near_peer(self, bearing):
+        """Name of another car in this direction (its width seen from here, + 8 deg), else None."""
+        for name, dist, pb in self.peers():
+            half = math.degrees(math.atan2(PEER_HALF_M, max(dist, 0.05))) + 8
+            if abs(wrap(bearing - pb)) < half:
+                return name
+        return None
+
+    def peer_in_the_way(self):
+        for name, dist, pb in self.peers():
+            if dist < PEER_STOP_ANY_M or (dist < PEER_STOP_AHEAD_M and abs(pb) < PEER_AHEAD_DEG):
+                return name, dist, pb
+        return None
+
+    def give_way(self):
+        """Another car in the way: wait for it; still there -> back off and turn away. False if it
+        was in the way (the move that asked should not go on as planned)."""
+        p = self.peer_in_the_way()
+        if not p:
+            return True
+        self.car.stop()
+        say(f"  car {p[0]} {100 * p[1]:.0f} cm away at {p[2]:+.0f} deg: waiting for it")
+        t_end = time.time() + PEER_WAIT_S
+        while time.time() < t_end:
+            time.sleep(0.2)
+            if not self.peer_in_the_way():
+                say("  it has moved on")
+                return False
+        p = self.peer_in_the_way() or p
+        say(f"  car {p[0]} is still there: backing off and turning away from it")
+        self.drive(0.5, vx=-self.a.vx, guard=False)
+        self.turn(-60 if p[2] > 0 else 60)
+        return False
 
     def sonar(self):
         d = self.car.sonar_cm()
@@ -266,12 +328,18 @@ class Dozer:
         guarded = guard and vx > 0 and self.pan == 90 and self.a.stop_cm > 0
         left, ok = secs, True
         while left > 0:
+            if vx > 0 and self.peer_in_the_way():          # the other cars, always (also while pushing)
+                self.give_way()
+                ok = False
+                break
             if guarded and self.sonar_settled() < self.a.stop_cm:
                 ok = False
                 break
             hop = min(left, GUARD_HOP_S) if guarded else left
             t_end = time.time() + hop
             while time.time() < t_end:
+                if vx > 0 and self.peer_in_the_way():
+                    break
                 self.car.set_velocity(vx, 0, w)
                 time.sleep(0.03)
             left -= hop
