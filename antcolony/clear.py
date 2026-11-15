@@ -20,6 +20,11 @@ tag. A car whose tag is more than --fence-m outside the corner quadrilateral is 
 and takes no further part (it is not driven back: the tag does not say which way is "in"
 reliably enough). No tracker data, or a car's tag not seen: no fence for it - the walls and the
 car's own sonar (it never drives up to something tall while looking for objects) are the first line.
+
+Tray (shared knowledge): an AprilTag on the tray (--tray-tag, default bin.tag) that only the
+overhead camera reads. A car holding an object is first turned to face the tray by it (class
+Guide), then finds, approaches and docks at the tray with its own camera as before. Tag not in
+view: the car looks around for the tray by itself.
 """
 import argparse
 import json
@@ -95,7 +100,11 @@ class Fence(threading.Thread):
         self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx.bind(("0.0.0.0", port))
         self.rx.settimeout(0.5)
-        self.seen, self.where, self.poly, self.t_last = set(), {}, None, 0.0
+        self.seen, self.where, self.poly, self.t_last, self.snap = set(), {}, None, 0.0, None
+
+    def newest(self, max_age=1.0):
+        """The newest tracker snapshot, or None if it is older than max_age seconds."""
+        return self.snap if self.snap is not None and time.monotonic() - self.t_last <= max_age else None
 
     def check(self, m):
         """One tracker snapshot. -> names of the cars that just left."""
@@ -126,9 +135,80 @@ class Fence(threading.Thread):
                 m = json.loads(data.decode())
             except (socket.timeout, ValueError, OSError):
                 continue
-            self.t_last = time.monotonic()
+            self.t_last, self.snap = time.monotonic(), m
             for name in self.check(m):
                 self.say(name, f"OUTSIDE THE ARENA by {100 * self.where[name]:.0f} cm (overhead camera) - STOPPED, out of the run")
+
+
+def wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+class Guide:
+    """The overhead camera as the cars' common map for ONE thing: where the tray is. The tray carries
+    an AprilTag that only the overhead camera reads (user, 2026-11-14: the cars recognise the tray
+    by sight). Before a car searches for the tray it is turned to FACE it, from its own tag's pose
+    and the tray tag's position - then its camera has the tray in the first picture instead of
+    after a look-around of a minute or two. Everything after that is the car's own eyes, as before.
+
+    snapshot() -> newest tracker message or None. calib[name] = that car's calib/<name>.json
+    (th_sign, th_off: tag yaw -> the car's heading; tag_off: where the tag sits on the car)."""
+
+    def __init__(self, snapshot, tags, tray_tag, calib, sleep=time.sleep, tol_deg=12.0):
+        self.snapshot, self.tags, self.tray_tag, self.calib, self.sleep = snapshot, tags, str(tray_tag), calib, sleep
+        self.tol = math.radians(tol_deg)
+
+    def where(self, name):
+        """-> (angle the car must turn, + = left, rad; distance to the tray, m) or None if unknown."""
+        m = self.snapshot()
+        tags = (m or {}).get("tags") or {}
+        car, tray = tags.get(str(self.tags[name])), tags.get(self.tray_tag)
+        if not car or not tray:
+            return None
+        c = self.calib.get(name) or {}
+        th = wrap(c.get("th_sign", 1) * car[2] + c.get("th_off", 0.0))
+        ox, oy = c.get("tag_off", (0.0, 0.0))
+        x = car[0] - (math.cos(th) * ox - math.sin(th) * oy)
+        y = car[1] - (math.sin(th) * ox + math.cos(th) * oy)
+        return wrap(math.atan2(tray[1] - y, tray[0] - x) - th), math.hypot(tray[0] - x, tray[1] - y)
+
+    def face(self, name, link, say, w=0.3, rate_deg_s=250.0, dead=0.12, max_pulses=10):
+        """Turn the car until it faces the tray. -> True if it does, False if the camera cannot say."""
+        c = self.calib.get(name) or {}
+        sign, rate = float(c.get("w_sign", 1)), math.radians(rate_deg_s)
+        first = self.where(name)
+        if first is None:
+            say("  overhead camera: tray tag or my tag not in view - searching with my own camera")
+            return False
+        say(f"  overhead camera: the tray is {abs(math.degrees(first[0])):.0f} deg to my "
+            f"{'left' if first[0] > 0 else 'right'}, {100 * first[1]:.0f} cm away - turning to it")
+        err = first[0]
+        for _ in range(max_pulses):
+            if abs(err) <= self.tol:
+                return True
+            if getattr(link, "out", None) is not None and link.out.is_set():
+                return False
+            secs = min(0.6, dead + abs(err) / rate)
+            t_end, left = time.monotonic() + secs, secs
+            link.send({"type": "vel", "vx": 0, "vy": 0, "w": math.copysign(w, err) * sign, "dur": min(0.4, secs), "guard": True})
+            self.sleep(min(0.4, secs))
+            if secs > 0.4:
+                link.send({"type": "vel", "vx": 0, "vy": 0, "w": math.copysign(w, err) * sign, "dur": secs - 0.4, "guard": True})
+                self.sleep(secs - 0.4)
+            link.send({"type": "vel", "vx": 0, "vy": 0, "w": 0, "dur": 0.1})
+            self.sleep(0.9)                                  # stand still, a fresh snapshot
+            now = self.where(name)
+            if now is None:
+                say("  overhead camera lost my tag while turning - searching with my own camera")
+                return False
+            did = wrap(err - now[0])                         # how far it really turned towards the tray
+            if abs(did) > math.radians(4):
+                if did * err < 0:
+                    sign = -sign                             # turned the wrong way round: this car's w is reversed
+                else:
+                    rate = max(math.radians(60), min(math.radians(500), 0.5 * rate + 0.5 * abs(did) / max(0.03, secs - dead)))
+            err = now[0]
+        return abs(err) <= 2 * self.tol
 
 
 class Team:
@@ -137,7 +217,7 @@ class Team:
         self.started = threading.Event()                     # the first car has made its first choice
 
 
-def run_car(name, link, team, a, say, other=None, first=True):
+def run_car(name, link, team, a, say, other=None, first=True, guide=None):
     """One car until nothing is left for it. -> number of objects it put in the tray."""
     skip, delivered, misses = set(), 0, 0
     try:
@@ -204,6 +284,8 @@ def run_car(name, link, team, a, say, other=None, first=True):
             # Only the last stretch is one at a time: a car that arrives while the other is placing stops
             # --queue-cm short of the tray (room for the other to back away), then goes on when it is free.
             sargs = dict(json.loads(a.seek), target=a.target)
+            if guide is not None:
+                guide.face(name, link, say)
             queued = team.tray.locked()
             say(f"to the tray - seek: '{a.target}'" + (f" (the other car is there: stopping {a.queue_cm:.0f} cm short)" if queued else "") + " ...")
             ok, detail, secs = link.skill("seek", dict(sargs, arrive_cm=a.queue_cm) if queued else sargs, 390)
@@ -249,6 +331,8 @@ def main():
     ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
+    ap.add_argument("--tray-tag", type=int, help="AprilTag on the tray, read by the overhead camera (default: bin.tag in the config)")
+    ap.add_argument("--no-guide", action="store_true", help="do not turn the cars to the tray by the overhead camera")
     ap.add_argument("--max-min", type=float, default=20, help="stop everything after this many minutes")
     ap.add_argument("--min-volt", type=float, default=7.0, help="do not start below this battery voltage (0 = start anyway)")
     a = ap.parse_args()
@@ -288,11 +372,31 @@ def main():
                                           if n in fence.where else "- tag not seen by the overhead camera (no fence for it until it is)"))
         except OSError as e:
             print(f"  fence OFF: cannot listen on UDP {PORT_WORLD} ({e})")
+    guide = None
+    if fence is not None and not a.no_guide:
+        import os
+        cdir, calib = os.path.join(os.path.dirname(os.path.abspath(a.config)), "calib"), {}
+        for n in names:
+            try:
+                with open(os.path.join(cdir, n + ".json")) as f:
+                    calib[n] = json.load(f)
+            except (OSError, ValueError):
+                print(f"  guide: no calib/{n}.json - {n} searches for the tray with its own camera only")
+        tray_tag = a.tray_tag if a.tray_tag is not None else (cfg.get("bin") or {}).get("tag")
+        guide = Guide(fence.newest, {n: cfg["robots"][n]["tag"] for n in names if n in calib}, tray_tag, calib)
+        seen = str(tray_tag) in ((fence.newest() or {}).get("tags") or {})
+        print(f"  guide: tray tag {tray_tag} " + ("is in the overhead camera's view - cars are turned to face the tray before they search"
+                                                 if seen else "NOT in the overhead camera's view right now - cars search with their own cameras"))
+        for n in list(guide.tags):
+            w_ = guide.where(n)
+            if w_:
+                print(f"  guide: from {n} the tray is {abs(math.degrees(w_[0])):.0f} deg {'left' if w_[0] > 0 else 'right'}, {100 * w_[1]:.0f} cm")
     result = {}
 
     def job(n, other, first):
         try:
-            result[n] = run_car(n, links[n], team, a, lambda m: say_to(n, m), other, first)
+            g = guide if guide is not None and n in guide.tags else None
+            result[n] = run_car(n, links[n], team, a, lambda m: say_to(n, m), other, first, g)
         except Exception as e:
             say_to(n, f"stopped: {e}")
             result.setdefault(n, 0)

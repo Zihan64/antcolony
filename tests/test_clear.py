@@ -133,5 +133,55 @@ check("fence: start 20 cm outside is tolerated", f.check(dict(snap, tags={"33": 
 check("fence: 45 cm outside stops that car only", f.check(dict(snap, tags={"33": [0.5, -0.45, 0], "36": [0.8, 0.5, 0]})) == ["A"]
       and links["A"].out.is_set() and not links["B"].out.is_set())
 check("fence: tag not seen = no action", f.check(dict(snap, tags={})) == [])
+
+
+class TurnSim:
+    """A car turning on the spot under the overhead camera: tag yaw = heading - th_off, the tag sits
+    8.5 cm behind the centre; vel pulses turn it at `rate` after a dead time."""
+
+    def __init__(self, heading_deg, xy=(0.5, 0.2), tray=(1.0, 1.6), rate=230.0, w_sign=1, th_off=1.65, tray_seen=True):
+        self.th, self.xy, self.tray, self.rate, self.w_sign, self.th_off = math.radians(heading_deg), xy, tray, math.radians(rate), w_sign, th_off
+        self.tray_seen, self.w, self.pulse, self.sent = tray_seen, 0.0, 0.0, 0
+        self.out = threading.Event()
+
+    def send(self, m):
+        if m.get("type") == "vel":
+            if m["w"] and not self.w:
+                self.pulse = 0.0
+            self.w = m["w"]
+            self.sent += bool(m["w"])
+
+    def sleep(self, s):
+        if self.w:
+            run = max(0.0, self.pulse + s - 0.12) - max(0.0, self.pulse - 0.12)
+            self.th += self.rate * run * (1 if self.w > 0 else -1) * self.w_sign
+            self.pulse += s
+
+    def snapshot(self):
+        tx = self.xy[0] - 0.085 * math.cos(self.th)
+        ty = self.xy[1] - 0.085 * math.sin(self.th)
+        tags = {"33": [tx, ty, self.th - self.th_off]}
+        if self.tray_seen:
+            tags["60"] = [self.tray[0], self.tray[1], 0.0]
+        return {"tags": tags}
+
+    def error_deg(self):
+        return abs(math.degrees(clear.wrap(math.atan2(self.tray[1] - self.xy[1], self.tray[0] - self.xy[0]) - self.th)))
+
+
+import math  # noqa: E402
+
+CAL = {"A": {"th_sign": 1, "th_off": 1.65, "tag_off": [-0.085, 0.0], "w_sign": 1}}
+for name, kw, cal in [("facing away (150 deg off)", {"heading_deg": -80}, CAL), ("a little off (25 deg)", {"heading_deg": 45}, CAL),
+                      ("already facing it", {"heading_deg": 70.3}, CAL), ("turns slower than guessed", {"heading_deg": 200, "rate": 120.0}, CAL),
+                      ("turns faster than guessed", {"heading_deg": -30, "rate": 420.0}, CAL),
+                      ("this car's turn direction is reversed", {"heading_deg": -60, "w_sign": -1}, CAL)]:
+    s = TurnSim(**kw)
+    g = clear.Guide(s.snapshot, {"A": 33}, 60, cal, sleep=s.sleep)
+    ok = g.face("A", s, lambda m: None)
+    check(f"guide: {name}: faces the tray", ok and s.error_deg() <= 24, f"({s.error_deg():.0f} deg off after {s.sent} pulses)")
+s = TurnSim(heading_deg=-80, tray_seen=False)
+g = clear.Guide(s.snapshot, {"A": 33}, 60, CAL, sleep=s.sleep)
+check("guide: tray tag not in view: does not turn, car searches by itself", g.face("A", s, lambda m: None) is False and s.sent == 0)
 print("all ok" if not bad else f"{bad} failed")
 sys.exit(1 if bad else 0)
