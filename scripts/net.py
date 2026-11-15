@@ -50,6 +50,9 @@ def my_network():
     sys.exit("This Mac has no network address - is Wi-Fi on and connected?")
 
 
+CAR_FILES = ["agent.py", "hw_masterpi.py", "seek.py", "grab_runner.py", "detector.py", "detector.warehouse.json"]
+
+
 def ssh(host, cmd, timeout=40):
     """Run cmd on host over ssh (no questions asked: BatchMode). -> (ok, stdout + stderr)."""
     try:
@@ -146,6 +149,25 @@ def main():
                   f'p=$(pgrep -f "^python3 -u agent.py"); [ -n "$p" ] && kill $p; sleep 1.5; '
                   f'(setsid nohup python3 -u agent.py --name {n} --min-duty 30 > agent.log 2>&1 < /dev/null &); sleep 5; '
                   f'pgrep -f "^python3 -u agent.py" >/dev/null && echo "   program running" || echo "   PROGRAM DID NOT START"')
+        # bring the car's program up to date with this computer's copy (the fixes reach the cars without anyone
+        # copying files by hand); grab_defaults.json, calibration and models on the car are not touched
+        files = [os.path.join(ROOT, "robot", f) for f in CAR_FILES]
+        try:
+            r = subprocess.run(["scp", "-q", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", *files, f"{user}@{found[n]}:"],
+                               capture_output=True, text=True, timeout=60)     # to the home folder first: the car's folder
+            copied = r.returncode == 0                                       # name has a space ("Master Pi5")
+            if copied:
+                okm, outm = ssh(f"{user}@{found[n]}", "mv " + " ".join(f"~/{f}" for f in CAR_FILES) + f' "{d}/"')
+                copied = okm
+                if not okm:
+                    print("   (copied, but could not move the files into place: " + outm.strip()[:200] + ")")
+            if not copied:
+                print("   (could not copy the newest car program: " + (r.stderr.strip() or "?")[:200] + ")")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            copied = False
+            print(f"   (could not copy the newest car program: {e})")
+        if copied:
+            print(f"   newest car program copied ({', '.join(CAR_FILES)})")
         ok, out = ssh(f"{user}@{found[n]}", script)
         out = out.strip()
         if "Host key verification failed" in out or "REMOTE HOST IDENTIFICATION HAS CHANGED" in out:

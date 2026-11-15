@@ -275,6 +275,9 @@ class Guide:
         return abs(err) <= 2 * self.tol
 
 
+VLM_NOUN = {"block": "block", "slotted_block": "block", "knob": "knob", "cup": "cup"}   # detector class -> grab word
+
+
 def finder(a):
     """seek arguments that say how objects are found: the trained detector (what is a block is
     decided by its shape; colour only tells them apart) or, as before, any vivid colour."""
@@ -395,8 +398,16 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
             # what the grab looks for: the colour and the detector's class ("black cup" has no vivid colour, so
             # "cup"); "any" only when nothing is known - in runs/clear_0100 car B aimed at a black cup and its
             # grab, told "any", went for a small white ball beside it instead
-            noun = cls.replace("_", " ") if cls else a.noun
-            label = f"{colour} {noun}" if colour else (noun if cls else "any")
+            # The grab finds the object with the VLM, which knows everyday words, not the detector's class
+            # names: "blue holder" and "holder" were "not seen" 9 times in runs/show_0524, "yellow knob" and
+            # "green block" were found. So only words the VLM knows go through; others become "object".
+            noun = VLM_NOUN.get(cls, "object") if cls else a.noun
+            label = f"{colour} {noun}" if colour else (noun if cls and noun != "object" else "any")
+            if label == "any" and cls:                   # no colour and no word the VLM knows: the grab would take
+                say(f"a {cls} with no colour - the grab cannot be told which thing that is; leaving the {cls}s alone")
+                skip.add(cls)                            # whatever lies nearest (runs/clear_0100: a ball beside a cup)
+                team.claims[name] = None
+                continue
             say(f"my object: the {label}")
             held = False
             for i in range(1, a.tries + 1):

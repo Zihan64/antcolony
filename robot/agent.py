@@ -102,7 +102,7 @@ class Agent:
         except Exception as e:                 # never let a skill kill the agent
             ok, detail = False, f"{type(e).__name__}: {e}"
         if self.skill["id"] == mine["id"]:
-            self.skill = {"id": mine["id"], "state": "ok" if ok else "fail", "detail": str(detail)[:120]}
+            self.skill = {"id": mine["id"], "state": "ok" if ok else "fail", "detail": str(detail)[:400]}   # 120 cut "label=holder" to "holde" (2026-11-15)
         print(f"[{self.name}] skill {m['name']} -> {'ok' if ok else 'FAIL'} {detail}")
 
     def drive(self, now):
