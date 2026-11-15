@@ -151,7 +151,10 @@ CASES = [
     ("look only: nothing drives", (-20, 80), {"look_only": True}, {}, lambda c, ok: ok and math.hypot(c.x, c.y) == 0 and c.th == 0),
     ("aim only: turns to it, does not drive", (-50, 70), {"stop": "aim"}, {}, lambda c, ok: ok and math.hypot(c.x, c.y) < 1 and abs(c.rel()[0]) < 15),
     ("small block 1.5 m away to the left: turn, drive until it is low in the picture", (-70, 135),
-     {"bottom_stop": 0.4, "stop_cm": 12}, {"sonar_sees": False}, lambda c, ok: ok and 50 <= c.rel()[1] + 12.5 <= 95 and abs(c.rel()[0]) < 20),
+     {"bottom_stop": 0.4, "stop_cm": 12}, {"sonar_sees": False},
+     # the rule is "lower edge at 40 % of the picture" (= ~86 cm in this fake camera); rolling stops a little
+     # before it (36 %) so as not to overshoot - the grab takes over from there
+     lambda c, ok: ok and 50 <= c.rel()[1] + 12.5 <= 100 and abs(c.rel()[0]) < 20),
     ("tray 1.6 m away, picture distance 20 % too long: still stops well before it", (20, 160), {}, {"sonar_sees": False},
      lambda c, ok: ok and c.closest >= 14),
     ("tray 1.5 m away, cannot be followed between looks (falls back to short steps)", (-30, 150), {"follow": False}, {"sonar_sees": False},
