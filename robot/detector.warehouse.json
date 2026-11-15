@@ -11,7 +11,13 @@
   "iou": 0.5,
   "imgsz": 416,
   "debris": [
-    "block"
+    "block",
+    "knob",
+    "bracket",
+    "slotted_block",
+    "cup",
+    "holder",
+    "stand"
   ],
-  "_debris": "WHITELIST of classes that count as debris to clear (seek detector 'yolo'). The team is building it; edit here and copy to the cars. Only vividly coloured, roughly square, fully visible things are taken (seek.nearest_object)."
+  "_debris": "WHITELIST of detector classes that count as debris to clear (seek detector 'yolo'); read again at every search, so a change on a car takes effect at once. 2026-11-15: all 7 classes (user: not only blocks). Safety in seek.nearest_object: an uncoloured thing must score >= 0.75 and must not touch the picture's edge, so the white marker cups and grey wall panels are not taken."
 }
