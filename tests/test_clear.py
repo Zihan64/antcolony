@@ -84,7 +84,7 @@ class FakeCar:
 
 
 ARGS = types.SimpleNamespace(noun="block", obj_height=3.0, tries=2, back_cm=18, find_bottom=0.4, target="white tray",
-                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80, finder="yolo", classes="block", blind_cm=25, retry_s=0.2)
+                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80, finder="yolo", classes="block", blind_cm=25, retry_s=0.2, see_tray_m=0.6)
 
 
 def play(objects, a_kw=None, b_kw=None, da=None, db=None):

@@ -1,6 +1,6 @@
 {
   "th_sign": 1,
-  "th_off": 1.6519,
+  "th_off": 3.1067,
   "tag_off": [
     -0.0852,
     0.017
@@ -8,5 +8,7 @@
   "w_sign": 1,
   "vy_sign": 1,
   "strafe_ok": true,
-  "v_fwd_at_0.3": 0.32
+  "v_fwd_at_0.3": 0.32,
+  "th_off_before_20261115": 1.6519,
+  "_th_off": "2026-11-15: measured by antcolony.clear's heading check (drove 12 cm, tag displacement); the tag had been re-mounted ~83 deg from the earlier calibration"
 }

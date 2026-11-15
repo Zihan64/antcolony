@@ -303,6 +303,10 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
         nonlocal delivered
         sargs = dict(json.loads(a.seek), target=a.target)
         if guide is not None:
+            w_ = guide.where(name)
+            if w_ is not None and w_[1] < a.see_tray_m:  # too close: the tray is below the picture, behind the held
+                say(f"  the tray is only {100 * w_[1]:.0f} cm away - backing up so that my camera sees it past what I hold")
+                link.back_up(100 * (a.see_tray_m - w_[1]) + 5)      # object (2026-11-15, car A at 35 cm: 189 s search)
             guide.face(name, link, say)
         queued = team.tray.locked()
         say(f"to the tray - seek: '{a.target}'" + (f" (the other car is there: stopping {a.queue_cm:.0f} cm short)" if queued else "") + " ...")
@@ -441,6 +445,7 @@ def main():
     ap.add_argument("--away-cm", type=float, default=35)
     ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
+    ap.add_argument("--see-tray-m", type=float, default=0.6, help="before searching for the tray, back up if the overhead camera says it is nearer than this")
     ap.add_argument("--blind-cm", type=float, default=25, help="nothing in view: back up this far and look again")
     ap.add_argument("--retry-s", type=float, default=20, help="nothing for me but the other car still works: look again after this long")
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
