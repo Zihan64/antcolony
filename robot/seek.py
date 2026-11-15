@@ -471,9 +471,17 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             # every camera frame (by its colour, or as the white patch the VLM just named); the car stops as
             # soon as it is near, as soon as the target is missing from two frames in a row, or when the sonar
             # sees something. Then a proper look decides what next - never a move without the target in view.
-            if follow and seg_now >= 12 and not near_by_eye:
+            # (2026-11-14 on car B: a block 1 m away was approached in 8 cm hops because seg_now was capped
+            # once it showed in the lower part of the picture. The per-frame check below already stops at
+            # the right moment, so roll whenever the target is not yet near.)
+            roll = follow and not near_by_eye and (seg_now >= 12
+                                                   or (bstop is not None and s["bottom"] < float(bstop) - 0.08)
+                                                   or (bstop is None and dist is not None and dist > arrive + 10))
+            if roll:
                 d = hw.sonar_med()
-                if d is None or d > stop_cm + 25:
+                if d is not None and d <= stop_cm + 20:
+                    say(f"not rolling: the sonar reads {d:.0f} cm - short steps instead")
+                if d is None or d > stop_cm + 20:
                     t_f, lost, why = time.monotonic(), 0, "long"
                     hw.set_velocity(u, 0.0, 0.0)
                     while time.monotonic() - t_f < float(args.get("follow_s", 10)):
