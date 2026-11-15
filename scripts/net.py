@@ -79,6 +79,14 @@ def main():
     ifc, ip, net = my_network()
     print(f"this Mac: {ip} on {net} ({ifc})")
     found = find_cars(net)
+    cfg_path0 = os.path.join(ROOT, "config.json")
+    with open(cfg_path0, encoding="utf-8") as f:
+        prof0 = (json.load(f).get("networks") or {})
+    for pname in ("here", "lan", "hyatt"):              # not found by MAC (ARP can miss a sleepy Pi): try the known addresses
+        for n, known in (prof0.get(pname) or {}).items():
+            if n in CARS and n not in found and known and ipaddress.ip_address(known) in net \
+                    and "bytes from" in sh(["ping", "-c", "2", "-t", "2", known], 6):
+                found[n] = known
     for n in CARS:
         print(f"  car {n}: " + (found[n] if n in found else "NOT FOUND (switched off, or on another Wi-Fi)"))
     if not any(n in found for n in ("A", "B")):
