@@ -55,6 +55,27 @@ python cam_control/run_tracker.py --antcolony 10.0.0.12
 - 显示 `car A: NOT FOUND`：那辆车没开机，或者连到了别的 Wi-Fi。等一会儿再运行一次 `python3 scripts/net.py`。
 - 想先看看它会改什么、不真的改：`python3 scripts/net.py --dry-run`
 
+**备用办法：`net.py` 出错时手动改。** AntColony 上 A 是 **192.168.0.63**，B 是 **192.168.0.64**，配置里已经写好了。只需要手动把车里的 VLM 地址改成你 Mac 的新 IP：
+
+1. 查你 Mac 的 IP：
+
+```bash
+ipconfig getifaddr en0
+```
+
+2. 把下面两条命令里的 `MAC_IP` 换成上一步显示的地址，然后运行：
+
+```bash
+ssh zxz5500@192.168.0.63 'echo "{\"url\": \"http://MAC_IP:8090\", \"img_tokens\": 256}" > "/home/zxz5500/Desktop/Master Pi5/masterpi_lite/masterpi_lite/vlm_server.json"'
+```
+
+```bash
+ssh mitra@192.168.0.64 'echo "{\"url\": \"http://MAC_IP:8090\", \"img_tokens\": 256}" > "/home/mitra/Desktop/Master Pi5/masterpi_lite/masterpi_lite/vlm_server.json"'
+```
+
+3. 重启车上的程序：`bash scripts/cars.sh start`
+4. tracker 用 `python cam_control/run_tracker.py --antcolony MAC_IP` 启动。
+
 ---
 
 ## 1. 启动 VLM（你的 Mac，开一个窗口一直放着）
