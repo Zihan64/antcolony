@@ -99,6 +99,7 @@ def run_car(name, link, team, a, say, after=None):
         say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
         team.claim(name, colour if ok else None)
         if not ok:
+            say("GIVING UP: no object found - I stop here")
             return False
         label = f"{colour} {a.noun}" if colour else "any"
         say(f"my object: the {label}")
@@ -114,8 +115,17 @@ def run_car(name, link, team, a, say, after=None):
                 held = True
                 break
             if i < a.tries:
+                # After a miss the car stands over the object. Backing up alone is not enough: 18 cm back
+                # puts a small block ~30 cm ahead, beyond the grab's near view, and its far view often
+                # misses a pale block (2026-11-14, car A: three tries "not seen" in a row). So back up,
+                # then line up on it again by its colour, as before the first try.
                 link.back_up(a.back_cm)
+                if colour:
+                    ok2, d2, s2 = link.skill("seek", {"target": f"{colour} object", "detector": "colour",
+                                                      "bottom_stop": a.find_bottom, "stop_cm": 12}, 120)
+                    say(f"  lined up on it again: {'ok' if ok2 else 'FAILED'} - {d2}  ({s2:.0f} s)")
         if not held:
+            say(f"GIVING UP: {a.tries} grabs, none held - I stop here; the {label} stays on the floor")
             return False
         if team.tray.locked():
             say("holding it - waiting for my turn at the tray")
