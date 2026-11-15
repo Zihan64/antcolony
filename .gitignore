@@ -8,3 +8,7 @@ __pycache__/
 *.pt
 *.ts
 *.part
+
+# generated training data / runs (rebuild with cam_control/training/)
+cam_control/datasets/
+cam_control/runs/

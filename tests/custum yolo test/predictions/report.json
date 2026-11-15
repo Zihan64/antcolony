@@ -1,0 +1,416 @@
+{
+  "model": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\models\\warehouse_yolo26.pt",
+  "conf": 0.5,
+  "imgsz": 640,
+  "images": {
+    "IMG_9704.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.879,
+          "iou": 0.89,
+          "verdict": "correct",
+          "box": [
+            715,
+            760,
+            827,
+            874
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.854,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            65,
+            593,
+            302,
+            927
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.84,
+          "iou": 0.95,
+          "verdict": "correct",
+          "box": [
+            123,
+            418,
+            382,
+            610
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.713,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            360,
+            376,
+            784,
+            682
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.542,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            620,
+            0,
+            909,
+            161
+          ]
+        }
+      ],
+      "missed": [
+        "cup"
+      ],
+      "n_labels": 5
+    },
+    "IMG_9705.jpeg": {
+      "detections": [
+        {
+          "name": "bracket",
+          "conf": 0.867,
+          "iou": 0.78,
+          "verdict": "correct",
+          "box": [
+            513,
+            117,
+            620,
+            295
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.851,
+          "iou": 0.77,
+          "verdict": "correct",
+          "box": [
+            242,
+            548,
+            471,
+            747
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.706,
+          "iou": 0.71,
+          "verdict": "wrong class (is knob)",
+          "box": [
+            443,
+            815,
+            530,
+            898
+          ]
+        }
+      ],
+      "missed": [
+        "cup",
+        "holder"
+      ],
+      "n_labels": 5
+    },
+    "IMG_9706.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.926,
+          "iou": 0.81,
+          "verdict": "correct",
+          "box": [
+            376,
+            790,
+            510,
+            926
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.783,
+          "iou": 0.83,
+          "verdict": "correct",
+          "box": [
+            143,
+            245,
+            558,
+            637
+          ]
+        }
+      ],
+      "missed": [
+        "cup"
+      ],
+      "n_labels": 3
+    },
+    "IMG_9707.jpeg": {
+      "detections": [
+        {
+          "name": "bracket",
+          "conf": 0.812,
+          "iou": 0.83,
+          "verdict": "correct",
+          "box": [
+            515,
+            449,
+            825,
+            592
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.75,
+          "iou": 0.89,
+          "verdict": "correct",
+          "box": [
+            189,
+            725,
+            560,
+            936
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.726,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            748,
+            0,
+            935,
+            170
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.718,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            301,
+            211,
+            509,
+            475
+          ]
+        }
+      ],
+      "missed": [],
+      "n_labels": 3
+    },
+    "IMG_9708.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.873,
+          "iou": 0.79,
+          "verdict": "correct",
+          "box": [
+            303,
+            284,
+            394,
+            382
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.802,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            624,
+            519,
+            880,
+            716
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.739,
+          "iou": 0.58,
+          "verdict": "correct",
+          "box": [
+            478,
+            869,
+            798,
+            1028
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.681,
+          "iou": 0.73,
+          "verdict": "correct",
+          "box": [
+            127,
+            464,
+            388,
+            835
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.634,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            745,
+            0,
+            935,
+            154
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.547,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            558,
+            286,
+            734,
+            493
+          ]
+        }
+      ],
+      "missed": [],
+      "n_labels": 5
+    },
+    "IMG_9709.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.924,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            332,
+            292,
+            421,
+            386
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.836,
+          "iou": 0.87,
+          "verdict": "correct",
+          "box": [
+            632,
+            570,
+            882,
+            782
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.785,
+          "iou": 0.53,
+          "verdict": "correct",
+          "box": [
+            452,
+            928,
+            767,
+            1068
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.717,
+          "iou": 0.74,
+          "verdict": "correct",
+          "box": [
+            119,
+            459,
+            386,
+            844
+          ]
+        }
+      ],
+      "missed": [
+        "cup"
+      ],
+      "n_labels": 5
+    },
+    "IMG_9710.jpeg": {
+      "detections": [
+        {
+          "name": "slotted_block",
+          "conf": 0.885,
+          "iou": 0.83,
+          "verdict": "correct",
+          "box": [
+            447,
+            743,
+            750,
+            980
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.851,
+          "iou": 0.83,
+          "verdict": "correct",
+          "box": [
+            333,
+            370,
+            530,
+            556
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.806,
+          "iou": 0.84,
+          "verdict": "wrong class (is knob)",
+          "box": [
+            148,
+            674,
+            257,
+            787
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.675,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            624,
+            0,
+            934,
+            83
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.639,
+          "iou": 0.81,
+          "verdict": "wrong class (is holder)",
+          "box": [
+            565,
+            353,
+            894,
+            687
+          ]
+        }
+      ],
+      "missed": [
+        "cup"
+      ],
+      "n_labels": 5
+    }
+  },
+  "summary": {
+    "tp": 22,
+    "fp": 7,
+    "fn": 9,
+    "wrong_class": 3,
+    "precision": 0.759,
+    "recall": 0.71
+  }
+}

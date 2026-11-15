@@ -24,7 +24,10 @@ What is sent (arena frame, metres, radians):
                                               detections in that shadow
      "tag_info": {"10": {"method": "plane", "z": 0.17, "pose_z": 0.171}}}
                                               how each tag was located (plane = at a known height,
-                                              precise; pose = from its apparent size, cm worse)
+                                              precise; pose = from its apparent size, cm worse);
+                                              with extra cameras also "cams": ["main", "go3s"]
+                                              and "sigma" (m, fused 1-sigma)
+     "cameras": {"main": [x, y, z], "go3s": [x, y, z]}   with extra cameras (multi_camera.py)
 Objects also carry "h" (estimated height, m) and "conf".
 
 Why not the GUI's own "UDP out": that message is for ONE robot following the GUI's A* path, and
@@ -88,6 +91,10 @@ def world_message(r, floor, corner_ids=None, now=None):
             info[str(int(o["id"]))] = {"method": str(o.get("method", "?")).split(" ")[0],
                                        "z": round(float(o.get("z") or 0.0), 3),
                                        "pose_z": None if o.get("pose_z_m") is None else round(float(o["pose_z_m"]), 3)}
+            if o.get("cams"):                    # multi-camera: which cameras the pose is fused from
+                info[str(int(o["id"]))]["cams"] = list(o["cams"])
+                if o.get("sigma_m") is not None:
+                    info[str(int(o["id"]))]["sigma"] = float(o["sigma_m"])
     fl = {}
     for tid, c in getattr(floor, "world_corners", {}).items():
         if str(int(tid)) in tags:        # a tag that is tracked as an object (a robot) is not floor paper
@@ -104,6 +111,10 @@ def world_message(r, floor, corner_ids=None, now=None):
         msg["camera"] = [round(float(cam["x"]), 3), round(float(cam["y"]), 3), round(float(cam["z"]), 3)]
     elif cam is not None and len(cam) >= 3:
         msg["camera"] = [round(float(cam[0]), 3), round(float(cam[1]), 3), round(float(cam[2]), 3)]
+    if r.get("cameras"):
+        # every camera with a floor pose ("camera" above stays the one the untagged objects come
+        # from: the coordinator masks robot shadows as seen from it)
+        msg["cameras"] = {str(k): [float(v) for v in xyz] for k, xyz in r["cameras"].items()}
     return msg
 
 

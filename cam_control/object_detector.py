@@ -22,10 +22,15 @@ What "class-agnostic" means here
   Tracks are matched by floor position only. A never-seen object is picked up the first time
   it appears; the model's own class label is discarded.
 
-Models (prompt-free, no text encoder needed)
-  yoloe-26s-seg-pf.pt   default: segments everything that looks like an object
+Models
+  models/warehouse_yolo26.pt  default: trained detector for bracket, knob, slotted_block, cup,
+                        holder (training/build_warehouse_dataset.py + train_warehouse_yolo.py).
+                        Trained with carpet-only negatives, so floor texture is background; its
+                        class names are kept and confidence is floored at CLOSED_SET_MIN_CONF.
+  yoloe-26s-seg-pf.pt   prompt-free: segments everything that looks like an object (including
+                        carpet patterns; the geometry filters below must catch those)
   yoloe-26n-seg-pf.pt   smaller and faster
-  your_model.pt         any Ultralytics detection / segmentation model (labels are ignored)
+  your_model.pt         any Ultralytics detection / segmentation model (class names kept)
 
 From image box to floor coordinates
   The floor plane is known, so a pixel where an object touches the floor maps to an exact
@@ -51,20 +56,41 @@ import time
 import cv2
 import numpy as np
 
+import os
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+WAREHOUSE_MODEL = os.path.join(_HERE, "models", "warehouse_yolo26.pt")
+
 MODEL_CHOICES = [
-    ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: any object, no class list (default)"),
+    (WAREHOUSE_MODEL, "Trained warehouse detector (bracket, knob, slotted_block, cup, holder); "
+                      "trained with carpet negatives so floor texture is not detected (default)"),
+    ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: any object, no class list (fires on carpet texture)"),
     ("yoloe-26n-seg-pf.pt", "YOLOE-26n prompt-free: any object, faster"),
 ]
 DET_ID_BASE = 1000          # detected objects get ids 1000+ (tags use 0-101)
 MAX_BOX_FRAC = 0.25         # a box covering more of the image than this is the scene, not an object
+# Closed-set (trained) models: confidence below this is never accepted, whatever the GUI spin box
+# says (its 0.15 default is for prompt-free scores). Chosen from the held-out carpet evaluation in
+# models/warehouse_yolo26_eval.json: zero carpet-only false positives at this threshold.
+CLOSED_SET_MIN_CONF = 0.5
+MIN_BOX_PX = 12             # boxes thinner than this (pixels) are texture, not one of the objects
+
+
+def is_prompt_free(model_name):
+    return "yoloe" in os.path.basename(str(model_name)).lower()
 
 
 class ObjectDetector:
-    """Runs a prompt-free YOLO model on the newest submitted frame in a background thread.
-    Every detection is a generic object; class labels are discarded."""
+    """Runs a YOLO model on the newest submitted frame in a background thread.
+    Prompt-free (YOLOE) model: every detection is a generic object, class labels are discarded.
+    Trained closed-set model (e.g. models/warehouse_yolo26.pt): its class names are kept and a
+    confidence floor (CLOSED_SET_MIN_CONF) keeps floor texture out."""
 
     def __init__(self, model_name, conf=0.15, imgsz=640, device=None):
+        if not os.path.isabs(model_name) and os.path.exists(os.path.join(_HERE, model_name)):
+            model_name = os.path.join(_HERE, model_name)
         self.model_name, self.conf, self.imgsz, self.device = model_name, conf, imgsz, device
+        self.closed_set = not is_prompt_free(model_name)
         self.model = None
         self.status = "loading model…"
         self.error = None
@@ -99,7 +125,7 @@ class ObjectDetector:
     # ---- worker
     def _load(self):
         from ultralytics import YOLO, YOLOE
-        return YOLOE(self.model_name) if "yoloe" in self.model_name.lower() else YOLO(self.model_name)
+        return YOLO(self.model_name) if self.closed_set else YOLOE(self.model_name)
 
     @staticmethod
     def _cap_cpu_threads():
@@ -141,12 +167,13 @@ class ObjectDetector:
             t0 = time.perf_counter()
             try:
                 # agnostic_nms: overlapping boxes are merged whatever label the model gave them
-                kw = dict(conf=self.conf, imgsz=self.imgsz, verbose=False, agnostic_nms=True)
+                conf = max(self.conf, CLOSED_SET_MIN_CONF) if self.closed_set else self.conf
+                kw = dict(conf=conf, imgsz=self.imgsz, verbose=False, agnostic_nms=True)
                 if self.device:
                     kw["device"] = self.device
                 self._cap_cpu_threads()
                 r = self.model.predict(frame, **kw)[0]
-                dets = self._parse(r, frame.shape)
+                dets = self._parse(r, frame.shape, self.model.names if self.closed_set else None)
             except Exception as e:
                 self.error = f"{type(e).__name__}: {e}"
                 continue
@@ -156,17 +183,22 @@ class ObjectDetector:
                 self._latest = (stamp, dets)
 
     @staticmethod
-    def _parse(r, shape):
+    def _parse(r, shape, names=None):
+        """names: the model's class names to keep (closed-set model), or None -> "object"."""
         out = []
         if r.boxes is None:
             return out
         img_area = float(shape[0] * shape[1])
         polys = r.masks.xy if getattr(r, "masks", None) is not None else None
+        classes = r.boxes.cls.cpu().numpy().astype(int)
         for k, (b, p) in enumerate(zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())):
             x1, y1, x2, y2 = [float(v) for v in b]
             if (x2 - x1) * (y2 - y1) > MAX_BOX_FRAC * img_area:
                 continue
-            d = {"name": "object", "conf": float(p), "box": (x1, y1, x2, y2)}
+            if names is not None and min(x2 - x1, y2 - y1) < MIN_BOX_PX:
+                continue
+            name = names.get(int(classes[k]), "object") if names is not None else "object"
+            d = {"name": name, "conf": float(p), "box": (x1, y1, x2, y2)}
             poly = None
             if polys is not None and k < len(polys) and len(polys[k]) >= 3:
                 poly = np.asarray(polys[k], np.float64)
@@ -381,6 +413,10 @@ class FloorTracker:
                 n = self._sym(t)                      # average n*angle on the circle
                 v = (1 - a) * np.exp(1j * n * t["angle"]) + a * np.exp(1j * n * ang)
                 t["angle"] = float(np.angle(v)) / n
+                # label: votes weighted by confidence, so one odd frame cannot flip the class
+                votes = t.setdefault("votes", {})
+                votes[o.get("name", "object")] = votes.get(o.get("name", "object"), 0.0) + o.get("conf", 0.0)
+                t["name"] = max(votes, key=votes.get)
                 for k in ("height_m", "conf"):
                     t[k] = (1 - a) * t.get(k, 0.0) + a * o.get(k, 0.0)
                 t["contact"], t["box"] = o.get("contact"), o.get("box")
@@ -407,7 +443,7 @@ def as_result_objects(tracks, now):
     """Detected objects in the same format as tag objects (so tables, map, A* use them)."""
     out = []
     for tid, t in tracks.items():
-        out.append({"id": tid, "name": "object", "frame": "world", "method": "detect",
+        out.append({"id": tid, "name": t.get("name", "object"), "frame": "world", "method": "detect",
                     "x": t["x"], "y": t["y"], "z": 0.0, "yaw_deg": 0.0, "tilt_deg": 0.0,
                     "reproj_px": 0.0, "conf": round(t["conf"], 2), "width_m": round(t["width_m"], 3),
                     "yaw_box_deg": round(math.degrees(t.get("angle", 0.0)), 1),

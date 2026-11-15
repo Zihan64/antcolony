@@ -1,0 +1,10 @@
+path: .
+train: images
+val: images
+test: images
+names:
+  0: bracket
+  1: knob
+  2: slotted_block
+  3: cup
+  4: holder
