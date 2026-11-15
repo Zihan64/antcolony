@@ -27,6 +27,36 @@ cd ~/antcolony-git
 
 ---
 
+## 0.5 换到 AntColony 网络（每次换 Wi-Fi 后都要做一次）
+
+**你的 Mac、两辆车、俯视摄像头那台电脑，必须连在同一个 Wi-Fi 上。** 换网之后每台设备的 IP 都会变，下面这一条命令会把所有地址更新好。
+
+1. 你的 Mac 和俯视摄像头那台电脑都连上 **AntColony** Wi-Fi。
+2. 打开 A、B 两辆车，**等 1–2 分钟**。
+3. 先启动 VLM（第 1 步的命令），再在你的 Mac 上运行：
+
+```bash
+python3 scripts/net.py
+```
+
+它会：
+- 找到你 Mac 的新 IP；
+- 扫一遍网络，按网卡硬件地址找到 A、B、C（不管路由器给它们分了什么地址）；
+- 把地址写进 `config.json`，后面所有命令都自动用新地址；
+- **把每辆车里的 VLM 地址改成你 Mac 的新 IP**（不改的话车连不上 VLM，抓取和找盒子都会失败），并重启车上的程序；
+- 最后打印一行**俯视摄像头那台电脑要用的命令**，类似：
+
+```
+python cam_control/run_tracker.py --antcolony 10.0.0.12
+```
+
+**把这一行原样抄下来，第 3 步要用。**
+
+- 显示 `car A: NOT FOUND`：那辆车没开机，或者连到了别的 Wi-Fi。等一会儿再运行一次 `python3 scripts/net.py`。
+- 想先看看它会改什么、不真的改：`python3 scripts/net.py --dry-run`
+
+---
+
 ## 1. 启动 VLM（你的 Mac，开一个窗口一直放着）
 
 ```bash
@@ -69,10 +99,10 @@ bash scripts/cars.sh status
 
 ## 3. 俯视摄像头（Junbo 的电脑）
 
-1. 启动 tracker（如果已经在运行就跳过）：
+1. 启动 tracker，**用第 0.5 步最后打印出来的那条命令**（里面是你 Mac 在 AntColony 网络上的 IP）。如果 tracker 已经在运行、但用的是旧 IP，先关掉再用新命令重新启动：
 
 ```bash
-python cam_control/run_tracker.py --antcolony 192.168.13.91
+python cam_control/run_tracker.py --antcolony <你 Mac 的新 IP>
 ```
 
 2. 在界面里按 **Start**。
@@ -171,7 +201,9 @@ bash scripts/cars.sh home
 | 看到什么 | 怎么办 |
 |---|---|
 | `no answer - run: bash scripts/cars.sh start` | 车上的程序没运行：`bash scripts/cars.sh start` |
-| `NOT ON THE NETWORK` | 车没开机或没连上 Wi-Fi：检查电源，等 1–2 分钟，或重启那辆车 |
+| `NOT ON THE NETWORK` | 车没开机或没连上 Wi-Fi：检查电源，等 1–2 分钟。刚换过 Wi-Fi 的话运行 `python3 scripts/net.py` |
+| `check` 里 `== tracker` 没有数据 | tracker 发数据的地址不对：用 `python3 scripts/net.py` 最后打印的命令重新启动 tracker |
+| 抓取时报 VLM 连不上 / 一直 "not found" | 车里的 VLM 地址是旧的：运行 `python3 scripts/net.py`；VLM 本身没开就运行 `bash scripts/vlm.sh` |
 | `battery below 7.0 V ... Charge, or --min-volt 0` | 充电。实在要跑：`python3 -m antcolony.clear --fence-m 0 --min-volt 6.5` |
 | `The VLM server is not running` | 另开窗口运行 `bash scripts/vlm.sh` |
 | `cannot listen on UDP 9201` | 另一个控制程序还开着（check、tagwatch、twin、show）：先把它关掉 |
