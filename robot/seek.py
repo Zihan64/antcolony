@@ -633,8 +633,13 @@ def white_blob(cv2, np, frame):
     {"off": cm it lies to the LEFT of the car's line (+) / right (-), "dist": cm from the arm base to
     its near edge (21 = at the bottom of the picture or nearer), "area": share of the picture, "box"}."""
     h, w = frame.shape[:2]
-    m = cv2.morphologyEx(white_mask(cv2, np, frame).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m = white_mask(cv2, np, frame).astype(np.uint8)
     m[int(0.86 * h):, int(0.2 * w): int(0.9 * w)] = 0     # what the gripper holds shows here, and a pale block passes for white
+    # join the pieces of one tray first: its rim lines, a shadow or an object lying in it cut the white into
+    # parts that are each too small (2026-11-14: three parts of 3.3 / 2.8 / 1.8 % of the picture, none counted;
+    # the seams are ~20 px wide: the smoothness test marks a band along every edge as rough)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     n, _, stats, cent = cv2.connectedComponentsWithStats(m, 8)
     best = None
     for i in range(1, n):
