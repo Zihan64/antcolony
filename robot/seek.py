@@ -153,7 +153,7 @@ def nearest_object(cv2, np, frame, name, yolo, conf=0.5, classes=None):
     want = next((k for k in HUES if k in low and k not in skip), None)
     best = None
     for x1, y1, x2, y2, s, n in yolo.infer(frame):
-        if s < 0.6 * conf or (classes and n.lower() not in classes):
+        if s < 0.6 * conf or (classes and n.lower() not in classes) or ("not " + n.lower()) in low:
             continue
         box = (int(x1), int(y1), int(x2), int(y2))
         col = thing_colour(cv2, np, frame, box)
@@ -346,6 +346,7 @@ class Eye:
         if self.detector in ("colour", "yolo"):
             t = self.nearest(frame, self.target)
             box, self.colour = (t["box"], t["colour"]) if t else (None, self.colour)
+            self.label = t.get("label") if t else getattr(self, "label", None)
         elif "white" in self.target.lower() and not white_things(self.cv2, self.np, frame, min_area=0.0003):
             # (0.0003 = ~90 px, not 0.001: a tray 2 m away in the level view is 90x32 px to the VLM but only
             # ~190 px of it pass the white mask - at 0.001 that photo was skipped and the tray not found.
@@ -382,7 +383,7 @@ class Eye:
         x1, y1, x2, y2 = box
         fx = (w / 2) / math.tan(math.radians(HFOV_DEG / 2))
         return {"bearing": self.pan_deg + math.degrees(math.atan((w / 2 - (x1 + x2) / 2) / fx)),
-                "wide": (x2 - x1) / w, "bottom": y2 / h, "colour": self.colour,
+                "wide": (x2 - x1) / w, "bottom": y2 / h, "colour": self.colour, "label": getattr(self, "label", None),
                 "dist": floor_cm(self.geom, y2, h) if self.geom and abs(self.pan_deg) < 1 else None}   # its foot on the floor, cm ahead
 
     def glance(self):
@@ -594,7 +595,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             bstop = args.get("bottom_stop")               # small target on the floor: close enough when its lower
             if bstop is not None and s["bottom"] >= float(bstop):      # edge is this far down the picture
                 return finish(True, f"close to the {target}: lower edge at {100 * s['bottom']:.0f} % of the picture, "
-                                    f"{looks} looks, drove {drove:.0f} cm; colour={s.get('colour')}")
+                                    f"{looks} looks, drove {drove:.0f} cm; colour={s.get('colour')} label={s.get('label')}")
             # The car must NEVER touch the target (user, 2026-11-14: it lunged at the tray). So this skill
             # only brings it to `arrive_cm` in front of the target, by the picture: the stretch driven
             # before the next look is at most half of what is left to that line, and `dock` does the rest.

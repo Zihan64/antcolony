@@ -361,6 +361,8 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 ok, detail, secs = link.skill("seek", dict(finder(a), target=target, bottom_stop=a.find_bottom, stop_cm=12), 390)
                 m = re.search(r"colour=(\w+)", detail)
                 colour = m[1] if ok and m and m[1] not in ("None", "coloured") else None
+                m = re.search(r"label=(\w+)", detail)
+                cls = m[1] if ok and m and m[1] != "None" else None
                 say(f"  {'ok' if ok else 'nothing'} - {detail}  ({secs:.0f} s)")
                 team.claims[name] = colour if ok else None
                 team.started.set()
@@ -390,7 +392,11 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 continue
             team.idle.discard(name)
             backed = False
-            label = f"{colour} {a.noun}" if colour else "any"
+            # what the grab looks for: the colour and the detector's class ("black cup" has no vivid colour, so
+            # "cup"); "any" only when nothing is known - in runs/clear_0100 car B aimed at a black cup and its
+            # grab, told "any", went for a small white ball beside it instead
+            noun = cls.replace("_", " ") if cls else a.noun
+            label = f"{colour} {noun}" if colour else (noun if cls else "any")
             say(f"my object: the {label}")
             held = False
             for i in range(1, a.tries + 1):
@@ -417,9 +423,11 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 say(f"gave up on the {label} ({a.tries} grabs) - leaving it to the other car, choosing again")
                 if colour:
                     skip.add(colour)
+                elif cls:
+                    skip.add(cls)                        # no colour to tell it by: leave that kind of thing alone
                 team.claims[name] = None
                 link.back_up(a.back_cm)
-                if not colour:
+                if not colour and not cls:
                     return delivered
                 continue
             if not deliver(label):
