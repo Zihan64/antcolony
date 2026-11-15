@@ -255,11 +255,15 @@ class Eye:
         from masterpi_lite import vlm
         self.cv2, self.np, self.vlm, self.hw, self.target, self.detector = cv2, np, vlm, hw, target, detector
         self.yolo, self.conf, self.classes = None, 0.5, None
+        self.min_width_cm = 15.0 if "tray" in str(target).lower() or "box" in str(target).lower() else 0.0
         if detector == "yolo":                            # the team's trained model, as installed for the grab (detector.py)
             try:
                 import detector as det
                 cfg = det.load_config(os.path.join(HERE, "detector.warehouse.json"))
                 self.conf = float(cfg.get("conf", 0.5))
+                deb = cfg.get("debris")                   # the whitelist: classes that are debris to clear
+                if isinstance(deb, list) and deb:
+                    self.classes = {str(c).lower() for c in deb}
                 cfg["conf"] = 0.6 * self.conf              # the network's own cut; nearest_object() decides above that
                 self.yolo = det.Yolo(cfg)
             except Exception as e:                        # no model on this car: colour, as before
@@ -280,6 +284,15 @@ class Eye:
             os.remove(f)
         for _ in range(20):                               # exposure / white balance
             self.cap.read()
+
+    def width_cm(self, box, w, h):
+        """Real width (cm) of a thing standing on the floor, from where its lower edge meets the floor
+        in this camera view and how wide it looks. None if the view's geometry does not say."""
+        d = floor_cm(self.geom, box[3], h)
+        if d is None:
+            return None
+        rng = math.hypot(d - self.geom[0], self.geom[1])        # camera -> that floor point
+        return (box[2] - box[0]) * (480.0 / h) / F_PX * rng
 
     def nearest(self, frame, name):
         """The nearest object to fetch: by the trained detector ("yolo") or by vivid colour ("colour")."""
@@ -340,7 +353,18 @@ class Eye:
             box = None                                    # nothing white in the photo: no need to ask the VLM (3 s saved per look)
             self.skipped += 1
         else:
-            det = self.vlm.detect(frame, self.target, verbose=False)
+            dets = self.vlm.detect_all(frame, self.target, verbose=False)
+            if self.min_width_cm and self.geom and abs(self.pan_deg) < 1:
+                keep = []
+                for d in dets:
+                    wcm = self.width_cm(d["box"], w, h)
+                    if wcm is None or wcm >= self.min_width_cm:
+                        keep.append(d)
+                    else:
+                        print(f"  seek: '{self.target}' answer only {wcm:.0f} cm wide on the floor - not it "
+                              f"(a corner marker cup?)", flush=True)
+                dets = keep
+            det = max(dets, key=lambda d: (d["box"][2] - d["box"][0]) * (d["box"][3] - d["box"][1])) if dets else None
             box = det["box"] if det else None
         self.box = box
         out = self.describe(box, w, h)
@@ -446,6 +470,7 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     timeout = float(args.get("timeout", 360))
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
+    lost_near = None
 
     def turn(deg):
         """Turn about `deg` (+ = left) with one timed pulse. -> seconds it lasted."""
@@ -502,6 +527,12 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                 return finish(s is not None, f"{target}: " + ("not in the picture" if s is None else
                               f"{abs(s['bearing']):.0f} deg {'left' if s['bearing'] > 0 else 'right'}, "
                               f"{100 * s['wide']:.0f} % of the width") + f"; sonar {d if d is None else round(d)} cm")
+            if s is None and lost_near is not None and not args.get("look_only"):
+                back = -0.5 * lost_near
+                say(f"look {looks}: lost the {target} right after turning - turning back {abs(back):.0f} deg")
+                turn(back)
+                lost_near = None
+                continue
             if s is None:
                 if scans >= max_scans:
                     if hasattr(eye, "next_view") and eye.next_view():
@@ -528,9 +559,13 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             d = hw.sonar_med()
             say(f"look {looks}: '{target}' {abs(b):.0f} deg {'left' if b > 0 else 'right'}, "
                 f"{100 * s['wide']:.0f} % wide, sonar {d if d is None else round(d)} cm")
+            lost_near = None
             if abs(b) > tol:
-                ask = 0.8 * b                             # aim a little short: an overshoot costs a whole look
+                near_now = s["wide"] >= 0.35
+                ask = (0.5 if near_now else 0.8) * b      # aim short; near, a big turn throws it out of the picture
                 last = (ask, turn(ask), b)
+                if near_now:
+                    lost_near = ask
                 continue
             if args.get("stop") == "aim":
                 return finish(True, f"facing the {target}: {abs(b):.0f} deg off, {100 * s['wide']:.0f} % wide, "

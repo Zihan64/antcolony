@@ -9,5 +9,9 @@
   "conf": 0.5,
   "_conf": "photos from the cars, 2026-11-14: real blocks 0.70-0.92, false boxes (the gripper's red tips, a carpet stripe) at most 0.45",
   "iou": 0.5,
-  "imgsz": 416
+  "imgsz": 416,
+  "debris": [
+    "block"
+  ],
+  "_debris": "WHITELIST of classes that count as debris to clear (seek detector 'yolo'). The team is building it; edit here and copy to the cars. Only vividly coloured, roughly square, fully visible things are taken (seek.nearest_object)."
 }

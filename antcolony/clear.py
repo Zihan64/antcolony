@@ -188,6 +188,51 @@ class Guide:
         y = car[1] - (math.sin(th) * ox + math.cos(th) * oy)
         return wrap(math.atan2(tray[1] - y, tray[0] - x) - th), math.hypot(tray[0] - x, tray[1] - y)
 
+    def tag_xy(self, name, secs=0.6):
+        """Mean position of this car's tag over `secs` (None if it is not seen)."""
+        pts, t_end = [], time.monotonic() + secs
+        while time.monotonic() < t_end:
+            p = ((self.snapshot() or {}).get("tags") or {}).get(str(self.tags[name]))
+            if p:
+                pts.append(p)
+            time.sleep(0.05)
+        if not pts:
+            return None
+        n = len(pts)
+        return sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n, pts[-1][2]
+
+    def check_heading(self, name, link, say, vx=0.05, secs=0.66):
+        """Drive a few cm straight ahead and see which way the tag REALLY moved: that is the car's
+        heading, whatever angle its tag was stuck on at (2026-11-15: car A's tag had been re-mounted
+        and the stored offset sent it 'to the tray' at a corner marker). -> True if measured."""
+        c = self.calib.setdefault(name, {})
+        p0 = self.tag_xy(name)
+        if p0 is None:
+            say("  heading check: my tag is not seen by the overhead camera - using the stored calibration")
+            return False
+        link.send({"type": "vel", "vx": vx, "vy": 0, "w": 0, "dur": min(0.4, secs), "guard": True})
+        time.sleep(min(0.4, secs))
+        if secs > 0.4:
+            link.send({"type": "vel", "vx": vx, "vy": 0, "w": 0, "dur": secs - 0.4, "guard": True})
+            time.sleep(secs - 0.4)
+        link.send({"type": "vel", "vx": 0, "vy": 0, "w": 0, "dur": 0.1})
+        time.sleep(0.8)
+        p1 = self.tag_xy(name)
+        if p1 is None:
+            say("  heading check: lost my tag - using the stored calibration")
+            return False
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        if math.hypot(dx, dy) < 0.04:
+            say(f"  heading check: moved only {100 * math.hypot(dx, dy):.0f} cm - using the stored calibration")
+            return False
+        off = wrap(math.atan2(dy, dx) - c.get("th_sign", 1) * p1[2])
+        old_off = c.get("th_off")
+        c["th_off"] = off
+        say(f"  heading check: drove {100 * math.hypot(dx, dy):.0f} cm; tag-to-heading offset {math.degrees(off):.0f} deg"
+            + (f" (stored {math.degrees(old_off):.0f} deg - {'corrected' if abs(math.degrees(wrap(off - old_off))) > 10 else 'agrees'})"
+               if old_off is not None else ""))
+        return True
+
     def face(self, name, link, say, w=0.3, rate_deg_s=250.0, dead=0.12, max_pulses=10):
         """Turn the car until it faces the tray. -> True if it does, False if the camera cannot say."""
         c = self.calib.get(name) or {}
@@ -231,19 +276,23 @@ def finder(a):
     """seek arguments that say how objects are found: the trained detector (what is a block is
     decided by its shape; colour only tells them apart) or, as before, any vivid colour."""
     if getattr(a, "finder", "colour") == "yolo":
-        return {"detector": "yolo", "classes": [c.strip() for c in a.classes.split(",") if c.strip()]}
+        f = {"detector": "yolo"}
+        if getattr(a, "classes", None):                  # else the whitelist "debris" in each car's detector.warehouse.json
+            f["classes"] = [c.strip() for c in a.classes.split(",") if c.strip()]
+        return f
     return {"detector": "colour"}
 
 
 class Team:
     def __init__(self):
         self.claims, self.choosing, self.tray, self.done = {}, threading.Lock(), threading.Lock(), {}
+        self.idle, self.finished, self.names = set(), set(), []
         self.started = threading.Event()                     # the first car has made its first choice
 
 
 def run_car(name, link, team, a, say, other=None, first=True, guide=None):
     """One car until nothing is left for it. -> number of objects it put in the tray."""
-    skip, delivered, misses = set(), 0, 0
+    skip, delivered, misses, backed = set(), 0, 0, False
     try:
         if not first:
             say("waiting for the first car to choose ...")
@@ -272,12 +321,27 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
             if getattr(link, "silent", False):
                 continue
             if not ok:
-                misses += 1
-                if "not found" in detail or misses >= 2:
-                    say(f"nothing more for me - done ({delivered} in the tray)")
+                if not backed:                           # whatever lies right in front of the bumper is below the
+                    backed = True                        # search view: back up and look again
+                    say(f"nothing in view - backing up {a.blind_cm:.0f} cm and looking again (right in front of me is out of view)")
+                    link.back_up(a.blind_cm)
+                    continue
+                team.idle.add(name)
+                others = [o for o in team.names if o != name]
+                if all(o in team.finished or o in team.idle for o in others):
+                    say(f"nothing more on the floor for me, and the other car has nothing either - done ({delivered} in the tray)")
                     return delivered
+                say(f"nothing for me right now - waiting {a.retry_s:.0f} s while the other car works, then looking again")
+                t_w = time.monotonic()
+                while time.monotonic() - t_w < a.retry_s and not link.out.is_set():
+                    if all(o in team.finished or o in team.idle for o in others):
+                        break
+                    time.sleep(0.5)
+                team.idle.discard(name)
+                backed = False
                 continue
-            misses = 0
+            team.idle.discard(name)
+            backed = False
             label = f"{colour} {a.noun}" if colour else "any"
             say(f"my object: the {label}")
             held = False
@@ -343,6 +407,8 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
             team.claims[name] = None
     finally:
         team.claims[name] = None
+        team.finished.add(name)
+        team.idle.discard(name)
         team.started.set()
 
 
@@ -362,10 +428,12 @@ def main():
     ap.add_argument("--away-cm", type=float, default=35)
     ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
+    ap.add_argument("--blind-cm", type=float, default=25, help="nothing in view: back up this far and look again")
+    ap.add_argument("--retry-s", type=float, default=20, help="nothing for me but the other car still works: look again after this long")
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
     ap.add_argument("--finder", choices=["yolo", "colour"], default="yolo",
                     help="how objects are found: the trained detector (default) or any vivid colour")
-    ap.add_argument("--classes", default="block", help="detector classes that count as objects to fetch")
+    ap.add_argument("--classes", help="detector classes that count as debris (default: the \"debris\" whitelist in each car's detector.warehouse.json)")
     ap.add_argument("--tray-tag", type=int, nargs="+", default=[54, 53],
                     help="AprilTag(s) on the tray, read by the overhead camera; the first one in view counts (54 = on top, 53 = on the front)")
     ap.add_argument("--no-guide", action="store_true", help="do not turn the cars to the tray by the overhead camera")
@@ -378,6 +446,7 @@ def main():
     except OSError as e:
         sys.exit(f"cannot listen on UDP {PORT_TELEM} ({e}) - is the coordinator, check, duo or solo still running?")
     t0, team, lock = time.monotonic(), Team(), threading.Lock()
+    team.names = [a.first, a.second]
 
     def say_to(name, msg):
         with lock:
@@ -423,6 +492,8 @@ def main():
         seen = any(str(i) in ((fence.newest() or {}).get("tags") or {}) for i in tray_tag)
         print(f"  guide: tray tag {tray_tag} " + ("is in the overhead camera's view - cars are turned to face the tray before they search"
                                                  if seen else "NOT in the overhead camera's view right now - cars search with their own cameras"))
+        for n in list(guide.tags):
+            guide.check_heading(n, links[n], lambda m, n=n: say_to(n, m))
         for n in list(guide.tags):
             w_ = guide.where(n)
             if w_:

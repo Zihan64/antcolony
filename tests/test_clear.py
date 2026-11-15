@@ -24,8 +24,8 @@ class World:
 class FakeCar:
     """sees: colour -> distance for this car. find takes the nearest allowed colour still on the floor."""
 
-    def __init__(self, name, world, dist, cannot_grab=(), leave_after=None):
-        self.name, self.w, self.dist, self.cannot, self.leave_after = name, world, dist, set(cannot_grab), leave_after
+    def __init__(self, name, world, dist, cannot_grab=(), leave_after=None, blind=()):
+        self.name, self.w, self.dist, self.cannot, self.leave_after, self.blind = name, world, dist, set(cannot_grab), leave_after, set(blind)
         self.out, self.hold, self.n, self.silent = threading.Event(), None, 0, False
 
     def skill(self, skill, args, timeout):
@@ -40,7 +40,8 @@ class FakeCar:
             if skill == "seek" and args.get("detector") in ("colour", "yolo"):
                 skip = [c for c in COLOURS if "not " + c in args["target"]]
                 want = next((c for c in COLOURS if c in args["target"] and c not in skip), None)
-                c = sorted((self.dist.get(o, 99), o) for o in set(self.w.objects) if o not in skip and (want is None or o == want))
+                c = sorted((self.dist.get(o, 99), o) for o in set(self.w.objects) if o not in skip and (want is None or o == want)
+                           and not (o in self.blind and not getattr(self, "backed_up", 0)))
                 if not c:
                     return False, "'object' not found in a full turn (16 looks)", 1
                 other = [v for k, v in self.w.working.items() if k != self.name]
@@ -75,6 +76,7 @@ class FakeCar:
 
     def back_up(self, cm, *a):
         with LOCK:
+            self.backed_up = getattr(self, "backed_up", 0) + 1
             if cm > 30:
                 self.w.at_tray.discard(self.name)
             else:
@@ -82,7 +84,7 @@ class FakeCar:
 
 
 ARGS = types.SimpleNamespace(noun="block", obj_height=3.0, tries=2, back_cm=18, find_bottom=0.4, target="white tray",
-                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80, finder="yolo", classes="block")
+                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80, finder="yolo", classes="block", blind_cm=25, retry_s=0.2)
 
 
 def play(objects, a_kw=None, b_kw=None, da=None, db=None):
@@ -121,6 +123,10 @@ w, r = play(["red", "blue", "green"], a_kw={"leave_after": 1})
 check("A leaves the arena: it stops, B clears the rest", r["A"] == 0 and "A" not in w.at_tray and len(w.tray) >= 2, (w.objects, r))
 w, r = play([])
 check("empty floor: both cars done at once", r == {"A": 0, "B": 0})
+w, r = play(["red", "green"], b_kw={"blind": ["green"]})
+check("B's block lies right in front of its bumper (out of view): B backs up, finds it", not w.objects and r["B"] >= 1, (w.objects, r))
+w, r = play(["red"], a_kw={"cannot_grab": []}, b_kw={})
+check("one object: the car without one waits, then both finish", not w.objects and r["A"] + r["B"] == 1, r)
 
 sq = [(0, 0), (1.5, 0), (1.3, 2.0), (0, 1.8)]
 check("fence geometry", clear.outside_m((0.7, 1.0), sq) == 0 and abs(clear.outside_m((0.7, -0.2), sq) - 0.2) < 1e-6
