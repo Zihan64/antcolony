@@ -157,9 +157,16 @@ def nearest_object(cv2, np, frame, name, yolo, conf=0.5, classes=None):
             continue
         box = (int(x1), int(y1), int(x2), int(y2))
         col = thing_colour(cv2, np, frame, box)
-        # A block 1.5 m away is ~25 px and scores 0.3-0.45; a grey wall panel scored 0.43 too. So below
-        # `conf` only a vividly coloured thing counts (photos 2026-11-15).
-        if s < conf and col is None:
+        # What the cars' own photos showed (2026-11-15, 26 real blocks): a block's box is about square
+        # (0.80-1.39 wide / high), never cut by the picture's edge when it is aimed at, and coloured; far
+        # ones (~25 px) score only 0.3-0.45. False "blocks": a wall panel at the edge (0.57, 0.50 wide /
+        # high, no colour), a grey panel (0.43, no colour), the gripper's red tips (0.45, 4 wide / high).
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        if not 0.55 <= bw / float(max(1, bh)) <= 1.8:
+            continue
+        if box[0] <= 2 or box[1] <= 2 or box[2] >= frame.shape[1] - 3:      # cut off: judge it when it is in view
+            continue
+        if col is None and s < max(conf, 0.75):          # uncoloured: only when the detector is very sure
             continue
         if (want and col != want) or (col in skip) or in_tray(cv2, np, frame, box):
             continue
@@ -252,7 +259,9 @@ class Eye:
             try:
                 import detector as det
                 cfg = det.load_config(os.path.join(HERE, "detector.warehouse.json"))
-                self.yolo, self.conf = det.Yolo(cfg), float(cfg.get("conf", 0.5))
+                self.conf = float(cfg.get("conf", 0.5))
+                cfg["conf"] = 0.6 * self.conf              # the network's own cut; nearest_object() decides above that
+                self.yolo = det.Yolo(cfg)
             except Exception as e:                        # no model on this car: colour, as before
                 print(f"  seek: YOLO not available ({e}) - finding objects by colour", flush=True)
                 self.detector = "colour"
