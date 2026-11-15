@@ -250,7 +250,10 @@ class Eye:
         if self.detector == "colour":
             t = nearest_thing(self.cv2, self.np, frame, self.target)
             box, self.colour = (t["box"], t["colour"]) if t else (None, self.colour)
-        elif "white" in self.target.lower() and not white_things(self.cv2, self.np, frame, min_area=0.001):
+        elif "white" in self.target.lower() and not white_things(self.cv2, self.np, frame, min_area=0.0003):
+            # (0.0003 = ~90 px, not 0.001: a tray 2 m away in the level view is 90x32 px to the VLM but only
+            # ~190 px of it pass the white mask - at 0.001 that photo was skipped and the tray not found.
+            # 58 saved photos: time saved 18 of 46 instead of 19, trays lost 0 instead of 1.)
             box = None                                    # nothing white in the photo: no need to ask the VLM (3 s saved per look)
             self.skipped += 1
         else:
