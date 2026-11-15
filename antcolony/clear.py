@@ -293,10 +293,51 @@ class Team:
 def run_car(name, link, team, a, say, other=None, first=True, guide=None):
     """One car until nothing is left for it. -> number of objects it put in the tray."""
     skip, delivered, misses, backed = set(), 0, 0, False
+
+    def deliver(label):
+        """Holding an object: to the tray with it. -> True if it is in the tray.
+        Both cars may look for the tray and drive towards it at the same time (user, 2026-11-14: the
+        tray is far away, a car holding its object must not stand idle while the other one searches).
+        Only the last stretch is one at a time: a car that arrives while the other is placing stops
+        --queue-cm short of the tray (room for the other to back away), then goes on when it is free."""
+        nonlocal delivered
+        sargs = dict(json.loads(a.seek), target=a.target)
+        if guide is not None:
+            guide.face(name, link, say)
+        queued = team.tray.locked()
+        say(f"to the tray - seek: '{a.target}'" + (f" (the other car is there: stopping {a.queue_cm:.0f} cm short)" if queued else "") + " ...")
+        ok, detail, secs = link.skill("seek", dict(sargs, arrive_cm=a.queue_cm) if queued else sargs, 390)
+        say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+        if not ok:
+            say(f"STOPPING: tray not found - I still hold the {label}")
+            return False
+        if team.tray.locked():
+            say("near the tray - waiting for the other car to finish there")
+        with team.tray:
+            if queued:                                   # the rest of the way, now that the tray is free
+                ok, detail, secs = link.skill("seek", sargs, 200)
+                say(f"  my turn - up to the tray: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if ok:
+                ok, detail, secs = link.skill("dock", {"drop": True, "z_cm": a.place_z}, 150)
+                say(f"  place: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say(f"STOPPING: could not deliver - I still hold the {label}")
+                return False
+            delivered += 1
+            team.done[name] = delivered
+            say(f"in the tray: {label}  (my {delivered}.)  backing away {a.away_cm:.0f} cm")
+            link.back_up(a.away_cm)
+        return True
+
     try:
         if not first:
             say("waiting for the first car to choose ...")
             team.started.wait(a.choose_s)
+        if (getattr(link, "telem", None) or {}).get("holding"):   # e.g. after a run stopped by hand: that one first
+            say("I am already holding something - taking it to the tray first")
+            if not deliver("object"):
+                return delivered
+            team.claims[name] = None
         while True:
             if link.out.is_set():
                 return delivered
@@ -374,36 +415,8 @@ def run_car(name, link, team, a, say, other=None, first=True, guide=None):
                 if not colour:
                     return delivered
                 continue
-            # Both cars may look for the tray and drive towards it at the same time (user, 2026-11-14: the
-            # tray is far away, a car holding its object must not stand idle while the other one searches).
-            # Only the last stretch is one at a time: a car that arrives while the other is placing stops
-            # --queue-cm short of the tray (room for the other to back away), then goes on when it is free.
-            sargs = dict(json.loads(a.seek), target=a.target)
-            if guide is not None:
-                guide.face(name, link, say)
-            queued = team.tray.locked()
-            say(f"to the tray - seek: '{a.target}'" + (f" (the other car is there: stopping {a.queue_cm:.0f} cm short)" if queued else "") + " ...")
-            ok, detail, secs = link.skill("seek", dict(sargs, arrive_cm=a.queue_cm) if queued else sargs, 390)
-            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
-            if not ok:
-                say(f"STOPPING: tray not found - I still hold the {label}")
+            if not deliver(label):
                 return delivered
-            if team.tray.locked():
-                say("near the tray - waiting for the other car to finish there")
-            with team.tray:
-                if queued:                                   # the rest of the way, now that the tray is free
-                    ok, detail, secs = link.skill("seek", sargs, 200)
-                    say(f"  my turn - up to the tray: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
-                if ok:
-                    ok, detail, secs = link.skill("dock", {"drop": True, "z_cm": a.place_z}, 150)
-                    say(f"  place: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
-                if not ok:
-                    say(f"STOPPING: could not deliver - I still hold the {label}")
-                    return delivered
-                delivered += 1
-                team.done[name] = delivered
-                say(f"in the tray: {label}  (my {delivered}.)  backing away {a.away_cm:.0f} cm")
-                link.back_up(a.away_cm)
             team.claims[name] = None
     finally:
         team.claims[name] = None

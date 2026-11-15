@@ -92,6 +92,7 @@ def play(objects, a_kw=None, b_kw=None, da=None, db=None):
     A = FakeCar("A", w, da or {}, **(a_kw or {}))
     B = FakeCar("B", w, db or {}, **(b_kw or {}))
     team, res = clear.Team(), {}
+    team.names = ["A", "B"]
     ths = [threading.Thread(target=lambda: res.__setitem__("A", clear.run_car("A", A, team, ARGS, lambda m: None, "B", True))),
            threading.Thread(target=lambda: res.__setitem__("B", clear.run_car("B", B, team, ARGS, lambda m: None, "A", False)))]
     [t.start() for t in ths]
@@ -123,6 +124,20 @@ w, r = play(["red", "blue", "green"], a_kw={"leave_after": 1})
 check("A leaves the arena: it stops, B clears the rest", r["A"] == 0 and "A" not in w.at_tray and len(w.tray) >= 2, (w.objects, r))
 w, r = play([])
 check("empty floor: both cars done at once", r == {"A": 0, "B": 0})
+
+class Holding(FakeCar):
+    def __init__(self, *k, **kw):
+        super().__init__(*k, **kw)
+        self.hold, self.telem = "red", {"holding": True}
+
+
+w = World(["green"]); A = Holding("A", w, {}); B = FakeCar("B", w, {})
+team, res = clear.Team(), {}
+team.names = ["A", "B"]
+ths = [threading.Thread(target=lambda: res.__setitem__("A", clear.run_car("A", A, team, ARGS, lambda m: None, "B", True))),
+       threading.Thread(target=lambda: res.__setitem__("B", clear.run_car("B", B, team, ARGS, lambda m: None, "A", False)))]
+[t.start() for t in ths]; [t.join(20) for t in ths]
+check("A starts holding a block (run stopped by hand): delivers it first, then the floor is cleared", "red" in w.tray and not w.objects, (w.tray, res))
 w, r = play(["red", "green"], b_kw={"blind": ["green"]})
 check("B's block lies right in front of its bumper (out of view): B backs up, finds it", not w.objects and r["B"] >= 1, (w.objects, r))
 w, r = play(["red"], a_kw={"cannot_grab": []}, b_kw={})
