@@ -1,0 +1,13 @@
+{
+  "_about": "Copy to detector.json next to vlm_grab.py to switch the car's object finder. No detector.json (or backend vlm) = the laptop VLM, exactly as before.",
+  "backend": "yolo",
+  "model": "models/blocks.onnx",
+  "_model": "yolo export model=best.pt format=onnx imgsz=416 opset=12  (class names travel inside the .onnx)",
+  "engine": "auto",
+  "_engine": "auto = ultralytics if installed, else onnxruntime if installed, else OpenCV's cv2.dnn (already on the cars)",
+  "targets": ["cube", "cylinder", "star"],
+  "_targets": "classes the car should pick up; anything else the model sees is ignored. Use \"all\" for every class.",
+  "conf": 0.35,
+  "iou": 0.5,
+  "imgsz": 416
+}

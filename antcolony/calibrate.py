@@ -43,7 +43,10 @@ def _tag(bus, tag, wait, n=5):
 
 
 def _run(bus, name, tag, cmd, secs, wait, samples=None, until_turn=None):
-    t, turned, last = 0.0, 0.0, None
+    """Send `cmd` for `secs` (or until the tag has turned `until_turn`). The robot is stopped at
+    once if the tracker loses the tag for more than 0.5 s: it must never keep moving unseen
+    (2026-11-14: car A left the arena during a 5 s turn nobody could see)."""
+    t, turned, last, unseen = 0.0, 0.0, None, 0.0
     while t < secs:
         bus.send(name, dict(cmd, type="vel", guard=False))
         wait(0.1)
@@ -51,11 +54,18 @@ def _run(bus, name, tag, cmd, secs, wait, samples=None, until_turn=None):
         s = bus.world()
         if s and tag in s.get("tags", {}):
             p = s["tags"][tag]
+            unseen = 0.0
             if samples is not None:
                 samples.append(p)
             if last is not None:
                 turned += wrap(p[2] - last)
             last = p[2]
+        else:
+            unseen += 0.1
+            if unseen > 0.5:
+                bus.send(name, dict(ZERO, type="vel"))
+                raise RuntimeError(f"tag {tag} lost while {name} was moving ({cmd}) - stopped after {t:.1f} s. "
+                                   f"Is the tag hidden at this heading, or did the robot leave the camera's view?")
         if until_turn and abs(turned) >= until_turn:
             break
     bus.send(name, dict(ZERO, type="vel"))
@@ -63,16 +73,17 @@ def _run(bus, name, tag, cmd, secs, wait, samples=None, until_turn=None):
     return turned
 
 
-def calibrate(bus, name, cfg, wait=time.sleep, u=0.6, log=print):
+def calibrate(bus, name, cfg, wait=time.sleep, u=0.6, log=print, fwd_s=1.5, strafe_s=1.2):
+    """fwd_s / strafe_s: how long each straight test move lasts (shorten them in a small arena)."""
     tag = str(cfg["robots"][name]["tag"])
     p0 = _tag(bus, tag, wait)
-    _run(bus, name, tag, {"vx": u, "vy": 0, "w": 0}, 1.5, wait)
+    _run(bus, name, tag, {"vx": u, "vy": 0, "w": 0}, fwd_s, wait)
     p1 = _tag(bus, tag, wait)
     rot = [p1]
     _run(bus, name, tag, {"vx": 0, "vy": 0, "w": u}, 5.0, wait, rot, until_turn=1.3)
     p2 = _tag(bus, tag, wait)
     rot.append(p2)
-    _run(bus, name, tag, {"vx": u, "vy": 0, "w": 0}, 1.5, wait)
+    _run(bus, name, tag, {"vx": u, "vy": 0, "w": 0}, fwd_s, wait)
     p3 = _tag(bus, tag, wait)
     d1, d2 = math.dist(p0[:2], p1[:2]), math.dist(p2[:2], p3[:2])
     if min(d1, d2) < 0.05:
@@ -100,14 +111,14 @@ def calibrate(bus, name, cfg, wait=time.sleep, u=0.6, log=print):
         return p[0] - (math.cos(th) * ox - math.sin(th) * oy), p[1] - (math.sin(th) * ox + math.cos(th) * oy), th
 
     c0 = centre(p3)
-    _run(bus, name, tag, {"vx": 0, "vy": u, "w": 0}, 1.2, wait)
+    _run(bus, name, tag, {"vx": 0, "vy": u, "w": 0}, strafe_s, wait)
     c1 = centre(_tag(bus, tag, wait))
     dx, dy = c1[0] - c0[0], c1[1] - c0[1]
     lat = -math.sin(c0[2]) * dx + math.cos(c0[2]) * dy
     strafe_ok = abs(lat) > 0.04 and abs(lat) > 0.6 * math.hypot(dx, dy)
     res = {"th_sign": s, "th_off": round(th_off, 4), "tag_off": [round(ox, 4), round(oy, 4)],
            "w_sign": w_sign, "vy_sign": (1 if lat >= 0 else -1) if strafe_ok else 1, "strafe_ok": strafe_ok,
-           "v_fwd_at_%.1f" % u: round((d1 + d2) / 3.0, 3)}
+           "v_fwd_at_%.1f" % u: round((d1 + d2) / (2.0 * fwd_s), 3)}
     log(f"{name}: {res}")
     return res
 
@@ -118,10 +129,13 @@ def main():
     ap.add_argument("--robot", required=True)
     ap.add_argument("--sim", action="store_true")
     ap.add_argument("--u", type=float, default=0.6, help="command level used for the test moves (0..1)")
+    ap.add_argument("--fwd-secs", type=float, default=1.5, help="length of the two forward test moves "
+                    "(an arm car covers ~30 cm per second on carpet: use 0.8 in a 1 m wide arena)")
+    ap.add_argument("--strafe-secs", type=float, default=1.2)
     a = ap.parse_args()
     from .coordinator import UdpBus
     cfg = load_config(a.config)
-    res = calibrate(UdpBus(cfg, a.sim), a.robot, cfg, u=a.u)
+    res = calibrate(UdpBus(cfg, a.sim), a.robot, cfg, u=a.u, fwd_s=a.fwd_secs, strafe_s=a.strafe_secs)
     d = os.path.join(os.path.dirname(os.path.abspath(a.config)), "calib")
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, a.robot + ".json"), "w", encoding="utf-8") as f:

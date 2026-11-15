@@ -1,0 +1,262 @@
+"""One arm car on its own - no tracker, no coordinator: grab what lies in front of it, carry it
+forward round anything tall in the way, put it down.
+
+    python -m antcolony.solo --robot B                        # grab -> carry 20 cm -> drop
+    python -m antcolony.solo --robot B --steps carry,drop     # it already holds something
+    python -m antcolony.solo --robot B --dist-cm 30 --side right
+    python -m antcolony.solo --robot B --steps status         # battery, sonar, holding - nothing moves
+    python -m antcolony.solo --robot B --steps grab,seek,drop --target "white box"
+                                                              # bring it to a landmark: find the white box with the
+                                                              # camera + VLM, drive up to it, put the object down there
+    python -m antcolony.solo --robot B --steps look --target "white box"    # one photo: where is it? (only the arm moves)
+    python -m antcolony.solo --robot B --collect 5 --obj-height 3 --target "white tray" --seek '{"img_tokens": 576, "view": "far"}'
+                                                              # clear the floor: the NEAREST object into the tray, then the
+                                                              # next, until none is left (objects found by their colour)
+    python -m antcolony.solo --robot B --labels "red block,red block" --obj-height 3 --steps find,grab,seek,dock,drop \\
+            --target "white tray" --seek '{"img_tokens": 576, "view": "far"}' --drop-y 22 --drop-z 10
+                                                              # two objects into the tray, one after the other; an object
+                                                              # that already lies in the tray is not fetched again
+
+The car's agent.py must be running, and (for grab) the VLM server. Put the object 25-40 cm in
+front of the car. A missed grab is tried again, at most --tries times (default 5); before each
+new try the car backs up --back-cm (default 18), because after a miss it stands right over the
+object and its camera no longer sees it (2026-11-14: without this, tries 2-5 looked past the
+block at the obstacle behind it). With something else in view, name the object (--label "red
+block") instead of the default "any". If the carry fails (blocked on both sides) the car keeps
+holding the object: put it down with `--steps drop` once there is room in front of it.
+
+What "round anything in the way" means is in robot/hw_masterpi.py, carry(): front sonar only,
+things about 10 cm tall or more, the side the car slides to must be free.
+"""
+import argparse
+import json
+import re
+import socket
+import sys
+import time
+
+from .common import load_config
+
+PORT_TELEM = 9201
+
+
+class Link:
+    """Skills to one robot's agent, telemetry back."""
+
+    def __init__(self, name, addr):
+        self.name, self.addr, self.ip = name, addr, socket.gethostbyname(addr[0])
+        self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.rx.bind(("0.0.0.0", PORT_TELEM))
+        self.rx.settimeout(0.1)
+        self.telem = None
+
+    def send(self, msg):
+        self.tx.sendto(json.dumps(msg).encode(), self.addr)
+
+    def pump(self, secs=0.1):
+        """Read telemetry for `secs`; -> the newest message from this robot (or None)."""
+        t_end = time.monotonic() + secs
+        while time.monotonic() < t_end:
+            try:
+                data, src = self.rx.recvfrom(65535)
+                m = json.loads(data.decode())
+            except (socket.timeout, ValueError):
+                continue
+            if isinstance(m, dict) and m.get("name") == self.name and src[0] == self.ip:     # not another car's
+                self.telem = m
+        return self.telem
+
+    def status(self, secs=1.5):
+        """A zero velocity command makes the agent send telemetry to us. -> telemetry or None."""
+        self.telem, t_end = None, time.monotonic() + secs
+        while time.monotonic() < t_end and (self.telem is None or self.telem.get("sonar_cm") is None):
+            self.send({"type": "vel", "vx": 0, "vy": 0, "w": 0, "dur": 0.1})
+            self.pump(0.2)
+        return self.telem
+
+    def back_up(self, cm, cm_per_pulse=5.7, secs=0.33):
+        """Straight back in short pulses (the way the car came is free). Counted, not measured."""
+        for _ in range(max(1, round(cm / cm_per_pulse))):
+            self.send({"type": "vel", "vx": -0.05, "vy": 0, "w": 0, "dur": secs})
+            self.pump(secs + 0.3)
+
+    def skill(self, name, args, timeout):
+        """Run one skill to its end. -> (ok, detail, seconds)."""
+        sid = int(time.time() * 10) % 2_000_000_000
+        msg, t0, last = {"type": "skill", "id": sid, "name": name, "args": args}, time.monotonic(), 0.0
+        while time.monotonic() - t0 < timeout:
+            if time.monotonic() - last > 0.5:            # the same id again is harmless; a lost datagram is not
+                self.send(msg)
+                last = time.monotonic()
+            t = self.pump(0.1)
+            s = (t or {}).get("skill") or {}
+            if s.get("id") == sid and s.get("state") in ("ok", "fail"):
+                return s["state"] == "ok", s.get("detail", ""), time.monotonic() - t0
+        self.send({"type": "skill", "id": sid + 1, "name": "stop", "args": {}})      # cancels it on the car
+        return False, f"no answer within {timeout:.0f} s", time.monotonic() - t0
+
+
+def show(t):
+    if t is None:
+        return "no telemetry - is agent.py running on the car, and is this the right address?"
+    b, s = t.get("batt_mv"), t.get("sonar_cm")
+    return (f"battery {b / 1000:.2f} V" if b else "battery ?") + ", " + \
+           (f"sonar {s:.0f} cm" if s is not None else "sonar ?") + f", holding: {'yes' if t.get('holding') else 'no'}"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default="config.json")
+    ap.add_argument("--robot", required=True)
+    ap.add_argument("--addr", help="the car's IP, if not the one in config.json")
+    ap.add_argument("--steps", default="grab,carry,drop", help="any of back, find, grab, carry, seek, look, dock, place, drop, home, status - in this order")
+    ap.add_argument("--label", default="any", help="what to grab (English), default: anything")
+    ap.add_argument("--labels", help='several objects, one after the other: "red block,red block" or "red block,blue block". '
+                                     "The steps run once per object; between two objects the car backs away from the tray")
+    ap.add_argument("--away-cm", type=float, default=25, help="how far to back away from the tray before the next object")
+    ap.add_argument("--collect", type=int, default=0, metavar="N",
+                    help="clear the floor: nearest object -> tray, again and again, at most N times, until a look all "
+                         "round finds none (steps: find, grab, seek, place; no need to name the objects)")
+    ap.add_argument("--grab-label", default="{colour} block", help="collect: what the grab calls an object found by its colour")
+    ap.add_argument("--place-z", type=float, default=10, help="place: fingertip height over the tray when letting go, cm")
+    ap.add_argument("--scan", choices=["left", "right"], help="find: which way to turn while searching (default left)")
+    ap.add_argument("--tries", type=int, default=5, help="grab attempts before giving up")
+    ap.add_argument("--back-cm", type=float, default=18, help="back up this far before each new grab try (0 = stay)")
+    ap.add_argument("--obj-height", type=float, help="cm, if the object is a block of known height (skips the shape guess)")
+    ap.add_argument("--dist-cm", type=float, default=20, help="how far to carry it forward")
+    ap.add_argument("--side", choices=["left", "right"], help="which way to try first round an obstacle (default left)")
+    ap.add_argument("--carry", default="{}", help='more carry settings as JSON, e.g. \'{"margin_cm": 18, "cm_s": 15}\'')
+    ap.add_argument("--target", default="white box", help="seek / look: what to drive up to (English)")
+    ap.add_argument("--stop-cm", type=float, default=22, help="seek: stop when the front sonar reads this")
+    ap.add_argument("--seek", default="{}", help="more seek settings as JSON")
+    ap.add_argument("--find-bottom", type=float, default=0.40,
+                    help="find: drive towards the object until its lower edge is this far down the picture (0-1)")
+    ap.add_argument("--dock", default="{}", help='dock settings as JSON, e.g. \'{"edge_cm": 9}\'')
+    ap.add_argument("--drop-y", type=float, default=16, help="cm ahead of the arm base (22 after `dock`: ~9 cm inside the tray)")
+    ap.add_argument("--drop-z", type=float, default=4, help="cm above the floor")
+    a = ap.parse_args()
+    cfg = load_config(a.config)
+    addr = (a.addr, 9200) if a.addr else tuple(cfg["robots"][a.robot]["addr"])
+    link, name = Link(a.robot, addr), a.robot
+    say = lambda msg: print(f"[{name}] {msg}", flush=True)
+
+    t = link.status()
+    say(show(t))
+    if t is None:
+        sys.exit(1)
+    labels = [x.strip() for x in a.labels.split(",") if x.strip()] if a.labels else [a.label]
+    steps = [s.strip() for s in a.steps.split(",") if s.strip()]
+    delivered = 0
+    if a.collect:                                # nearest object -> tray, again and again; the object's name comes from find
+        labels, steps = ["object"] * a.collect, ["find", "grab", "seek", "place"]
+        if a.target == "white box":
+            a.target = "white tray"              # the one delivery tray (the VLM knows it by this name)
+        if a.seek == "{}":
+            a.seek = '{"img_tokens": 576, "view": "far"}'
+    plan = []                                    # several objects: the same steps for each, backing away from the tray in between
+    for k, label in enumerate(labels):
+        plan += [(k, label, st) for st in steps]
+        if k < len(labels) - 1:
+            plan.append((k, label, "away"))
+    shown = -1
+    for k, label, step in plan:
+        if len(labels) > 1 and k != shown and step != "away":
+            say(f"=== object {k + 1}: the nearest one" if a.collect else f"=== object {k + 1} of {len(labels)}: {label}")
+            shown = k
+        if not a.collect or step == "find":
+            a.label = label
+        if step == "status":
+            continue
+        if step == "away":                       # the car stands ~7 cm from the rim: straight back before it may turn
+            say(f"backing away from the tray, {a.away_cm:.0f} cm")
+            link.back_up(a.away_cm)
+            continue
+        if step == "grab":
+            gargs, backed = {"label": a.label}, 0.0
+            if a.obj_height:
+                gargs["obj_height"] = a.obj_height
+            for i in range(1, a.tries + 1):
+                say(f"grab, try {i} of {a.tries} ...")
+                ok, detail, secs = link.skill("grab", gargs, 150)
+                say(f"  {'ok' if ok else 'missed'} - {detail}  ({secs:.0f} s)")
+                if ok:
+                    break
+                stood = "nothing moved" in detail or "not found" in detail      # the car did not drive up to anything
+                if i < a.tries and a.back_cm > 0 and (not stood or backed < 2 * a.back_cm):
+                    say(f"  backing up {a.back_cm:.0f} cm to see the object again")
+                    link.back_up(a.back_cm)
+                    backed = backed + a.back_cm if stood else a.back_cm
+            else:
+                say(f"GIVES UP after {a.tries} tries")
+                sys.exit(2)
+            say("with the object in the gripper: " + show(link.status()))
+        elif step == "carry":
+            args = dict(json.loads(a.carry), dist_cm=a.dist_cm)
+            if a.side:
+                args["side"] = a.side
+            say(f"carry {a.dist_cm:.0f} cm forward ...")
+            ok, detail, secs = link.skill("carry", args, float(args.get("timeout", 60)) + 30)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say("still holding the object - when there is room in front: --steps drop")
+                sys.exit(3)
+        elif step == "find":                     # turn to the object to grab (found by its colour) and drive up close
+            say(f"find: '{a.label}' ...")
+            fargs = {"target": a.label, "detector": "colour", "bottom_stop": a.find_bottom, "stop_cm": 12}
+            if a.scan:
+                fargs["scan"] = a.scan
+            ok, detail, secs = link.skill("seek", fargs, 390)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok and a.collect and "not found" in detail:
+                say(f"no more objects in sight - {delivered} delivered")
+                return
+            if not ok:
+                sys.exit(6)
+            if a.collect:                            # found by its colour: that is its name for the grab
+                m = re.search(r"colour=([a-z]+)", detail)
+                a.label = a.grab_label.format(colour=m.group(1) if m and m.group(1) != "coloured" else "").strip()
+                say(f"  -> grabbing it as '{a.label}'")
+        elif step == "place":                    # up to the tray and in: the arm reaches to a spot inside it
+            say("place: up to the tray and in ...")
+            ok, detail, secs = link.skill("dock", dict(json.loads(a.dock), drop=True, z_cm=a.place_z), 150)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say("not placed - the car keeps what it holds")
+                sys.exit(7)
+            delivered += 1
+        elif step == "dock":
+            say("dock: creeping up to the tray's edge ...")
+            ok, detail, secs = link.skill("dock", json.loads(a.dock), 120)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say("not docked - the car keeps what it holds")
+                sys.exit(7)
+        elif step in ("seek", "look"):
+            args = dict(json.loads(a.seek), target=a.target, stop_cm=a.stop_cm, look_only=step == "look")
+            say(f"{'looking for' if step == 'look' else 'seek:'} '{a.target}' ...")
+            ok, detail, secs = link.skill("seek", args, float(args.get("timeout", 360)) + 30)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok and step == "seek":
+                say("did not get there - the car keeps what it holds (--steps drop to put it down)")
+                sys.exit(5)
+        elif step == "drop":
+            say("drop ...")
+            ok, detail, secs = link.skill("drop", {"y_cm": a.drop_y, "z_cm": a.drop_z}, 20)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                sys.exit(4)
+        elif step == "back":
+            say(f"backing up {a.back_cm:.0f} cm")
+            link.back_up(a.back_cm)
+        elif step == "home":
+            ok, detail, secs = link.skill("home", {}, 15)
+            say(f"home: {'ok' if ok else 'FAILED'} - {detail}")
+        else:
+            sys.exit(f"unknown step {step!r}")
+    say(f"done - {delivered} delivered" if a.collect else "done")
+
+
+if __name__ == "__main__":
+    main()

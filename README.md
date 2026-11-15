@@ -47,12 +47,14 @@ python -m antcolony.coordinator --sim    # terminal 2: coordinator; open http://
 ## Bringing up the real robots
 
 1. **Host**: `pip install numpy`, then set the arena bounds, bin, tag IDs, and the robots' IPs in `config.json` to the real values.
-   Robot IPs change with the network, so they live in named profiles under `networks` in `config.json`. `"network"` picks the active one (currently `hyatt`); you can also override it per run with `ANTCOLONY_NET=school python -m antcolony.coordinator`. A `null` IP falls back to that robot's own `addr`. The coordinator prints the active profile at startup.
+   Robot IPs change with the network, so they live in named profiles under `networks` in `config.json`. `"network"` picks the active one (currently `hyatt`, the hotel; **at the competition switch to `lan`**); you can also override it per run with `ANTCOLONY_NET=school python -m antcolony.coordinator`. A `null` IP falls back to that robot's own `addr`. The coordinator prints the active profile at startup.
+   When the network changes, the VLM computer's IP changes too: update `url` in `masterpi_lite/masterpi_lite/vlm_server.json` on both arm cars and the tracker's `--antcolony <coordinator IP>`.
 
    | Profile | A | B | C |
    | --- | --- | --- | --- |
-   | `hyatt` | 172.20.1.113 | 172.20.1.120 | 172.20.1.136 |
+   | `hyatt` | 192.168.13.106 | 192.168.13.49 | 192.168.13.110 |
    | `school` | not set | not set | not set |
+   | `lan` (**use this at the competition**: the team's own AntColony router) | 192.168.0.63 | 192.168.0.64 | not set |
 2. **Tracker**: add the 5 lines described at the top of `tracker_bridge/world_pub.py` to publish tags and objects to UDP 9100. Requirements are in the next section.
 3. **Arm robots A, B**: copy `robot/agent.py` and `robot/hw_masterpi.py` into `~/Desktop/"Master Pi5"/masterpi_lite/` (same level as `vlm_grab.py`) and run
    `python3 agent.py --name A --min-duty 30` (30 on carpet, 18 on smooth floors). For **dozer C**, see the separate section below.
@@ -83,9 +85,10 @@ The coordinator can run on either computer; on the camera computer the tag data 
 1. **Network.** All four devices on the same LAN. Put the cars' IPs into the `lan` profile under `networks` in `config.json` and set `"network": "lan"` (or run with `ANTCOLONY_NET=lan`).
 2. **VLM (computer 1).** `llama-server` with `--host 0.0.0.0 --port 8090 -np 1` (see "Arm robots' VLM"). On **each car** set `masterpi_lite/masterpi_lite/vlm_server.json` to `{"url": "http://<computer 1's new IP>:8090", "img_tokens": 256}` — the old hotel address no longer works on the new LAN.
 3. **Tags.** Put the tag id that is on each car into `robots.A.tag` / `robots.B.tag` in `config.json` (defaults 10 and 11). In the tracker's `arena.json` give each car's tag its height so it is located precisely: `"objects": {"10": {"name": "car A", "height_m": 0.17}, "11": {"name": "car B", "height_m": 0.17}}` (tag face above the floor, measure it).
-4. **Tracker (computer 2).** `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
+4. **Tracker (computer 2).** Once per machine: `python -m pip install -r cam_control/requirements.txt` (add `ultralytics` for object detection). Then `python cam_control/run_tracker.py --antcolony 127.0.0.1` (plus your usual camera options; `--antcolony <IP>` = the computer that runs the coordinator), press Start, set up the arena with its four corner tags, switch object detection on. The blocks must show up as objects. `run_tracker.py` attaches the publisher from outside, so it works with any version of the GUI and never conflicts with edits to it; the console prints `AntColony: attached ...` and a status line every 10 s.
 5. **Cars.** Copy the current `robot/agent.py` and `robot/hw_masterpi.py` next to `vlm_grab.py`, then on each car: `python3 agent.py --name A --min-duty 30` (`--name B` on B; 30 on carpet).
-6. **Drive calibration**, one car at a time, alone in the middle with ~50 cm free: `python -m antcolony.calibrate --robot A --u 0.3` (then B). The default `--u 0.6` makes larger test moves than a 1.5 × 1.2 m arena may allow; start with 0.3 and raise it if the tool says the car barely moved (not tried on the real cars yet). Saves `calib/A.json`.
+6. **Drive calibration**, one car at a time with ~50 cm free around it: `python -m antcolony.calibrate --robot A --u 0.3 --fwd-secs 0.8 --strafe-secs 0.8` (then B). The arm cars cover about 30 cm per second on carpet, so the default 1.5 s moves are too long for a 1 m wide arena. The car is stopped at once if the tracker loses its tag. Saves `calib/A.json`. Done for A and B on 2026-11-14 (tag 8.5 cm behind the turning centre on both).
+   If a car does something odd, look at one short move at a time first: `python -m antcolony.jog --robot A --w 0.3 --secs 0.4` (also `--vx`, `--vy`) prints how far the tag moved and turned.
 7. **Check.** `python -m antcolony.check --overlay profiles/edge2.json --vlm http://<computer 1>:8090` — nothing moves; it lists what is missing (tracker data, a car's tag, calibration, agent, VLM, objects too big or already at the edge).
 
 ### Run
@@ -101,6 +104,13 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 - Each car parks 30 cm in front of its block, `vlm_grab.py approach` does the rest, the car carries the block to the nearest free place at the boundary, puts it down 8 cm inside it (`deliver.inset`), backs off and returns to where it started. The cars stay off the paper floor tags.
 - The log shows `missed #3: ... (try 2 of 5) - trying again`, `GIVES UP on #3 after 5 missed grabs`, and at the end `FINISHED in 94 s - A: 1 delivered, B: gave up`.
 - If the tracker does not detect the small blocks reliably, type their positions (tracker frame, metres; hover over them in the tracker GUI): `--objects 0.50,0.40 1.00,0.70`. The tracker's own detections are then ignored; the cars' cameras still do the final approach.
+
+### What the first hours with the real tracker and cars showed (2026-11-14)
+
+- **The camera looks at a slant** (1.84 m up, beside the arena). Parts of a 35 cm tall car land on the floor up to 40–60 cm behind it as seen from the camera, and the tracker reported them as objects (18 "objects" for two cars and two blocks). The tracker now sends the camera position and the coordinator ignores detections in each car's shadow (`World.hidden`). Consequences: a block in a car's shadow is invisible until the car moves, so **park the cars on the side away from the camera** and do not put blocks right behind them.
+- **The arm must rest stretched forward.** `arm.home()` folds it back over the chassis, above the tag; the tag was then visible only while the camera was behind the car. `hw_masterpi.py` now uses the carry pose as its rest pose.
+- Tags: A = 33, B = 36 (in `config.json`). Both are located with the plane method at their height (11–13 cm).
+- Speeds: about 0.30 m/s at command 0.3; turning 70–125°/s at the smallest turn command. `profiles/edge2.json` caps the commands (`control.u_max` 0.35, `control.w_max` 0.5).
 
 ### Known gaps (found in the review, not fixable in software alone)
 
@@ -174,6 +184,45 @@ python cam_control/camera_check.py latency --camera Insta360  # glass-to-glass d
 pip install bleak && python cam_control/camera_check.py ble   # Bluetooth: find, connect, list services, measure throughput
 ```
 
+## Onboard vision, with AprilTag as a helper (2026-11-14)
+
+Goal: the cars find and grab objects with their own cameras; the overhead tracker (AprilTags) helps when it can see them, and the system no longer stops when it cannot.
+
+**1. Switchable object finder on the car** (`robot/detector.py`, `robot/grab_runner.py`). `hw_masterpi.py` now starts `grab_runner.py`, which is `vlm_grab.py` unchanged except that "find the objects in this photo" comes from `detector.json`: the laptop VLM (default, also when there is no `detector.json`) or a local YOLO model on the car (see `robot/detector.example.json`). The YOLO runs with ultralytics, onnxruntime or OpenCV's `cv2.dnn` (already on the cars, nothing to install). Tested: the real `vlm_grab.py find --dry-run` on a photo with both backends; the three engines give identical boxes; the module runs on the cars' OpenCV 4.10. Not tested yet: a trained model, speed on the Pi.
+
+To use your own YOLO: train, `yolo export model=best.pt format=onnx imgsz=416 opset=12`, copy the `.onnx` to `models/` next to `vlm_grab.py`, write `detector.json`, check with `python3 detector.py --camera` (nothing moves). Photos for training are best taken with the cars' own camera, on the arena carpet, from the car's height.
+
+**2. Tags seen by the car itself** (`robot/landmarks.py`): finds tag36h11 tags in the car's camera image and gives distance and direction, e.g. a tag on the bin, so a car can find the bin without the tracker. `python3 landmarks.py watch` (nothing moves). On synthetic photos: distance within 2 %, direction within 0.2 deg from 0.4 to 2.5 m. A 10 cm tag is ~24 px at 2 m and was missed once there: **use a 15–20 cm tag on the bin**. Run `calib-fx` once per car (focal length; until then it is guessed). Not yet used by any driving code.
+
+**3. Coordinator: a hidden tag no longer stops a car** (`lost` and `pick.blind_grab_m` in `profiles/edge2.json`). Cause found on the real cars: the tag on the rear deck is hidden by the arm column whenever the car faces the slanted camera. Now
+- the car lines up to grab and puts things down facing away from the camera where it can, and drives towards the camera **in reverse** (`lost.cone_deg` 40);
+- a car that is unseen (also one put down facing the camera at the start) turns on the spot in short pulses until its tag shows again (at most one turn);
+- a car that loses its tag on the last 60 cm to its object hands over to its own camera (`vlm_grab approach`).
+
+In the simulator with tags hidden within ±35 deg of facing the camera: without this 1 of 8 layouts finished, with it 8 of 8, as fast as with no hiding (`tests/test_edge.py` check 4). Raising the tags above the arm (12–15 cm) is still the better fix; this keeps the cars going until then.
+
+## One car alone: grab, carry round obstacles, put down (2026-11-14)
+
+No tracker and no coordinator: `python -m antcolony.solo --robot B` sends one arm car three skills in a row — `grab` (what lies 25–40 cm in front of it; a miss is tried again, at most `--tries` 5), `carry` (20 cm forward, `--dist-cm`), `drop`. `--steps carry,drop` if it already holds something, `--steps status` only reads battery and sonar (nothing moves). Needs `agent.py` on the car and, for the grab, the VLM server.
+
+`carry` is a skill in `robot/hw_masterpi.py`. The car drives in short pulses (0.33 s ≈ 5.7 cm on carpet at duty 30) and reads its front sonar while standing between them. Something nearer than the rest of the way + 15 cm (`margin_cm`: the gripper and the object stick out in front of the sonar) counts as in the way: the car slides sideways until the sonar is clear, about 10 cm more for its own half width, then drives on. If one side does not clear within 30 cm of the starting line it comes back and tries the other; if both fail it returns to the line and reports failure, still holding the object.
+
+Limits, all from the hardware: the sonar only sees things about 10 cm tall or more, straight ahead (a second block lying on the floor is not seen); there is no sensor to the sides, so the side the car slides to must be free; the 20 cm are counted from drive pulses, not measured (expect ±20 %; `cm_s` / `side_cm_s` in the skill arguments set the assumed speeds, `--carry '{"cm_s": 15}'`).
+
+**Find the block, find the tray, put it in** (same evening, car B): `--steps find,grab` then `--steps seek,dock,drop --target "white tray" --seek '{"img_tokens": 576, "view": "far"}' --drop-y 21 --drop-z 10`.
+- `find` = `seek` with `{"detector": "colour", "bottom_stop": 0.4}`: a 3 cm block across the room is ~30 px and the VLM does not see it at any picture size, but a vivid colour blob is found at once (no false hit in 19 saved photos). The car turns to it and drives until its lower edge is 40 % down the picture; `grab` (VLM) takes over from there.
+- `seek` with `"view": "far"`: a nearly level camera view for the search (the lower view shows only ~1.5 m of floor; a tray 2 m away was never in it), and the lower view for a second turn if the first shows nothing (a tray right in front of the car is below the level view). Blurred photos are retaken (Laplacian variance < 200), scan steps are ~20° nominal (car B really turns ~1.5x the first guess). "white tray" is the name the VLM recognises for the shallow white box; "white basket / box / bin / container" all returned nothing on the same photo.
+- Arrival at a low tray is decided by the picture alone (box ≥ 75 % wide, or lower edge at the bottom and ≥ 40 % wide): the sonar does not see a 5 cm rim and may read the furniture behind it.
+- `dock`: arm in vlm_grab's calibrated LOOK pose, the nearest carpet-to-white edge straight ahead is measured in cm (white = brighter than the carpet rows, not coloured, and smooth - the light stripes of the patterned carpet are as bright as white in shadow), the car creeps until it is 12 cm in front of the arm base; `drop` at y 21, z 10 then lets go ~9 cm inside the rim.
+- Result: block found by colour 27° to the left and grabbed on the first try; tray found, docked at 13 cm, block in the tray (photo). The tray search took four attempts and 3.5 min on the last one (38 looks): this part is slow and still fragile.
+- Second layout, one command (`--steps find,grab,seek,dock,drop`): find 17 s, grab held on the first try (40 s), tray found on look 14 and reached (99 s) - then `dock` failed: the car had arrived 7° off, crept past the tray's corner and saw only carpet on its centre line. `dock` now uses a per-pixel white mask over the whole look-down picture, slides sideways (mecanum) when the tray is off to one side, and checks that it stays white for 10 cm beyond the edge. Resumed from where the car stood: three slides to the right, edge at 10.6 cm, block in the tray (photo). The whole chain has not yet passed in one go with this fix.
+
+`tests/test_carry.py` runs the skill on a fake floor (16 cases: boxes ahead, a box reaching far to one side, a wall right across, real speeds 30 % off, narrow / wide sonar beam, no sonar, cancel): the car never touches an obstacle. On the real car (B) the plain 20 cm carry has run; the sidestep has not been triggered there yet.
+
+**Bring it to a landmark** (`robot/seek.py`, skill `seek`): `python -m antcolony.solo --robot B --steps grab,seek,drop --label "red block" --obj-height 3 --target "white box"`. The arm is raised so the camera looks out across the floor (the gripper is not touched), the laptop VLM boxes the target in one photo (~3 s); not in the picture → the car turns left about 30° and looks again (at most one full turn); off centre → a short turn towards it (the turn rate, and its sign, are learned from how far the target moved in the picture); centred → forward in pulses, sonar read before each one, until the sonar reads `--stop-cm` 22 or less, looking again every 30 cm. If the sonar never sees the target the picture stops the car (target fills most of the width). `--steps look --target "white box"` takes one photo and says where the target is (only the arm moves). Every photo is kept on the car as `seek_01.jpg` ….
+
+First real run, car B, 2026-11-14 evening: block grabbed on the first try, white box (an ordinary product carton, about 1.2 m away, behind the car) found on look 9, reached at sonar 19 cm after 60 cm of driving, block put down a few cm in front of it; 49 s for the search and drive. What it showed: (1) the VLM took a printed AprilTag sheet lying on the floor for the "white box" twice and the car drove 30 cm towards it before the next look corrected it — the sonar stop is what keeps a flat false target from counting as "reached"; (2) vlm_grab's far driving view only shows about 1 m of floor, a landmark needs the raised view; (3) one photo taken right after a turn was blurred (longer settle time since). `tests/test_seek.py`: 14 cases on a fake floor (box ahead / to the side / behind, turn rate half or double the guess, turn direction reversed, sonar blind, VLM misses, no box at all).
+
 ## Current robot deployment (2026-11-14)
 
 | Robot | Host | User | Code folder | Bench test |
@@ -183,7 +232,7 @@ pip install bleak && python cam_control/camera_check.py ble   # Bluetooth: find,
 | C (dozer) | WhiteSky (172.20.1.136) | szk13579 | `~/antcolony/` | wheels, drive, sonar stop (35 cm) tested on the floor; camera (Camera Module 3 Wide) and pan/tilt servos (PCA9685 ch 8/9) work; blade not mounted yet |
 
 Both arm robots now run the same `vlm_grab.py` + `masterpi_lite` code (copied from B to A). Per-robot files are **not** shared and must stay on each robot: `masterpi_lite/motor_directions.json`, `masterpi_lite/arm_directions.json`, `Deviation.yaml`. A's wiring needs two options that B's code did not have, so A's copy carries two small patches ported from A's old code (`~/MasterPi/MasterPi/`, kept as a fallback):
-- `chassis.py`: `mirror_lr` in `motor_directions.json` (left/right motor wiring swapped);
+- `chassis.py`: `wheels` in `motor_directions.json` = which board port drives which wheel: `{"FL": 3, "FR": 1, "RL": 4, "RR": 2}` (2026-11-14, backups `*.before_wheelmap`). On A, ports 1 and 3 are the right and left wheel of ONE axle, not the two wheels of one side. The earlier `mirror_lr` patch did not cover that: "rotate" drove the front axle forward and the rear axle back, so the car crept forward or back instead of turning (measured with the overhead tracker: 0.7 s "turn right" = 8 cm backwards, 2° of turn; after the fix 0.4 s = 37–50° on the spot). Driving straight never showed it because all four wheels turn the same way;
 - `arm.py`: `ports` in `arm_directions.json` (servo 3 is plugged into port 2).
 
 The originals are saved next to them as `chassis.py.orig` / `arm.py.orig`. A currently uses B's `vision_calib.json`; recalibrate A's camera if its grasps are off.
@@ -298,6 +347,12 @@ antcolony/triage.py       decides grippability by size; optionally asks a VLM as
 antcolony/dashboard.py    dashboard
 antcolony/calibrate.py    single-robot drive calibration
 antcolony/check.py        pre-flight check: what is missing before a real run (nothing moves)
+antcolony/jog.py          one short move of one robot, measured by the tracker
+antcolony/solo.py         one arm car alone: grab -> carry round obstacles / seek a landmark -> drop (no tracker)
+robot/detector.py         car: object finder, laptop VLM or local YOLO (detector.json)
+robot/grab_runner.py      car: vlm_grab.py with that object finder
+robot/landmarks.py        car: AprilTags in the car's own camera (distance, direction)
+robot/seek.py             car: skills 'seek' (find a named thing with camera + VLM or by colour, drive up to it) and 'dock' (creep up to a low white tray)
 profiles/edge2.json       overlay for the two-car "one block each to the arena edge" test
 cam_control/              overhead tracker (AprilTag floor frame, trained YOLO26 objects in models/, training/); antcolony_pub.py sends it to the coordinator
 cam_control/multi_camera.py   extra cameras: per-camera floor pose against the pivots, cross-calibration from the main camera, fused tag poses, fallback
@@ -309,6 +364,8 @@ robot/hw_freenove.py      dozer: Freenove FNK0043, direct I2C; built-in wheel di
 tracker_bridge/world_pub.py  tracker → coordinator publisher
 tests/test_sim.py         end-to-end test
 tests/test_edge.py        end-to-end test of the edge task (one block each, 5 tries, give up)
+tests/test_carry.py       the carry skill (sonar obstacle avoidance) on a fake floor
+tests/test_seek.py        the seek skill (find a landmark, turn, drive up) on a fake floor
 ```
 
 ## Messages (each is one JSON object over UDP)
