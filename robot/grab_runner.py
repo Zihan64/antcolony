@@ -12,7 +12,7 @@ Per-car defaults: grab_defaults.json next to this file holds options that THIS c
 e.g. {"--y-offset": 1.8}. Each one is added unless the command line gives that option itself.
 (vlm_grab.py's arm reach table was measured on car B; car A's arm stops about 1.8 cm short of
 it, 2026-11-14 - without the offset its jaws close on air between the car and the block.)
-"_colour_track": false in that file switches off colour_track() below.
+"_colour_track": true in that file switches on colour_track() below (off by default: see main()).
 """
 import json
 import os
@@ -112,7 +112,12 @@ def main():
     import detector
     detector.install()                       # masterpi_lite.vlm.detect_all -> the configured backend
     from masterpi_lite import vlm
-    if _defaults().get("_colour_track", True):
+    # OFF unless grab_defaults.json says "_colour_track": true. On the real cars (2026-11-14, two-car
+    # run) it broke three grabs in a row: vlm_grab's approach changes the camera view (far -> near),
+    # and in the near view the colour finder answered with another blue patch (the car's own blue
+    # light on the carpet). vlm_grab rejected it and gave up the approach. A box size or position
+    # from one view says nothing about the next view, so the check in colour_track() cannot catch it.
+    if _defaults().get("_colour_track", False):
         colour_track(vlm)
     import vlm_grab                          # its `from masterpi_lite import vlm` sees the swapped function
     sys.argv = [os.path.join(HERE, "vlm_grab.py")] + car_defaults(sys.argv[1:])

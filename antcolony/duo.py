@@ -167,7 +167,7 @@ def main():
 
     links = {n: HubLink(n, tuple(cfg["robots"][n]["addr"]), hub) for n in (a.first, a.second)}
     for n, l in links.items():
-        t = l.status()
+        t = l.status() or l.status(3.0) or l.status(3.0)      # the first datagram to a quiet car is often lost (ARP)
         sayer(n)(show(t))
         if t is None:
             sys.exit(1)
