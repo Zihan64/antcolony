@@ -119,27 +119,34 @@ python -m antcolony.coordinator --overlay profiles/edge2.json --arena-from-tags
 - The driving controller's gains (`control` in `config.json`) have only ever run in the simulator.
 - The tracker's own "UDP out" (single-robot path following) crashes its worker thread once an object is detected (`json.dumps(..., default=float)` on a numpy outline). `--antcolony` does not use it; leave "UDP out" empty.
 
-## Trained warehouse-object detector (2026-11-14)
+## Trained warehouse-object detector (v3, 2026-11-15)
 
-**Model:** `cam_control/models/warehouse_yolo26.pt` (YOLO26n, 5 classes: bracket, knob, slotted_block, cup, holder). It is now the default in the GUI's *Object detection → Model* box and for `--detect`; class names are kept, and confidence is never accepted below 0.5 (`CLOSED_SET_MIN_CONF` in `object_detector.py`), whatever the spin box says. Evaluation: `cam_control/models/warehouse_yolo26_eval.json`.
+**Model:** `cam_control/models/warehouse_yolo26.pt` (YOLO26n, 9 classes: bracket, knob, slotted_block, cup, holder, stand, block, contour_block, **white_box**). Default in the GUI's *Object detection → Model* box and for `--detect`; class names are kept, and confidence is never accepted below 0.5 (`CLOSED_SET_MIN_CONF` in `object_detector.py`), whatever the spin box says. Evaluation: `cam_control/models/warehouse_yolo26_eval.json`. Earlier models are kept as `warehouse_yolo26_v1.pt` (5 classes) and `_v2.pt` (7 classes), their data as `datasets/yolo26_warehouse_v1` / `_v2`.
 
-Why: the prompt-free YOLOE model proposes *anything* object-like, including carpet speckle and rug patterns. The trained model only knows the 5 objects and was trained with carpet-only negative images, so floor texture is background.
+Why: the prompt-free YOLOE model proposes *anything* object-like, including carpet speckle and rug patterns. The trained model only knows its classes and was trained with carpet-only negative images, so floor texture is background.
 
-| held-out test | value |
+| held-out check (v3) | value |
 |---|---|
-| mAP50 / mAP50-95 (real photos + test objects on carpet) | 0.994 / 0.841 |
-| precision / recall | 0.98 / 0.97 |
-| carpet-only images with any detection at conf ≥ 0.4 | 0 of 200 (highest score 0.28) |
+| test split (31 real multi-object scenes + test objects on carpet): mAP50 / mAP50-95 | 0.994 / 0.861 |
+| `tests/custum yolo test` (7 real scenes, 31 objects) at conf 0.5 | 29 of 31 found, 4 extra boxes |
+| white_box, val (5 held-out photos + composites): P / R / mAP50 | 0.985 / 0.974 / 0.993 |
+| white_box, the 5 held-out real photos alone | 7 of 8 trays found, 1 extra box (an orange panel at 0.53) |
+| carpet-only images with any detection at conf ≥ 0.4 | 0 of 200 (highest score 0.35) |
 | CPU inference, 640 px | ~110-200 ms / frame |
 
-Rebuild / retrain (about 20 min on CPU; the COCO backbone is frozen, only neck and head are fine-tuned):
+The white tray is much bigger than the parts, so `object_detector.py` lets a trained model's box cover up to 90 % of the frame (`CLOSED_SET_MAX_BOX_FRAC`; 25 % stays for prompt-free YOLOE) and allows 60 cm on the floor for `white_box` (`MAX_OBJECT_M_BY_CLASS`; 40 cm for the parts).
+
+Rebuild / retrain (about 25 min on CPU, plugged in; the COCO backbone is frozen, only neck and head are fine-tuned):
 ```
 cd cam_control
-python training/build_warehouse_dataset.py     # photos from yolo26_warehouse.zip (= yolo_dataset.csv) + synthetic carpet
-python training/train_warehouse_yolo.py        # -> models/warehouse_yolo26.pt + eval json
-python training/check_real_photos.py           # annotated sheet of the real val/test photos
+python training/build_warehouse_dataset.py     # datasets/yolo26_warehouse (unzipped yolo26_warehouse.zip = yolo_dataset.csv) + synthetic carpet
+python training/train_warehouse_yolo.py --epochs 15 --name warehouse_yolo26_v3   # -> models/warehouse_yolo26.pt + eval json
+python training/train_warehouse_yolo.py --epochs 15 --name warehouse_yolo26_v3 --resume   # after sleep / a closed terminal
+python training/run_on_folder.py "../tests/custum yolo test"   # plotted predictions + score for any images/ (+ labels/) folder
 ```
-Limits: only 30 real photos, all on a marble counter; the carpet is procedural, not your floor. Before relying on it, photograph your real arena floor (empty) and drop the images into `datasets/warehouse_carpet/images/train` with empty `.txt` labels, then retrain. `*.pt` is gitignored, so copy the model file to other machines by hand.
+A class with no val photo in the CSV (stand, block, contour_block, white_box) gets ~1 in 5 of its train photos moved to val by the builder, so it is scored. On battery, Windows throttles and sleeps the laptop: training ran 5-10x slower and paused; plug in.
+
+Limits: white_box has 18 photos (27 trays), all from floor level or a little above; the overhead camera sees it from straight above, which only the close-up "elevated view" photos approach. A low side view scores ~0.5 and a tray mostly hidden behind another is missed. An orange panel was once called white_box (0.53). For the robot arena, a few overhead photos of the tray on the arena floor would help most. `*.pt` is gitignored, so copy the model file to other machines by hand.
 
 ## Multiple overhead cameras (2026-11-14)
 

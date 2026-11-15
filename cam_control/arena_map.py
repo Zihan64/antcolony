@@ -98,6 +98,13 @@ ARENA_DEFAULTS = {
     "robot_radius_m": 0.10,           # obstacles are inflated by this for planning
     "obstacle_threshold": 30,         # color difference vs empty floor that counts as obstacle
     "min_obstacle_area_m2": 0.0004,   # ignore blobs smaller than 2 x 2 cm
+    # Unknown things (not one of the fine-tuned parts: anything the map sees only as "not floor" or
+    # "changed since the empty floor") are de-emphasised: they become obstacles only when at least
+    # this big AND seen in this many map updates in a row (evidence +1.2 per update, so 2.0 = two
+    # updates); one free look clears them again. Known parts do not depend on this: they reach A*
+    # through the trained detector's footprints. 0.0004 / 0.0 = the old, noisier behaviour.
+    "unknown_min_area_m2": 0.0025,    # 5 x 5 cm
+    "unknown_evidence": 2.0,
     "appearance_z": 5.0,              # object = this many robust std devs unlike the floor
     "max_streak_width_m": 0.03,       # thinner + 5x longer blobs = carpet streak / seam / cable, not an object
     "route_switch_rel": 0.10,         # keep the current route unless a new one is this much shorter
@@ -1046,7 +1053,7 @@ class GlobalMap:
                 cv2.fillConvexPoly(raw, np.round(pp).astype(np.int32), 0)
             n, labl, stats, _ = cv2.connectedComponentsWithStats(raw, connectivity=8)
             keep = np.zeros(n, bool)
-            keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+            keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= self._unknown_min_area() / self.res ** 2
             # Long thin blobs are the floor's pattern (carpet streaks, plank seams) or cables, not
             # objects: thinner than thin_m and over 5x longer than wide. Dropped here, so they leave
             # neither an object nor obstacle evidence that would block the A* path.
@@ -1103,8 +1110,18 @@ class GlobalMap:
         return obst
 
     # ---- outputs
+    def _unknown_min_area(self):
+        """Smallest unknown blob (m^2) that may become an obstacle (see ARENA_DEFAULTS)."""
+        return max(float(self.arena["min_obstacle_area_m2"]),
+                   float(self.arena.get("unknown_min_area_m2", ARENA_DEFAULTS["unknown_min_area_m2"])))
+
+    def _unknown_evidence(self):
+        return float(self.arena.get("unknown_evidence", ARENA_DEFAULTS["unknown_evidence"]))
+
     def obstacles(self):
-        return self.logodds > 0
+        """Cells that are obstacles for A*: confirmed unknown evidence only (single-update flickers
+        of shadows, glare, carpet texture stay off the map)."""
+        return self.logodds > max(0.0, self._unknown_evidence())
 
     def objects_in_view(self):
         """Obstacle blobs in the current view as objects: centroid, footprint polygon (world),
@@ -1123,7 +1140,7 @@ class GlobalMap:
         lo = self.logodds[r0:r1, c0:c1]
         prev = getattr(self, "_obj_on", None)
         was = prev[r0:r1, c0:c1] if prev is not None and prev.shape == self.logodds.shape else np.zeros(lo.shape, bool)
-        on = vis & ((lo > 1.0) | (was & (lo > -0.5)))
+        on = vis & ((lo > max(1.0, self._unknown_evidence())) | (was & (lo > -0.5)))
         if prev is None or prev.shape != self.logodds.shape:
             self._obj_on = np.zeros(self.logodds.shape, bool)
         self._obj_on[r0:r1, c0:c1] = on
@@ -1148,7 +1165,7 @@ class GlobalMap:
             floorish = ((np.abs(lab[..., 1] - ma) < 6) & (np.abs(lab[..., 2] - mb) < 8)
                         & (speck > 0.4 * ms))
             ob[floorish] = 0
-        min_px = float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+        min_px = self._unknown_min_area() / self.res ** 2
         n, labl, stats, _ = cv2.connectedComponentsWithStats(ob, connectivity=8)
         lab[..., 0] *= 0.5                                 # for the color split: shading counts half
         out = []

@@ -71,8 +71,11 @@ def plan_holdout(frac, seed=0):
             stem = r["filename"].rsplit(".", 1)[0]
             if r["class_name"] == cls and r["split"] == "train" and stem not in dup:
                 # variant = the note without per-photo remarks (edge / clutter / hand-boxed)
-                var = re.sub(r";?\s*(touches frame edge|cluttered background|boxed by hand|"
-                             r"truncated[^;]*|background object)", "", r["notes"]).strip("; ")
+                # ("uploaded as <id>.png" is unique per photo: without stripping it every photo is
+                # its own variant of 1 and nothing is held out, as happened for white_box)
+                var = re.sub(r";?\s*(touches [^;]*frame edge|cluttered background|boxed by hand|"
+                             r"truncated[^;]*|background object|uploaded as [^;]*|low resolution[^;]*)",
+                             "", r["notes"]).strip("; ")
                 groups.setdefault(var, set()).add(stem)
         take = []
         for var, stems in sorted(groups.items()):

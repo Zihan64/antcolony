@@ -244,13 +244,18 @@ def draw_plan(img, pose, plan, route=(), pins=()):
             cv2.drawMarker(img, (int(u), int(v)), PIN, cv2.MARKER_CROSS, int(22 * k), max(2, int(2 * k)))
 
 
-KNOWN = (0, 165, 255)       # detector (YOLO) object: either camera
-UNKNOWN = (255, 0, 255)     # appearance object: both cameras
+KNOWN = (0, 165, 255)       # one of the fine-tuned parts (trained detector): either camera
+UNKNOWN = (120, 120, 120)   # anything else (appearance blob, prompt-free box): faded grey, obstacle only
+
+
+def is_known(o):
+    """One of the fine-tuned parts? Older results without the flag: a detector box counts as known."""
+    return bool(o.get("known", o.get("method") == "detect"))
 
 
 def draw_floor_objects(img, pose, floor_objects):
     """Objects without tags (from the cumulative map) outlined on the floor in this view:
-    orange = known (detector), magenta = unknown (appearance)."""
+    orange + label = known part, thin grey without label = unknown thing (de-emphasised)."""
     if pose is None:
         return
     lw = max(1, int(round(2 * font_scale(img) / 0.5)))
@@ -258,10 +263,13 @@ def draw_floor_objects(img, pose, floor_objects):
         fp = o.get("footprint_poly")
         if fp is None:
             continue
-        known = o.get("method") == "detect"
+        known = is_known(o)
         col = KNOWN if known else UNKNOWN
         pts = _sample_edges(np.asarray(fp, np.float64), n=8)
         px, ok = pose.project(pts)
+        if not known:
+            _polyline_runs(img, px, ok, col, 1, closed=True)
+            continue
         _polyline_runs(img, px, ok, (0, 0, 0), lw + 2, closed=True)
         _polyline_runs(img, px, ok, col, lw, closed=True)
         if ok.any():

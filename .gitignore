@@ -14,3 +14,6 @@ __pycache__/
 # generated training data / runs (rebuild with cam_control/training/)
 cam_control/datasets/
 cam_control/runs/
+
+# experiment screen recordings (tracker GUI, cam_control/screen_recorder.py)
+cam_control/experiments/

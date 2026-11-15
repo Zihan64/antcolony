@@ -30,6 +30,8 @@ class UdpBus:
         self.st = self._sock(PORT_TELEM)
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._world, self._telem = None, {}
+        self._world_t = None             # tracker stamp "t" of the newest snapshot taken
+        self.n_old = 0                   # snapshots dropped because a newer one had already arrived
 
     @staticmethod
     def _sock(port):
@@ -50,9 +52,21 @@ class UdpBus:
                 if not isinstance(m, dict):
                     continue
                 if world:
-                    self._world = m
+                    self._take_world(m)
                 elif "name" in m:
                     self._telem[m["name"]] = m
+
+    RESTART_S = 5.0                      # a stamp this far back = the tracker was restarted: accept it
+
+    def _take_world(self, m):
+        """Keep the NEWEST tracker snapshot by its own stamp "t", not the last one to arrive: UDP
+        over Wi-Fi can reorder, and an older datagram would move a robot back to where it was."""
+        t = m.get("t")
+        t = float(t) if isinstance(t, (int, float)) and math.isfinite(t) else None
+        if t is not None and self._world_t is not None and self._world_t - self.RESTART_S < t <= self._world_t:
+            self.n_old += 1
+            return
+        self._world, self._world_t = m, (t if t is not None else self._world_t)
 
     def world(self):
         self.pump()
@@ -128,6 +142,11 @@ class Coordinator:
         if objects:                                          # clearance is set by the car's half width
             obs += [(o.x, o.y, o.r + tc["obj_gap"]) for o in w.objects
                     if o.state in ("free", "assigned", "pushing", "grabbing")]
+            # unknown things (not a trained part): keep clear, unless it lies on this robot's own
+            # target (the same thing seen twice) - that would wall the target off
+            mine = brain.obj.xy if getattr(brain, "obj", None) is not None else None
+            obs += [(x, y, r + tc["obj_gap"]) for x, y, r in w.unknown
+                    if mine is None or dist((x, y), mine) > r + 0.06]
         if w.bin.on:
             obs.append((w.bin.x, w.bin.y, w.bin.r + me.radius + bin_pad))
         if w.edge:                                           # what already lies at the edge stays where it is
@@ -244,7 +263,7 @@ class Coordinator:
             self.snap_t = now
             self.no_floor = snap.get("floor_valid") is False     # tracker heartbeat: arena not set up
             if self.manual is not None:                      # positions typed by hand replace the detector
-                snap = dict(snap, objects=[dict(m) for m in self.manual])
+                snap = dict(snap, objects=[dict(m) for m in self.manual], objects_ok=True)
             self.world.update(snap, now)
             if self.t0 is None and self.world.n_seen:
                 self.t0 = now

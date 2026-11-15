@@ -32,6 +32,9 @@ Testing tools
   Measure    average the selected tag over N seconds and compare against a
              tape-measured position you type in ("x, y, z" in meters).
   Record     log every processed frame to CSV.
+  Screen rec "Experiment recording" (Run tab): an mp4 of the GUI window or the whole screen for
+             every run, in experiments/run_<date>_<time>_<name>/screen.mp4 with run.json (and the
+             CSV, if recorded during it). By default each Start ... Stop is recorded.
   Synthetic  a rendered scene with moving tags and known true positions, so the
              whole pipeline can be tested without the camera.
 
@@ -82,6 +85,7 @@ import object_detector as od  # noqa: E402
 import antcolony_pub  # noqa: E402
 import multi_camera as mc  # noqa: E402
 import view_overlay as vo  # noqa: E402
+from screen_recorder import ScreenRecorder  # noqa: E402
 
 RESOLUTIONS = ["1920x1080", "3840x2160", "2560x1440", "1280x720"]
 
@@ -434,6 +438,7 @@ class Worker(QtCore.QThread):
                 # pooled and the same object seen by two cameras is merged (dedupe keeps the more
                 # confident one), so an object one camera misses still comes from the other
                 objs = objs + self.rig.detector_objects(now)
+            objs = od.plausible(objs)     # a "known" part the size of a chair is a mislocalised box
             objs = od.dedupe(objs, tag_pts)
             # keep tracks alive for a few detector cycles, however slow the detector is
             self.tracker.ttl = max(1.5, 3.5 * self.objdet.infer_ms / 1000.0)
@@ -501,8 +506,11 @@ class Worker(QtCore.QThread):
                    "path": last.get("plan"), "command": cmd}
             try:
                 self.udp[0].sendto(json.dumps(msg, default=self._json).encode(), self.udp[1])
-            except (OSError, TypeError, ValueError):
-                pass
+            except (OSError, TypeError, ValueError) as e:
+                # used to be dropped silently every frame: the robot got nothing and nobody knew why
+                if repr(e) != getattr(self, "_udp_err", None):
+                    self._udp_err = repr(e)
+                    print(f"[UDP out] not sent: {e!r}")
 
     def _arena_step(self, raw, r, now):
         """Global floor map: fuse this frame, objects, plan, draw (planner thread)."""
@@ -834,19 +842,20 @@ class Worker(QtCore.QThread):
                         else:
                             m.draw_floor_grid(frame, floor, K, D)
                     if floor.valid:
-                        for o in self._app_objs:
+                        for o in self._app_objs:          # unknown things: faded, thin, no label
                             poly = np.column_stack([o["footprint_poly"], np.zeros(len(o["footprint_poly"]))])
                             pp = np.round(floor.world_to_pixel(poly, K, D)).astype(np.int32)
-                            cv2.polylines(frame, [pp], True, (255, 0, 255), 2, cv2.LINE_AA)
-                            m._put(frame, f"obj {o['id']} ({o['x']:+.2f}, {o['y']:+.2f})",
-                                   (int(pp[:, 0].min()), int(pp[:, 1].min()) - 6), (255, 0, 255))
+                            cv2.polylines(frame, [pp], True, vo.UNKNOWN, 1, cv2.LINE_AA)
                     if floor.valid and self.objdet is not None:
                         for o in self._det_objs:
                             if o.get("frame") != "world" or o.get("footprint_poly") is None:
                                 continue
                             poly = np.column_stack([o["footprint_poly"], np.zeros(len(o["footprint_poly"]))])
                             pp = np.round(floor.world_to_pixel(poly, K, D)).astype(np.int32)
-                            cv2.polylines(frame, [pp], True, (255, 0, 255), 2, cv2.LINE_AA)
+                            if o.get("known"):
+                                cv2.polylines(frame, [pp], True, vo.KNOWN, 2, cv2.LINE_AA)
+                            else:
+                                cv2.polylines(frame, [pp], True, vo.UNKNOWN, 1, cv2.LINE_AA)
                         for o in self._det_objs:
                             if o.get("frame") == "image":
                                 x1, y1, x2, y2 = [int(v) for v in o["box"]]
@@ -1315,16 +1324,47 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.pair_info)
 
         f = group("Objects without tags", cl)
-        self.det_chk = QtWidgets.QCheckBox("Detect objects (any object, no class list)", checked=True)
-        self.det_chk.setToolTip("Every part of the floor that does not look like the floor (compared with the "
-                                "rest of the floor in the same frame) becomes an object and an A* obstacle. "
-                                "No model, no class list, no stored reference. Optional YOLO in Settings. "
-                                "and places it on the floor map. Needs: pip install ultralytics.")
+        self.det_chk = QtWidgets.QCheckBox("Detect objects (trained parts only)", checked=True)
+        self.det_chk.setToolTip("Runs the fine-tuned warehouse model (" + ", ".join(od.KNOWN_CLASSES) + "). "
+                                "Only those parts are objects: listed, drawn in colour, sent to the robots. "
+                                "Model and confidence in Settings. Needs: pip install ultralytics.")
         self.det_chk.toggled.connect(self.toggle_detection)
+        self.det_unknown = QtWidgets.QCheckBox("Also map unknown things (faded, obstacles only)", checked=False)
+        self.det_unknown.setToolTip("Adds the appearance detector: anything on the floor that does not look like "
+                                    "the floor. Such things are never pick-up targets; they are drawn faded and "
+                                    "only kept clear of. Off = a clean map with the trained parts only.")
+        self.det_unknown.toggled.connect(lambda _: self.det_chk.isChecked() and self.toggle_detection(True))
         self.det_status = QtWidgets.QLabel("off")
         self.det_status.setWordWrap(True)
         f.addRow(self.det_chk)
+        f.addRow(self.det_unknown)
         f.addRow(self.det_status)
+
+        # screen recording: one folder per experiment run (experiments/run_<time>_<name>/screen.mp4)
+        f = group("Experiment recording", cl)
+        self.screen_rec = ScreenRecorder(self, log=self.log_msg)
+        self._rec_auto = False                    # the current recording was started by Start
+        self.rec_name = QtWidgets.QLineEdit(placeholderText="run name (optional), e.g. two-cars-trial3")
+        self.rec_source = QtWidgets.QComboBox()
+        self.rec_source.addItem("GUI window", "window")
+        self.rec_source.addItem("Whole screen", "screen")
+        self.rec_source.setToolTip("GUI window: only this window (even when covered by others). "
+                                   "Whole screen: the monitor this window is on.")
+        self.rec_fps = QtWidgets.QSpinBox(minimum=5, maximum=30, value=15, suffix=" fps")
+        self.rec_auto = QtWidgets.QCheckBox("Record every run automatically (Start → Stop)", checked=True)
+        self.rec_screen_btn = QtWidgets.QPushButton("● Record screen", checkable=True)
+        self.rec_screen_btn.setToolTip("Start / stop a screen recording now (independent of Start / Stop)")
+        self.rec_screen_btn.toggled.connect(self.toggle_screen_record)
+        rec_open = QtWidgets.QPushButton("Open folder")
+        rec_open.setToolTip("Open the experiments folder (the newest run's folder while recording)")
+        rec_open.clicked.connect(self._open_rec_folder)
+        self.rec_status = QtWidgets.QLabel(f"saved to {self.screen_rec.root}")
+        self.rec_status.setWordWrap(True)
+        f.addRow(self.rec_name)
+        f.addRow(hrow(self.rec_source, self.rec_fps))
+        f.addRow(self.rec_auto)
+        f.addRow(hrow(self.rec_screen_btn, rec_open))
+        f.addRow(self.rec_status)
 
         self.log = QtWidgets.QPlainTextEdit(readOnly=True)
         self.log.setMaximumBlockCount(500)
@@ -1381,7 +1421,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for name, desc in od.MODEL_CHOICES:
             self.det_model.addItem(name)
             self.det_model.setItemData(self.det_model.count() - 1, desc, Qt.ItemDataRole.ToolTipRole)
-        self.det_model.setToolTip("Default: the trained warehouse detector (5 classes, ignores carpet; "
+        self.det_model.setToolTip(f"Default: the trained warehouse detector ({len(od.KNOWN_CLASSES)} classes, ignores carpet; "
                                   f"confidence is never below {od.CLOSED_SET_MIN_CONF}). Prompt-free YOLOE "
                                   "models find any object without a class list (and fire on carpet texture). "
                                   "You can also type the path of your own .pt (its class names are kept).")
@@ -1408,9 +1448,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.det_app_z.setToolTip("How unlike the floor something must look to be an object (robust std devs). "
                                   "Lower = more sensitive (finds faint objects, more false hits).")
         self.det_app_z.valueChanged.connect(self._det_reconfig)
-        self.det_yolo = QtWidgets.QCheckBox("Also use YOLO proposals (slow on CPU)")
-        self.det_yolo.setToolTip("Adds a prompt-free YOLOE model's boxes (class-agnostic) on top of the "
-                                 "appearance detector. Needs: pip install ultralytics.")
+        self.det_yolo = QtWidgets.QCheckBox("Use the trained model (fine-tuned parts)", checked=True)
+        self.det_yolo.setToolTip("The model below finds the known parts. Off = no known objects at all (only "
+                                 "unknown things, if mapped). A prompt-free YOLOE model here gives unknown "
+                                 "things only. Needs: pip install ultralytics.")
         self.det_yolo.toggled.connect(lambda _: self.det_chk.isChecked() and self.toggle_detection(True))
         f.addRow("Floor contrast", self.det_app_z)
         f.addRow(self.det_yolo)
@@ -2010,10 +2051,15 @@ class MainWindow(QtWidgets.QMainWindow):
             b.setEnabled(False)
         self.log_msg(f"Started {mode} {self.source.width}x{self.source.height}, detector {det.description}, "
                      f"floor tags {sorted(self.cfg['floor_tags'])}")
+        if self.rec_auto.isChecked() and not self.screen_rec.active:
+            self._rec_auto = True                 # this run's recording ends with Stop
+            self.rec_screen_btn.setChecked(True)
 
     def stop(self):
         if self.rec_btn.isChecked():
             self.rec_btn.setChecked(False)
+        if self._rec_auto and self.rec_screen_btn.isChecked():
+            self.rec_screen_btn.setChecked(False)  # end of the run: finish its video
         if self.worker:
             self.worker.requestInterruption()
             self.worker.wait(2000)
@@ -2041,7 +2087,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, e):
         self.stop()
+        if self.screen_rec.active:                 # a manual recording: finish the file, do not lose it
+            self.rec_screen_btn.setChecked(False)
         super().closeEvent(e)
+
+    # ---------------- screen recording (one folder per experiment run) ----------------
+    def toggle_screen_record(self, on):
+        if on:
+            try:
+                extra = {"source": self.src_combo.currentText(), "running": self.worker is not None,
+                         "detector_model": self.det_model.currentText().strip()}
+                folder = self.screen_rec.start(self.rec_name.text(), self.rec_source.currentData(),
+                                               self.rec_fps.value(), extra=extra)
+            except Exception as e:                 # noqa: BLE001 - no folder / no codec: say so, stay usable
+                self.log_msg(f"Screen recording could not start: {e}")
+                self._rec_auto = False
+                self.rec_screen_btn.blockSignals(True)
+                self.rec_screen_btn.setChecked(False)
+                self.rec_screen_btn.blockSignals(False)
+                return
+            self.rec_screen_btn.setText("■ Stop recording")
+            self.rec_status.setText(f"● recording {self.rec_source.currentText().lower()} → {folder}")
+            self.log_msg(f"Screen recording: {folder}{os.sep}screen.mp4")
+            if self.rec_btn.isChecked():           # CSV already running: restart it inside this run's folder
+                self.rec_btn.setChecked(False)
+                self.rec_btn.setChecked(True)
+        else:
+            self._rec_auto = False
+            self.rec_screen_btn.setText("● Record screen")
+            if not self.screen_rec.active:
+                return
+            folder, path = self.screen_rec.stop()
+            m_ = self.screen_rec.meta
+            if path:
+                self.rec_status.setText(f"saved {path}  ({m_['duration_s']:.0f} s, {m_['frames']} frames"
+                                        + (f", {m_['dropped_frames']} dropped" if m_["dropped_frames"] else "") + ")")
+                self.log_msg(f"Screen recording saved: {path} ({m_['duration_s']:.1f} s, "
+                             f"{m_['size'][0]}x{m_['size'][1]}, {m_['codec']})")
+            else:
+                self.rec_status.setText(f"recording FAILED: {m_.get('error') or 'no frames'} (folder {folder})")
+                self.log_msg(f"Screen recording failed: {m_.get('error') or 'no frames captured'}")
+
+    def _open_rec_folder(self):
+        path = self.screen_rec.folder if self.screen_rec.folder and os.path.isdir(self.screen_rec.folder) \
+            else self.screen_rec.root
+        os.makedirs(path, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
 
     # ---------------- settings ----------------
     def _detector_changed(self):
@@ -2080,7 +2171,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rec_btn.setChecked(False)
             return
         if on:
-            path = os.path.abspath(time.strftime("tracking_%Y%m%d_%H%M%S.csv"))
+            if self.screen_rec.active:             # part of a recorded run: keep the CSV next to its video
+                path = os.path.join(self.screen_rec.folder, time.strftime("tracking_%H%M%S.csv"))
+                self.screen_rec.note(csv=os.path.basename(path))
+            else:
+                path = os.path.abspath(time.strftime("tracking_%Y%m%d_%H%M%S.csv"))
             self.worker.start_recording(path)
             self.rec_btn.setText("Stop recording")
             self.log_msg(f"Recording to {path}")
@@ -2460,14 +2555,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker._det_objs = []
         if self.worker.rig:
             self.worker.rig.set_detector(None)
-        self.worker.appearance = on
+        # unknown things (appearance detector) only when asked for: they are what made the map noisy
+        self.worker.appearance = on and self.det_unknown.isChecked()
         if not on:
             self.det_status.setText("off")
             return
         self.cfg.setdefault("arena", {})["appearance_z"] = self.det_app_z.value()
-        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=2)
-        self.log_msg("Object detection on: anything on the floor that does not look like the floor becomes "
-                     "an object and an obstacle (compared with the rest of the floor in each frame).")
+        # unknown things: stricter than before (seen in 3 updates, not 2) - they are only obstacles
+        self.worker.app_tracker = od.FloorTracker(gate_m=0.15, ttl=1.0, min_hits=3)
+        if self.worker.appearance:
+            self.log_msg("Unknown things are mapped too (faded): obstacles only, never sent as objects.")
         if not self.worker.amap:
             self.log_msg("Note: objects are found once the arena (floor plane) is set up.")
         if not self.det_yolo.isChecked():
@@ -2477,9 +2574,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if importlib.util.find_spec("ultralytics") is None:
                 raise ImportError("ultralytics")
         except ImportError:
-            self.det_yolo.setChecked(False)
-            self.log_msg("YOLO proposals need Ultralytics: pip install ultralytics")
-            QtWidgets.QMessageBox.information(self, "Install needed", "pip install ultralytics")
+            # (on by default now: a status line, not a dialog at every Start)
+            self.log_msg("The trained model needs Ultralytics: python -m pip install ultralytics")
+            self.det_status.setText("trained model NOT running: python -m pip install ultralytics")
             return
         name = self.det_model.currentText().strip()
         self.worker.det_obstacles = self.det_obst.isChecked()
@@ -2487,7 +2584,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.objdet = od.ObjectDetector(name, self.det_conf.value(), int(self.det_size.currentText()))
         if self.worker.rig:          # every camera runs the detector (known objects: OR gate)
             self.worker.rig.set_detector(name, self.det_conf.value(), int(self.det_size.currentText()))
-        self.log_msg(f"Also loading {name} for YOLO proposals (class-agnostic)…")
+        if od.is_prompt_free(name):
+            self.log_msg(f"Loading {name}: prompt-free, so everything it finds is UNKNOWN (obstacle only). "
+                         f"For the trained parts choose {os.path.basename(od.WAREHOUSE_MODEL)}.")
+        else:
+            self.log_msg(f"Loading {name}: objects = {', '.join(od.KNOWN_CLASSES)} only; anything else is ignored.")
 
     def _det_reconfig(self, *_):
         if self.cfg and self.cfg.get("arena") is not None:
@@ -2865,13 +2966,14 @@ class MainWindow(QtWidgets.QMainWindow):
             for o in r["objects"]:                      # objects without tags
                 if o.get("footprint_poly") is None or o.get("frame") != "world":
                     continue
-                known = o.get("method") == "detect"
+                known = vo.is_known(o)
                 col = vo.KNOWN if known else vo.UNKNOWN
                 if o.get("obstacle") is False:
                     col = tuple(int(c * 0.6) for c in col)
-                cv2.polylines(vis, [P(o["footprint_poly"])], True, col, lw, cv2.LINE_AA)
-                lbl(f"{o['id']} {o.get('name') or 'object'}" if known else f"{o['id']} unknown",
-                    P([(o["x"], o["y"])])[0] + [8, -8], col)
+                # unknown things: a thin faded outline, no label - the map shows the trained parts
+                cv2.polylines(vis, [P(o["footprint_poly"])], True, col, lw if known else 1, cv2.LINE_AA)
+                if known:
+                    lbl(f"{o['id']} {o.get('name') or 'object'}", P([(o["x"], o["y"])])[0] + [8, -8], col)
             for o in objs.values():                     # tags
                 if o["id"] >= od.DET_ID_BASE:
                     continue
@@ -2949,15 +3051,20 @@ class MainWindow(QtWidgets.QMainWindow):
         dt = self.worker.objdet
         if self.worker.appearance and dt is None:
             n_ = len(self.worker._app_objs)
-            self.det_status.setText((f"{n_} object(s) on the floor" if self.worker.amap is not None
+            self.det_status.setText((f"trained model off: {n_} unknown thing(s) only, no known parts"
+                                     if self.worker.amap is not None
                                      else "waiting for the arena (floor plane)")
                                     + (f" | {self.worker.rig.gate_state}" if self.worker.rig else ""))
         if dt is not None:
             if dt.error and dt.status == "failed to load":
                 self.det_status.setText(f"FAILED: {dt.error[:200]}")
             else:
-                n_ = sum(1 for o in self.worker._det_objs if o.get("frame") == "world")
-                self.det_status.setText(f"{dt.model_name}: {dt.status}" + (f", {n_} on the floor" if n_ else "")
+                n_ = sum(1 for o in self.worker._det_objs if o.get("frame") == "world" and o.get("known"))
+                n_u = sum(1 for o in self.worker._det_objs if o.get("frame") == "world" and not o.get("known")) \
+                    + (len(self.worker._app_objs) if self.worker.appearance else 0)
+                self.det_status.setText(f"{os.path.basename(dt.model_name)}: {dt.status}"
+                                        + f" | {n_} known part(s)" + (f", {n_u} unknown (faded)" if n_u else "")
+                                        + (f", {dt.n_other} other-class boxes ignored" if dt.n_other else "")
                                         + (f" (last error: {dt.error[:80]})" if dt.error else "")
                                         + (f" | {self.worker.rig.gate_state}" if self.worker.rig else ""))
         if getattr(self.args, "detect", None) and not getattr(self, "_detect_arg_done", False):
@@ -3009,6 +3116,9 @@ class MainWindow(QtWidgets.QMainWindow):
         cam = r["camera"]
         cam_s = f"camera ({cam['x']:+.2f}, {cam['y']:+.2f}, {cam['z']:+.2f}) m" if cam else ""
         rec = "  ● REC" if self.rec_btn.isChecked() else ""
+        if self.screen_rec.active:
+            s_ = int(self.screen_rec.elapsed())
+            rec += f"  ● SCREEN {s_ // 60:02d}:{s_ % 60:02d}"
         self.status.setText(f"proc {r['proc_fps']:4.1f} fps | source {r['grab_fps']:4.1f} fps | "
                             f"detect {r['timing_ms']['detect']:5.1f} ms | latency {r['latency_ms']:5.1f} ms | "
                             f"map/A* {r.get('planner_ms', 0):5.0f} ms (own thread) | "

@@ -21,6 +21,7 @@ Protocol (JSON datagrams, coordinator -> UDP 9200, telemetry -> coordinator UDP 
 """
 import argparse
 import json
+import math
 import signal
 import socket
 import sys
@@ -81,8 +82,15 @@ class Agent:
     def on_msg(self, m, now):
         if m.get("type") == "vel":
             if not self.busy():
-                dur = min(float(m.get("dur", WATCHDOG)), WATCHDOG)
-                self.vel = (float(m.get("vx", 0)), float(m.get("vy", 0)), float(m.get("w", 0)), m.get("guard", True))
+                v = [float(m.get(k, 0)) for k in ("vx", "vy", "w")]
+                if not all(math.isfinite(x) for x in v):
+                    # a NaN / inf command must never reach the motor driver: treat it as "stop now"
+                    self.vel, self.vel_until = (0.0, 0.0, 0.0, True), 0.0
+                    return
+                v = [max(-1.0, min(1.0, x)) for x in v]          # normalised commands are -1..1
+                dur = float(m.get("dur", WATCHDOG))
+                dur = min(dur, WATCHDOG) if math.isfinite(dur) and dur > 0 else 0.0
+                self.vel = (v[0], v[1], v[2], m.get("guard", True) is not False)
                 self.vel_until = now + dur
         elif m.get("type") == "skill" and m.get("id") != self.skill["id"]:
             if self.busy():
@@ -132,8 +140,8 @@ class Agent:
                 self.on_msg(m, time.monotonic())
             except socket.timeout:
                 pass
-            except (ValueError, KeyError, TypeError):
-                pass
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass                           # malformed datagram (AttributeError: JSON that is not an object)
             now = time.monotonic()
             self.drive(now)
             if self.peer and now >= next_telem:

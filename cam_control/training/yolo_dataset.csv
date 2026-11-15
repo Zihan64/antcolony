@@ -187,9 +187,50 @@ IMG_9825.jpeg,block,6,935,1247,331,431,573,699,0.483422,0.453087,0.258824,0.2149
 IMG_9826.jpeg,block,6,935,1247,299,559,622,881,0.492513,0.577386,0.345455,0.258220,train,blue variant of block class
 IMG_9827.jpeg,block,6,935,1247,131,403,678,915,0.432620,0.528468,0.585027,0.410585,train,blue variant of block class
 IMG_9828.jpeg,block,6,935,1247,309,288,673,676,0.525134,0.386528,0.389305,0.311147,train,blue variant of block class
+IMG_9830.jpeg,contour_block,7,1247,935,538,263,862,671,0.561347,0.499465,0.259824,0.436364,train,new class; landscape
+IMG_9831.jpeg,contour_block,7,935,1247,319,558,592,960,0.487166,0.608661,0.291979,0.322374,train,new class
+IMG_9832.jpeg,contour_block,7,935,1247,202,563,510,1043,0.380749,0.643945,0.329412,0.384924,train,new class
+IMG_9833.jpeg,contour_block,7,935,1247,82,445,513,984,0.318182,0.572975,0.460963,0.432237,train,new class
+IMG_9834.jpeg,contour_block,7,935,1247,125,643,574,959,0.373797,0.642342,0.480214,0.253408,train,new class
+IMG_9835.jpeg,contour_block,7,935,1247,83,608,651,1034,0.392513,0.658380,0.607487,0.341620,train,new class
+IMG_9836.jpeg,contour_block,7,935,1247,203,338,756,937,0.512834,0.511227,0.591444,0.480353,train,new class
+IMG_9837.jpeg,contour_block,7,935,1247,93,315,597,934,0.368984,0.500802,0.539037,0.496391,train,new class
+IMG_9838.jpeg,contour_block,7,935,1247,232,553,500,820,0.391444,0.550521,0.286631,0.214114,train,new class; earbud case and other clutter in background left unlabeled
+IMG_9839.jpeg,contour_block,7,935,1247,355,521,645,753,0.534759,0.510826,0.310160,0.186047,train,new class; earbud case and other clutter in background left unlabeled
+IMG_9840.jpeg,contour_block,7,935,1247,249,753,680,1188,0.496791,0.778268,0.460963,0.348837,train,new class
+IMG_9841.jpeg,contour_block,7,935,1247,241,725,677,1179,0.490909,0.763432,0.466310,0.364074,train,new class
+IMG_9842.jpeg,contour_block,7,935,1247,155,400,449,867,0.322995,0.508019,0.314439,0.374499,train,new class
+IMG_9843.jpeg,contour_block,7,1247,935,361,107,860,488,0.489575,0.318182,0.400160,0.407487,train,new class; landscape
 knob_extra_01.jpeg,knob,1,935,1247,120,512,540,898,0.352941,0.565357,0.449198,0.309543,train,uploaded as photo.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
 knob_extra_02.jpeg,knob,1,935,1247,197,410,512,785,0.379144,0.479150,0.336898,0.300722,train,uploaded as photo_1.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
 knob_extra_03.jpeg,knob,1,935,1247,223,355,682,770,0.483957,0.451083,0.490909,0.332799,train,uploaded as photo_2ec672.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
+white_box_01.jpeg,white_box,8,1320,990,56,360,1056,600,0.421212,0.484848,0.757576,0.242424,train,new class; boxed by hand; floor-level side view; uploaded as 1794720936547_image.png
+white_box_01.jpeg,white_box,8,1320,990,170,326,510,362,0.257576,0.347475,0.257576,0.036364,train,second tray in background; mostly occluded by front tray; uploaded as 1794720936547_image.png
+white_box_02.jpeg,white_box,8,1320,990,144,171,1146,756,0.488636,0.468182,0.759091,0.590909,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794720959997_image.png"
+white_box_03.jpeg,white_box,8,1320,990,156,135,1230,840,0.525000,0.492424,0.813636,0.712121,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794720972371_image.png"
+white_box_04.jpeg,white_box,8,1324,992,234,384,1040,694,0.481118,0.543347,0.608761,0.312500,train,new class; boxed by hand; floor-level side view; uploaded as 1794720985192_image.png
+white_box_04.jpeg,white_box,8,1324,992,405,352,776,390,0.445997,0.373992,0.280211,0.038306,train,second tray in background; mostly occluded by front tray; uploaded as 1794720985192_image.png
+white_box_05.jpeg,white_box,8,1320,990,66,470,1204,756,0.481061,0.619192,0.862121,0.288889,train,new class; boxed by hand; floor-level side view; uploaded as 1794720999807_image.png
+white_box_05.jpeg,white_box,8,1320,990,270,444,654,480,0.350000,0.466667,0.290909,0.036364,train,second tray in background; mostly occluded by front tray; uploaded as 1794720999807_image.png
+white_box_06.jpeg,white_box,8,1320,990,204,456,954,784,0.438636,0.626263,0.568182,0.331313,train,new class; boxed by hand; floor-level side view; uploaded as 1794721010271_image.png
+white_box_06.jpeg,white_box,8,1320,990,236,458,640,490,0.331818,0.478788,0.306061,0.032323,train,second tray in background; mostly occluded by front tray; uploaded as 1794721010271_image.png
+white_box_07.jpeg,white_box,8,1320,990,396,400,996,894,0.527273,0.653535,0.454545,0.498990,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721021683_image.png"
+white_box_07.jpeg,white_box,8,1320,990,52,234,462,385,0.194697,0.312626,0.310606,0.152525,train,second tray in background; background object; uploaded as 1794721021683_image.png
+white_box_08.jpeg,white_box,8,1320,990,164,396,1156,800,0.500000,0.604040,0.751515,0.408081,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721033070_image.png"
+white_box_08.jpeg,white_box,8,1320,990,0,262,194,400,0.073485,0.334343,0.146970,0.139394,train,second tray in background; truncated at frame edge; uploaded as 1794721033070_image.png
+white_box_09.jpeg,white_box,8,1320,990,326,300,954,694,0.484848,0.502020,0.475758,0.397980,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721048024_image.png"
+white_box_09.jpeg,white_box,8,1320,990,4,206,396,314,0.151515,0.262626,0.296970,0.109091,train,second tray in background; background object; uploaded as 1794721048024_image.png
+white_box_10.jpeg,white_box,8,1320,990,80,234,1070,706,0.435606,0.474747,0.750000,0.476768,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721061281_image.png"
+white_box_10.jpeg,white_box,8,1320,990,0,0,131,118,0.049621,0.059596,0.099242,0.119192,train,second tray in background; truncated at frame edge; uploaded as 1794721061281_image.png
+white_box_11.jpeg,white_box,8,1320,990,296,140,1014,816,0.496212,0.482828,0.543939,0.682828,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721107568_image.png"
+white_box_11.jpeg,white_box,8,1320,990,0,0,162,88,0.061364,0.044444,0.122727,0.088889,train,second tray in background; truncated at frame edge; uploaded as 1794721107568_image.png
+white_box_12.jpeg,white_box,8,1320,990,150,384,1130,980,0.484848,0.688889,0.742424,0.602020,train,"new class; boxed by hand; elevated view, open top visible; uploaded as 1794721118336_image.png"
+white_box_13.jpeg,white_box,8,376,500,0,133,367,394,0.488032,0.527000,0.976064,0.522000,train,wood floor; low resolution (376x500); touches left frame edge; uploaded as 1794722610073_image.png
+white_box_14.jpeg,white_box,8,376,500,0,100,346,448,0.460106,0.548000,0.920213,0.696000,train,wood floor; low resolution (376x500); touches left frame edge; uploaded as 1794722623549_image.png
+white_box_15.jpeg,white_box,8,376,500,0,175,261,438,0.347074,0.613000,0.694149,0.526000,train,wood floor; low resolution (376x500); touches left frame edge; uploaded as 1794722661180_image.png
+white_box_16.jpeg,white_box,8,376,500,39,126,299,380,0.449468,0.506000,0.691489,0.508000,train,wood floor; low resolution (376x500); uploaded as 1794722789907_image.png
+white_box_17.jpeg,white_box,8,376,500,24,120,342,432,0.486702,0.552000,0.845745,0.624000,train,wood floor; low resolution (376x500); uploaded as 1794722801846_image.png
+white_box_18.jpeg,white_box,8,376,500,19,88,295,380,0.417553,0.468000,0.734043,0.584000,train,wood floor; low resolution (376x500); uploaded as 1794722811510_image.png
 IMG_9677.jpeg,holder,4,935,1247,346,343,752,728,0.587166,0.429431,0.434225,0.308741,val,
 IMG_9684.jpeg,cup,3,935,1247,407,340,637,684,0.558289,0.410585,0.245989,0.275862,val,"background clutter (phone, red bag) left unlabeled"
 IMG_9690.jpeg,bracket,0,935,1247,323,352,679,676,0.535829,0.412189,0.380749,0.259824,val,

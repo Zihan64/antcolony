@@ -9,6 +9,10 @@ Optional extras: "floor": {"29": [x, y], ...} = paper tags lying on the floor (r
 them), "corners": [29, 32, 31, 30] = which of those mark the arena corners, "camera": [x, y, z]
 = where the camera is. A camera that looks at a slant sees a tall robot lying across the floor
 behind it; detections in that shadow are parts of the robot, not objects (see World.hidden).
+"objects_ok": false = the tracker did not look for objects this time (main camera silent, no
+floor): tags are applied, the object list is left as it is.
+"obstacles": [[x, y, r], ...] = unknown things (not one of the fine-tuned parts): kept clear of
+(Coordinator.obstacles_for), never allocated as targets.
 
 deliver.mode "edge" (instead of the bin): an object counts as delivered once it lies in the
 band `deliver.edge_zone` wide along the arena boundary. Detections in that band are never
@@ -16,7 +20,7 @@ targets, only obstacles (`parked`).
 """
 import math
 
-from .common import clamp, dist, to_world, wrap
+from .common import clamp, dist, finite, to_world, wrap
 
 LIVE = ("new", "free", "assigned", "pushing", "grabbing")       # states matched against detections
 ACTIVE = ("free", "assigned", "pushing", "grabbing", "held")    # states that still need work
@@ -131,6 +135,7 @@ class World:
         self.floor_tags = {}             # id -> (x, y) of paper tags on the floor
         self.camera = None               # (x, y, z) of the overhead camera, if the tracker says
         self.parked = []                 # edge mode: [x, y, last seen] of things lying in the edge band
+        self.unknown = []                # (x, y, r) of unknown things: obstacles only, never picked up
         self.objects = []                # live + held
         self.delivered = []
         self.n_seen = 0
@@ -173,25 +178,49 @@ class World:
 
     # ------------------------------------------------------------------ update
     def update(self, snap, now):
+        """Apply one tracker snapshot. Malformed entries (wrong length, non-numbers, NaN) are
+        skipped one by one: a bad datagram must neither crash the coordinator nor put a NaN pose
+        into the controllers (which would turn into NaN motor commands)."""
         self.t = now
-        tags = snap.get("tags", {})
+        tags = snap.get("tags")
+        tags = tags if isinstance(tags, dict) else {}
         for r in self.robots.values():
-            t = tags.get(str(r.rc["tag"]))
+            t = finite(tags.get(str(r.rc["tag"])), 3)
             if t:
                 r.set_tag(t[0], t[1], t[2], now)
-        t = tags.get(str(self.bin.bc.get("tag")))
+        t = finite(tags.get(str(self.bin.bc.get("tag"))), 3)
         if t:
             self.bin.x, self.bin.y = t[0], t[1]
             self.bin.th = wrap(t[2] + math.radians(self.bin.bc.get("th_off_deg", 0.0)))
 
-        if snap.get("camera"):
-            self.camera = tuple(snap["camera"][:3])
-        if snap.get("floor"):
+        cam = finite(snap.get("camera"), 3)
+        if cam:
+            self.camera = cam
+        if isinstance(snap.get("floor"), dict) and snap["floor"]:
             own = {str(r.rc["tag"]) for r in self.robots.values()} | {str(self.bin.bc.get("tag"))}
-            self.floor_tags = {str(k): (v[0], v[1]) for k, v in snap["floor"].items() if str(k) not in own}
+            fl = {str(k): finite(v, 2) for k, v in snap["floor"].items() if str(k) not in own}
+            self.floor_tags = {k: v for k, v in fl.items() if v}
 
-        dets = [d for d in snap.get("objects", [])
-                if self._in_arena((d["x"], d["y"]), 0.05) and not self.hidden((d["x"], d["y"]), now)]
+        if snap.get("objects_ok") is not False and isinstance(snap.get("obstacles"), list):
+            # unknown things (not one of the trained parts): never targets, only kept clear of
+            obs = (finite(u, 3) for u in snap["obstacles"])
+            self.unknown = [u for u in obs if u and self._in_arena(u, 0.05) and not self.hidden(u, now)]
+        if snap.get("objects_ok") is False:
+            # the tracker did not look for objects in this snapshot (main camera silent, floor lost):
+            # an empty list is "no news", not "everything is gone". Keep the objects as they are
+            # rather than timing out the very ones the cars are driving to.
+            return
+        dets = []
+        for d in snap.get("objects") or []:
+            p = finite((d.get("x"), d.get("y")), 2) if isinstance(d, dict) else None
+            if p is None:
+                continue
+            d = dict(d, x=p[0], y=p[1])
+            for k in ("w", "l", "ang", "h"):             # optional fields: drop rather than trust junk
+                if k in d and finite((d[k],), 1) is None:
+                    del d[k]
+            if self._in_arena(p, 0.05) and not self.hidden(p, now):
+                dets.append(d)
         max_h = self.oc.get("max_h")             # taller than this = not something to pick up
         if max_h:
             dets = [d for d in dets if not d.get("h") or d["h"] <= max_h]

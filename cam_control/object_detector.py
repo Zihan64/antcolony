@@ -2,10 +2,17 @@
 """
 object_detector.py
 
-Detect objects WITHOUT AprilTags, class-agnostically, and locate them on the floor plane built
-by arena_map.py.
+Detect objects WITHOUT AprilTags and locate them on the floor plane built by arena_map.py.
 
   pip install ultralytics          (first use downloads the weights)
+
+Known vs unknown (since 2026-11-15)
+  Only the parts the warehouse model was fine-tuned on (KNOWN_CLASSES, trained on raw photos of
+  the real parts) are OBJECTS: each detection is tagged known=True, passes a per-class confidence
+  floor and a size check (MAX_OBJECT_M / MAX_OBJECT_H_M), and is what the coordinator may pick up.
+  Everything else - the appearance detector's blobs, a prompt-free YOLOE box, another model's
+  classes - is UNKNOWN (known=False): drawn faded, never a pick-up target, only an obstacle.
+  The section below describes the older class-agnostic mode (prompt-free YOLOE), still available.
 
 What "class-agnostic" means here
   Nothing is predefined: no list of things to look for, no text prompts, no stored
@@ -23,7 +30,7 @@ What "class-agnostic" means here
   it appears; the model's own class label is discarded.
 
 Models
-  models/warehouse_yolo26.pt  default: trained detector for bracket, knob, slotted_block, cup, holder, stand, block (7 classes
+  models/warehouse_yolo26.pt  default: trained detector for bracket, knob, slotted_block, cup, holder, stand, block, contour_block, white_box (9 classes
                         since the 2026-11-14 data; training/build_warehouse_dataset.py + train_warehouse_yolo.py).
                         Trained with carpet-only negatives, so floor texture is background; its
                         class names are kept and confidence is floored at CLOSED_SET_MIN_CONF.
@@ -62,7 +69,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 WAREHOUSE_MODEL = os.path.join(_HERE, "models", "warehouse_yolo26.pt")
 
 MODEL_CHOICES = [
-    (WAREHOUSE_MODEL, "Trained warehouse detector (bracket, knob, slotted_block, cup, holder, stand, block); "
+    (WAREHOUSE_MODEL, "Trained warehouse detector (bracket, knob, slotted_block, cup, holder, stand, block, "
+                      "contour_block, white_box); "
                       "trained with carpet negatives so floor texture is not detected (default)"),
     ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: any object, no class list (fires on carpet texture)"),
     ("yoloe-26n-seg-pf.pt", "YOLOE-26n prompt-free: any object, faster"),
@@ -75,6 +83,25 @@ MAX_BOX_FRAC = 0.25         # a box covering more of the image than this is the 
 CLOSED_SET_MIN_CONF = 0.5
 MIN_BOX_PX = 12             # boxes thinner than this (pixels) are texture, not one of the objects
 
+# Known objects = the classes the warehouse model was fine-tuned on (raw photos of the real parts,
+# datasets/warehouse_carpet). Only these are "objects": listed, sent to the coordinator as things
+# to pick up, drawn in full colour. Anything else (appearance blobs, a prompt-free YOLOE box, a
+# class of some other model) is "unknown": drawn faded and used only as an obstacle to keep clear of.
+KNOWN_CLASSES = ("bracket", "knob", "slotted_block", "cup", "holder", "stand", "block",
+                 "contour_block", "white_box")
+# Per-class confidence floor on top of CLOSED_SET_MIN_CONF, e.g. {"block": 0.6} for a class that is
+# confused with clutter on site. Empty = the global floor for all.
+CLASS_MIN_CONF = {}
+# The fine-tuned parts are small table-top pieces. A "known" detection whose floor footprint or
+# height comes out bigger than this is a mislocalised box (the far wall, a person's leg), not a part.
+MAX_OBJECT_M = 0.40
+MAX_OBJECT_H_M = 0.40
+# Classes that are legitimately bigger than the small parts (the open white tray / box).
+MAX_OBJECT_M_BY_CLASS = {"white_box": 0.60}
+# A closed-set model only fires on its trained classes, so a big box is a near / large object (the
+# white tray close to the camera), not "the whole scene"; MAX_BOX_FRAC is for prompt-free proposals.
+CLOSED_SET_MAX_BOX_FRAC = 0.90      # 0.60 dropped a close-up tray (65 % of the frame)
+
 
 def is_prompt_free(model_name):
     return "yoloe" in os.path.basename(str(model_name)).lower()
@@ -86,11 +113,16 @@ class ObjectDetector:
     Trained closed-set model (e.g. models/warehouse_yolo26.pt): its class names are kept and a
     confidence floor (CLOSED_SET_MIN_CONF) keeps floor texture out."""
 
-    def __init__(self, model_name, conf=0.15, imgsz=640, device=None):
+    def __init__(self, model_name, conf=0.15, imgsz=640, device=None, classes=KNOWN_CLASSES):
+        """classes: the class names that count as known objects (default: the fine-tuned warehouse
+        classes). A closed-set model's detections of other classes are dropped. A prompt-free model
+        has no classes: everything it finds is unknown (obstacle only)."""
         if not os.path.isabs(model_name) and os.path.exists(os.path.join(_HERE, model_name)):
             model_name = os.path.join(_HERE, model_name)
         self.model_name, self.conf, self.imgsz, self.device = model_name, conf, imgsz, device
         self.closed_set = not is_prompt_free(model_name)
+        self.classes = None if classes is None else frozenset(classes)
+        self.n_other = 0                 # detections dropped because their class is not a known one
         self.model = None
         self.status = "loading model…"
         self.error = None
@@ -174,6 +206,9 @@ class ObjectDetector:
                 self._cap_cpu_threads()
                 r = self.model.predict(frame, **kw)[0]
                 dets = self._parse(r, frame.shape, self.model.names if self.closed_set else None)
+                if self.closed_set:
+                    dets, n_other = filter_known(dets, self.classes)
+                    self.n_other += n_other
             except Exception as e:
                 self.error = f"{type(e).__name__}: {e}"
                 continue
@@ -193,7 +228,7 @@ class ObjectDetector:
         classes = r.boxes.cls.cpu().numpy().astype(int)
         for k, (b, p) in enumerate(zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy())):
             x1, y1, x2, y2 = [float(v) for v in b]
-            if (x2 - x1) * (y2 - y1) > MAX_BOX_FRAC * img_area:
+            if (x2 - x1) * (y2 - y1) > (MAX_BOX_FRAC if names is None else CLOSED_SET_MAX_BOX_FRAC) * img_area:
                 continue
             if names is not None and min(x2 - x1, y2 - y1) < MIN_BOX_PX:
                 continue
@@ -206,6 +241,32 @@ class ObjectDetector:
             d["poly"] = poly
             out.append(d)
         return out
+
+
+def filter_known(dets, classes=KNOWN_CLASSES, min_conf=None):
+    """Closed-set detections -> (only the known classes, each at or above its confidence floor,
+    marked known=True; number dropped). classes=None keeps every class the model has."""
+    min_conf = CLASS_MIN_CONF if min_conf is None else min_conf
+    keep, dropped = [], 0
+    for d in dets:
+        if (classes is not None and d["name"] not in classes) or d["conf"] < min_conf.get(d["name"], 0.0):
+            dropped += 1
+            continue
+        keep.append(dict(d, known=True))
+    return keep, dropped
+
+
+def plausible(objs, max_size=MAX_OBJECT_M, max_height=MAX_OBJECT_H_M):
+    """Drop known-object detections whose floor geometry cannot be one of the parts (box projected
+    onto the wall or far floor, a leg mistaken for a holder). Unknown ones are left alone."""
+    out = []
+    for o in objs:
+        lim = MAX_OBJECT_M_BY_CLASS.get(o.get("name"), max_size)
+        if o.get("known") and (max(o.get("width_m", 0.0), o.get("depth_m", 0.0)) > lim
+                               or o.get("height_m", 0.0) > max_height):
+            continue
+        out.append(o)
+    return out
 
 
 def drop_tag_boxes(dets, tag_quads):
@@ -307,7 +368,7 @@ def localize(dets, floor, K, D, max_range=8.0):
                                          far + side * (s_c.min() - (s_c.max() + s_c.min()) / 2),
                                          far + side * (s_c.max() - (s_c.max() + s_c.min()) / 2)])
                               .astype(np.float32)).reshape(-1, 2)
-        out.append({"name": d["name"], "conf": d["conf"], "box": d["box"],
+        out.append({"name": d["name"], "conf": d["conf"], "box": d["box"], "known": bool(d.get("known")),
                     "x": float(center[0]), "y": float(center[1]),
                     "contact": (float(near[0]), float(near[1])),
                     "width_m": width, "depth_m": depth, "height_m": min(height, 3.0),
@@ -419,6 +480,7 @@ class FloorTracker:
                 t["name"] = max(votes, key=votes.get)
                 for k in ("height_m", "conf"):
                     t[k] = (1 - a) * t.get(k, 0.0) + a * o.get(k, 0.0)
+                t["known"] = bool(t.get("known") or o.get("known"))   # the trained model has seen it
                 t["contact"], t["box"] = o.get("contact"), o.get("box")
             t = self.tracks[best]
             t["width_m"], t["depth_m"] = t["length"], t["width"] if t["length"] >= ELONGATED * t["width"] else t["length"]
@@ -449,7 +511,8 @@ def as_result_objects(tracks, now):
                     "yaw_box_deg": round(math.degrees(t.get("angle", 0.0)), 1),
                     "depth_m": round(t["depth_m"], 3), "height_m": round(t["height_m"], 3),
                     "contact": t["contact"], "box": t["box"], "footprint_poly": t["footprint"],
-                    "age_s": round(now - t["seen"], 2), "family": "detector", "native_id": None})
+                    "age_s": round(now - t["seen"], 2), "family": "detector", "native_id": None,
+                    "known": bool(t.get("known"))})
     return out
 
 

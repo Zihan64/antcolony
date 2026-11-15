@@ -23,6 +23,16 @@ def unit(dx, dy):
     return (dx / n, dy / n) if n > 1e-9 else (1.0, 0.0)
 
 
+def finite(seq, n):
+    """The first `n` items of `seq` as a tuple of finite floats, or None (too short, not numbers,
+    NaN / inf). For everything that arrives over the network before it is used to steer."""
+    try:
+        v = tuple(float(x) for x in list(seq)[:n])
+    except (TypeError, ValueError):
+        return None
+    return v if len(v) == n and all(math.isfinite(x) for x in v) else None
+
+
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 

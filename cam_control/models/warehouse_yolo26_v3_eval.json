@@ -1,0 +1,55 @@
+{
+  "test_all": {
+    "mAP50": 0.9942770398481974,
+    "mAP50_95": 0.8612820035962663,
+    "precision": 0.9820390622222683,
+    "recall": 0.9703433454668954,
+    "per_class_mAP50_95": {
+      "bracket": 0.8101086702075578,
+      "knob": 0.9185665571270836,
+      "slotted_block": 0.8341733011906657,
+      "cup": 0.8713284713045862,
+      "holder": 0.872233018151439
+    }
+  },
+  "test_real_photos": {
+    "mAP50": 0.9949999999999999,
+    "mAP50_95": 0.7356776190476192,
+    "precision": 0.9568273338785298,
+    "recall": 1.0
+  },
+  "carpet_false_positives": {
+    "conf>=0.1": {
+      "images_with_any": 1,
+      "total_boxes": 1,
+      "images": 200
+    },
+    "conf>=0.25": {
+      "images_with_any": 1,
+      "total_boxes": 1,
+      "images": 200
+    },
+    "conf>=0.4": {
+      "images_with_any": 0,
+      "total_boxes": 0,
+      "images": 200
+    },
+    "conf>=0.5": {
+      "images_with_any": 0,
+      "total_boxes": 0,
+      "images": 200
+    },
+    "conf>=0.6": {
+      "images_with_any": 0,
+      "total_boxes": 0,
+      "images": 200
+    }
+  },
+  "carpet_max_conf": 0.3535137474536896,
+  "base_model": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\training\\yolo26n.pt",
+  "epochs": 15,
+  "freeze": 10,
+  "train_imgsz": 512,
+  "eval_imgsz": 640,
+  "run_dir": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\runs\\warehouse_yolo26_v3"
+}

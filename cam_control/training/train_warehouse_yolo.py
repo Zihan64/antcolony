@@ -79,6 +79,9 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--name", default="warehouse_yolo26")
     ap.add_argument("--eval-only", metavar="WEIGHTS")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue runs/<name>/weights/last.pt after an interruption (sleep, closed "
+                         "terminal); no RAM cache, to spare memory. Then copy + evaluate as usual.")
     a = ap.parse_args()
 
     MODELS.mkdir(exist_ok=True)
@@ -87,7 +90,21 @@ def main():
         return
 
     from ultralytics import YOLO
-    model = YOLO(a.model)
+    if a.resume:
+        YOLO(str(ROOT / "runs" / a.name / "weights" / "last.pt")).train(resume=True, cache=False, workers=2)
+    else:
+        train_new(YOLO(a.model), a)
+    best = ROOT / "runs" / a.name / "weights" / "best.pt"
+    dst = MODELS / "warehouse_yolo26.pt"
+    shutil.copy(best, dst)
+    print("best weights ->", dst)
+    res = evaluate(dst, a.eval_imgsz)
+    res.update(base_model=a.model, epochs=a.epochs, freeze=a.freeze, train_imgsz=a.imgsz, eval_imgsz=a.eval_imgsz, run_dir=str(ROOT / "runs" / a.name))
+    (MODELS / "warehouse_yolo26_eval.json").write_text(json.dumps(res, indent=2))
+    print(json.dumps(res, indent=2))
+
+
+def train_new(model, a):
     model.train(
         data=str(DATA / "data.yaml"), epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device="cpu",
         workers=4, project=str(ROOT / "runs"), name=a.name, exist_ok=True, seed=0, deterministic=False,
@@ -99,14 +116,6 @@ def main():
         degrees=10, flipud=0.5, fliplr=0.5, translate=0.15, scale=0.6,
         hsv_h=0.02, hsv_s=0.6, hsv_v=0.45, mosaic=1.0, close_mosaic=3, mixup=0.05,
         plots=False, verbose=True)
-    best = ROOT / "runs" / a.name / "weights" / "best.pt"
-    dst = MODELS / "warehouse_yolo26.pt"
-    shutil.copy(best, dst)
-    print("best weights ->", dst)
-    res = evaluate(dst, a.eval_imgsz)
-    res.update(base_model=a.model, epochs=a.epochs, freeze=a.freeze, train_imgsz=a.imgsz, eval_imgsz=a.eval_imgsz, run_dir=str(ROOT / "runs" / a.name))
-    (MODELS / "warehouse_yolo26_eval.json").write_text(json.dumps(res, indent=2))
-    print(json.dumps(res, indent=2))
 
 
 if __name__ == "__main__":
