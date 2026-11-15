@@ -6,7 +6,7 @@
   "world_port": 9100,
   "network": "hyatt",
   "networks": {
-    "hyatt":  {"A": "172.20.1.113", "B": "172.20.1.120", "C": "172.20.1.136"},
+    "hyatt":  {"A": "192.168.13.106", "B": "192.168.13.49", "C": "192.168.13.110"},
     "school": {"A": null, "B": null, "C": null},
     "lan":    {"A": "192.168.0.63", "B": "192.168.0.64", "C": null}
   },
@@ -14,9 +14,9 @@
           "floor_entry": false, "mouth_half_deg": 70, "gate_dist": 0.40,
           "drop_dist": 0.27, "zone": 0.72, "stage_r": 0.45},
   "robots": {
-    "A": {"tag": 10, "role": "arm", "addr": ["192.168.50.11", 9200], "home": [0.20, 0.20],
+    "A": {"tag": 33, "role": "arm", "addr": ["192.168.50.11", 9200], "home": [0.20, 0.20],
           "radius": 0.15, "base_fwd": 0.055, "holonomic": false},
-    "B": {"tag": 11, "role": "arm", "addr": ["192.168.50.12", 9200], "home": [1.60, 0.20],
+    "B": {"tag": 36, "role": "arm", "addr": ["192.168.50.12", 9200], "home": [1.60, 0.20],
           "radius": 0.15, "base_fwd": 0.055, "holonomic": false},
     "C": {"tag": 12, "role": "dozer", "addr": ["192.168.50.13", 9200], "home": [0.90, 0.18],
           "radius": 0.15, "blade_fwd": 0.14, "blade_w": 0.22, "holonomic": false, "mecanum": false}

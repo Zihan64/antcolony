@@ -352,6 +352,7 @@ def main():
                          "object detections are then ignored (its tags are still used)")
     ap.add_argument("--no-dash", action="store_true")
     ap.add_argument("--log", default="run_log.jsonl")
+    ap.add_argument("--max-secs", type=float, default=0.0, help="stop every robot and exit after this long (0 = run until Ctrl+C)")
     a = ap.parse_args()
     cfg = load_config(a.config, a.overlay)
     bus = UdpBus(cfg, a.sim)
@@ -369,10 +370,18 @@ def main():
         serve(co)
     dt = 1.0 / cfg["control"]["hz"]
     print(f"coordinator running at {cfg['control']['hz']} Hz - Ctrl+C stops every robot")
+    t_start = time.monotonic()
     try:
         while True:
             t = time.monotonic()
             co.tick(t)
+            if a.max_secs and t - t_start > a.max_secs:
+                print(f"--max-secs {a.max_secs:.0f} reached - stopping")
+                break
+            if co.t_done is not None and a.max_secs and all(b.state == "IDLE" or b.r.home is None or
+                                                              dist(b.r.xy, b.r.home) < 0.15 for b in co.brains if b.r.x is not None):
+                print("finished and everyone is home - stopping")
+                break
             time.sleep(max(0.0, dt - (time.monotonic() - t)))
     except KeyboardInterrupt:
         pass

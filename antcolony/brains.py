@@ -31,6 +31,7 @@ class Brain:
         self.next_state, self.next_note = "IDLE", ""
         self.done_n, self.fail_streak, self.retired = 0, 0, False     # delivered / misses in a row / gave up
         self.drop_spot = self.drop_land = None                        # edge mode: where to stand / where it lands
+        self.lost_t, self.search_n, self.search_next, self.search_dir = None, 0, -1e9, 1.0
 
     # ------------------------------------------------------------- bookkeeping
     def set(self, state, now, note=""):
@@ -123,7 +124,8 @@ class Brain:
                 self.path = p
         if self.blocked or not self.path:
             return dict(ZERO), False
-        cmd, done = self.drv.follow(self.r.pose, self.path, final_th, now)
+        avoid = self.hidden_heading if (self.co.cfg.get("lost") or {}).get("cone_deg") else None
+        cmd, done = self.drv.follow(self.r.pose, self.path, final_th, now, avoid)
         if done and dist(self.r.xy, self.goal) > 0.08:     # stopped short: something is standing on the goal
             self.drv.reset()
             return dict(ZERO), False
@@ -158,9 +160,56 @@ class Brain:
         if spots:
             self.evade_goal, self.evade_until = max(spots, key=lambda p: dist(p, other_xy)), now + 4.0
 
+    def lost(self, now):
+        """No fresh pose from the tracker. A tag hidden at this heading (the arm column between it and
+        a slanted camera) comes back after a small turn, so: wait a moment, then turn on the spot in
+        short pulses - nothing else moves the car while it cannot be seen - at most `lost.max_pulses`
+        of them (about one full turn); then stand still and wait. Config "lost": {} switches it on."""
+        lc = self.co.cfg.get("lost")
+        if not lc:
+            return dict(ZERO)
+        if self.r.x is None:                               # never seen yet: maybe it was put down facing the camera
+            if not lc.get("search_unseen", False) or self.r.telem is None:
+                return dict(ZERO)                          # (only a car whose agent answers: it is on the floor, switched on)
+        self.lost_t = self.lost_t or now
+        cmd = self.lost_hook(now)
+        if cmd is not False:
+            return cmd
+        if now - self.lost_t < lc.get("wait_s", 1.0) or self.search_n >= lc.get("max_pulses", 12):
+            return dict(ZERO)
+        if now < self.search_next:
+            return None                                    # pulse running / settling: send nothing
+        cam = self.co.world.camera
+        if self.search_n == 0 and cam and self.r.x is not None:   # turn the short way out of facing the camera
+            self.search_dir = 1.0 if wrap(self.r.th - math.atan2(cam[1] - self.r.y, cam[0] - self.r.x)) >= 0 else -1.0
+        if self.search_n == 0:
+            self.co.log(f"{self.name}: tag " + ("never seen yet" if self.r.x is None else f"not seen for {now - self.lost_t:.1f} s")
+                        + " - turning on the spot to show it")
+        self.search_n += 1
+        self.search_next = now + lc.get("every_s", 1.2)
+        return vel(0, 0, lc.get("w", 0.4) * self.search_dir, dur=lc.get("pulse_s", 0.25), guard=False)
+
+    def lost_hook(self, now):
+        """Subclasses: something better to do than turning while unseen. False = no."""
+        return False
+
+    def hidden_heading(self, th, xy=None):
+        """Would this robot's tag be hidden from the camera while it faces `th` at `xy`? (Its tag
+        sits behind the arm column: facing a slanted camera hides it; lost.cone_deg, 0 = never.)"""
+        cone = (self.co.cfg.get("lost") or {}).get("cone_deg", 0)
+        cam = self.co.world.camera
+        if not cone or not cam:
+            return False
+        x, y = xy if xy is not None else self.r.xy
+        return abs(wrap(th - math.atan2(cam[1] - y, cam[0] - x))) < math.radians(cone)
+
     def tick(self, now):
         if not self.r.fresh(now, self.c["pose_timeout"]) and self.state not in ("GRAB", "DROP"):
-            return dict(ZERO)                              # no fresh pose: stand still
+            return self.lost(now)                          # no fresh pose: never drive blind
+        if self.lost_t is not None:
+            if self.search_n:
+                self.co.log(f"{self.name}: tag back after {now - self.lost_t:.1f} s ({self.search_n} turn pulses)")
+            self.lost_t, self.search_n = None, 0
         if self.free and now < self.evade_until:
             cmd, done = self.goto(self.evade_goal, None, now)
             return dict(ZERO) if done else cmd
@@ -179,6 +228,25 @@ class ArmBrain(Brain):
         self.drop_spot = self.drop_land = None
         self.bad_spots = []
         self.set("NAV_PICK", now, f"pick #{o.id}")
+
+    def lost_hook(self, now):
+        """Lost the tag on the last stretch to its object: the car's own camera can take over from
+        here (vlm_grab approach looks ahead, drives up and grabs), as long as the last known pose had
+        the object in front. pick.blind_grab_m sets how close (0 = off)."""
+        pc, o = self.co.cfg["pick"], self.obj
+        near = pc.get("blind_grab_m", 0.0)
+        if self.state != "NAV_PICK" or not near or not self.mine(o, "assigned") or now - self.lost_t < 0.8:
+            return False
+        ex, ey = to_robot(self.r.pose, o.xy)               # from the last pose the tracker saw
+        if not (0.12 < ex < near and abs(math.atan2(ey, ex)) < 0.8):
+            return False
+        o.state = "grabbing"
+        label = o.label if pc["label_mode"] == "label" else "any"
+        self.skill_start("grab", {"label": label, "min_speed": pc["min_speed"],
+                                  "fwd_cm": round(ex * 100, 1), "left_cm": round(ey * 100, 1)}, now, pc["grab_timeout"])
+        self.co.log(f"{self.name}: tag hidden {ex * 100:.0f} cm from #{o.id} - its own camera takes over the grab")
+        self.set("GRAB", now, f"grab #{o.id} (own camera)")
+        return None
 
     def pick_pose(self, o):
         """Where to stand to grab `o`: (x, y, heading), or None. The arm has no wrist roll, so
@@ -207,6 +275,8 @@ class ArmBrain(Brain):
                 if not g.free(goal):
                     continue
                 cost = dist(r.xy, goal) + 0.05 * abs(wrap(b - bearing)) + (0.5 if o.ang is not None and i >= 4 else 0)
+                if self.hidden_heading(b, goal):
+                    cost += 2.0                          # would face the camera while lining up: tag hidden
                 if lane is not None:
                     cost += 0.6 * abs(wrap(b - lane))    # staged: prefer facing the bin
                 if best is None or cost < best[0]:
@@ -270,7 +340,7 @@ class ArmBrain(Brain):
                 continue
             if not g.free(stand):
                 continue
-            cost = dist(r.xy, stand)
+            cost = dist(r.xy, stand) + (3.0 if self.hidden_heading(th, stand) else 0.0)
             if best is None or cost < best[0]:
                 best = (cost, (stand[0], stand[1], th), land)
         if best is None:

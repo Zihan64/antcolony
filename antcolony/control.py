@@ -20,6 +20,7 @@ class Driver:
         self.pulse = None              # (time the pulse has settled, heading before, duration)
         self.arrived = False           # position reached (latched until reset or pushed away)
         self.turning = False
+        self.rev_wp, self.rev = None, False     # waypoint the forward/reverse choice was made for
 
     def turn_to(self, pose, th, now):
         """In-place turn to heading `th`. -> (command or None = send nothing, done)"""
@@ -36,13 +37,15 @@ class Driver:
         if abs(e) < c["ang_tol"]:
             return dict(ZERO), True
         if abs(e) > c["fine_ang"]:
-            return vel(0, 0, sgn(e) * clamp(0.7 * abs(e), c["u_min"], 1.0)), False
+            return vel(0, 0, sgn(e) * clamp(0.7 * abs(e), c["u_min"], c.get("w_max", 1.0))), False
         dur = clamp(0.8 * abs(e) / self.rate, 0.06, 0.4)
         self.pulse = (now + dur + c["settle_s"], pose[2], dur)
         return vel(0, 0, sgn(e) * c["u_min"], dur=dur), False
 
-    def follow(self, pose, path, final_th, now):
+    def follow(self, pose, path, final_th, now, avoid=None):
         """Drive along `path` (reached waypoints are popped), then turn to `final_th`.
+        avoid(heading) -> True if the robot must not face that way while driving (its tag would be
+        hidden from the camera): it then drives that leg in REVERSE, rear first.
         -> (command or None, done)"""
         c = self.c
         while len(path) > 1 and dist(pose, path[0]) < c["wp_tol"]:
@@ -60,6 +63,10 @@ class Driver:
                 if self.holo and last and d < c.get("holo_within", 0.0):
                     self.pulse, k = None, clamp(c["k_v"] * d, c["u_min"], c["u_max"]) / d
                     return vel(k * ex, k * ey, 0), False
+                if avoid is not None and self.rev_wp != tuple(path[0]):   # decide once per waypoint
+                    self.rev_wp, self.rev = tuple(path[0]), d > c["pos_tol"] * 2 and avoid(wrap(pose[2] + a))
+                if self.rev:
+                    a = wrap(a - math.pi)                   # steer the REAR onto the waypoint
                 if abs(a) > (c["ang_tol"] * 1.5 if self.turning else c["turn_first"]):
                     self.turning = True
                     cmd, done = self.turn_to(pose, pose[2] + a, now)
@@ -67,7 +74,9 @@ class Driver:
                         return cmd, False
                 self.turning, self.pulse = False, None
                 v = clamp(c["k_v"] * d, c["u_min"], c["u_max"]) * max(0.2, math.cos(a))
-                return vel(v, 0, clamp(c["k_w"] * a, -1, 1)), False
+                wm = c.get("w_max", 1.0)                    # control.w_max: cap on the turn command (real cars spin fast)
+                return vel(-v if self.rev else v, 0, clamp(c["k_w"] * a, -wm, wm),
+                           guard=not self.rev), False
         if final_th is None:
             return dict(ZERO), True
         return self.turn_to(pose, final_th, now)
