@@ -221,6 +221,41 @@ What this means for `config.json`:
 - `base_fwd` (body center → arm rotation axis, default 0.055 m) is **not** on the spec sheet and should be measured on each robot.
 - Battery: one charge is roughly one hour of driving. Charge between judging rounds and keep spare packs if you have them.
 
+## Wheel loader C in the team run (`clear --dozer C`, 2026-11-15)
+
+Car C (Freenove, front blade, no arm) works next to the two arm cars: A and B grab objects into the
+tray; **C pushes the irregular trash into the open cardboard box** (its blade cannot get anything over
+the tray's rim). C never pushes cargo (cubes, rectangular boxes) and never takes A or B for trash or
+for the box.
+
+```bash
+# on car C (once): YOLO on its own Pi
+python3 -m venv --system-site-packages ~/yolo_env && ~/yolo_env/bin/pip install onnxruntime
+#   ~/antcolony/models/warehouse_yolo26.onnx  (the team's 7-class detector, robot/models/ on this branch)
+#   ~/antcolony/models/box.onnx               (the cardboard box; trained on car C's photos)
+# on car C: the agent, as for the team run
+python3 agent.py --name C --hw freenove --min-duty 35 --rot-min 55 --stop-cm 0
+# on the laptop with the 4B VLM (vlm_server.py --model mlx-community/Qwen3-VL-4B-Instruct-4bit --port 11438),
+# tunnelled to the car:  ssh -f -N -R 127.0.0.1:11438:127.0.0.1:11438 szk13579@<car C>
+# on the coordinator computer, with the overhead tracker sending to it:
+python -m antcolony.calibrate --robot C          # once: calib/C.json (tag 34)
+python -m antcolony.clear --dozer C
+```
+
+What C does (skill `clean` -> `robot/cleaner.py run --fast` on the car): survey with the pan/tilt head
+(YOLO, ~0.05 s a look on the Pi), one close 4B check of the chosen piece (not cargo, not a robot /
+furniture / bag), push it onto the blade, carry it towards the box while steering, shove it into the
+mouth, back off and look; again until it is inside; then the next piece. The team's classes map to
+trash = bracket, knob, slotted_block, cup, holder; cargo = block; obstacle = stand.
+
+Keeping apart: every 0.2 s `clear` sends C where A and B are relative to it (from the three tags).
+On C, anything in their direction is never a target or the box, and it does not drive forward with a
+car closer than 55 cm ahead (+-50 deg) or 30 cm anywhere: it waits 6 s, then backs off and turns away.
+Without tracker data C has only its own checks (no robot as trash, sonar while standing - its sonar
+is deaf while the motors run). `tests/test_dozer_team.py` checks the geometry and the car-side rules.
+
+Not yet run with all three cars and the overhead camera together (2026-11-15).
+
 ## Dozer setup (Freenove FNK0043 4WD car + Pi 5)
 
 You do not need Freenove's own server code; `hw_freenove.py` drives the expansion board directly over I2C.
