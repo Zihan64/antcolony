@@ -53,7 +53,10 @@ class Link:
         self.telem = None
 
     def send(self, msg):
-        self.tx.sendto(json.dumps(msg).encode(), self.addr)
+        try:
+            self.tx.sendto(json.dumps(msg).encode(), self.addr)
+        except OSError:                                   # car off / gone from the Wi-Fi ("Host is down"): the
+            pass                                          # missing telemetry says so; a crash here stopped a whole run
 
     def pump(self, secs=0.1):
         """Read telemetry for `secs`; -> the newest message from this robot (or None)."""

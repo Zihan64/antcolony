@@ -12,7 +12,11 @@ FENCE="--fence-m 0"; [ "$1" = "fence" ] && FENCE="--fence-m 0.30"
 echo "log: $R/show.log"
 python3 -u -m antcolony.clear $FENCE --max-min 25 2>&1 | tee "$R/show.log"
 # collect what the cars saw (for later)
-for H in "zxz5500@192.168.13.106|/home/zxz5500/Desktop/Master Pi5/masterpi_lite|A" "mitra@192.168.13.49|/home/mitra/Desktop/Master Pi5/masterpi_lite|B"; do
+IPS=$(python3 -c "import sys, io, contextlib; sys.path.insert(0, '.'); from antcolony.common import load_config
+with contextlib.redirect_stdout(io.StringIO()): c = load_config('config.json')
+print(c['robots']['A']['addr'][0], c['robots']['B']['addr'][0])")
+set -- $IPS
+for H in "zxz5500@$1|/home/zxz5500/Desktop/Master Pi5/masterpi_lite|A" "mitra@$2|/home/mitra/Desktop/Master Pi5/masterpi_lite|B"; do
   IFS='|' read -r U D N <<< "$H"; mkdir -p "$R/$N"
   ssh -o ConnectTimeout=6 -o BatchMode=yes "$U" "cd \"$D\" && tar cf - agent.log grab.log *.jpg 2>/dev/null" | tar xf - -C "$R/$N" 2>/dev/null
 done
