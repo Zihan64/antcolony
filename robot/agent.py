@@ -15,6 +15,7 @@ Protocol (JSON datagrams, coordinator -> UDP 9200, telemetry -> coordinator UDP 
   {"type":"skill","id":17,"name":"grab","args":{...}}     names: grab, drop, carry, seek, home, open, stop
         carry (arm cars): {"dist_cm": 20} forward with the object, round tall things (front sonar)
         seek (arm cars): {"target": "white box", "stop_cm": 22} find it with the camera + VLM, drive up to it
+        arm (arm cars): {"x": 0, "y": 15, "z": 10, "pitch": -45, "ms": 250, "grip": "open"} one step of live arm control
         Re-sending the same id is harmless. A new id cancels a running skill.
   telemetry, 10 Hz: {"type":"telem","name":"A","batt_mv":7900,"sonar_cm":35.0,
                      "skill":{"id":17,"state":"running|ok|fail","detail":".."},"holding":false}
