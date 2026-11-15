@@ -147,6 +147,8 @@ def nearest_thing(cv2, np, frame, name):
     for b in vivid_blobs(cv2, np, frame):
         if (want and b["colour"] != want) or b["colour"] in skip:
             continue
+        if not want and b["colour"] == "orange":          # skin and varnished wood read as vivid orange (chair legs, a
+            continue                                      # hand): never "any object" - an orange thing must be asked for by name
         if best is None or b["box"][3] > best["box"][3]:
             best = b
     return best
