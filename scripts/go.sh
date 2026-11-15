@@ -24,7 +24,7 @@ else
 fi
 
 say "2/4  cars A and B on this Wi-Fi"
-python3 scripts/net.py || fail "Cars not found. Are this Mac and the cars on the same Wi-Fi (AntColony)? Cars switched on 1-2 min ago? Then double-click again."
+python3 scripts/net.py || fail "The cars are not ready - read the messages just above (cars not found, or a car to confirm once with ssh). Then double-click again."
 MYIP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
 bash scripts/cars.sh status
 

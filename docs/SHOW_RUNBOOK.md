@@ -240,6 +240,7 @@ bash scripts/cars.sh home
 | 看到什么 | 怎么办 |
 |---|---|
 | `no answer - run: bash scripts/cars.sh start` | 车上的程序没运行：`bash scripts/cars.sh start` |
+| `Host key verification failed`，或提示 `ssh zxz5500@192.168.0.63 exit` | 这台 Mac 第一次在这个地址连这辆车，要你确认一次：在终端运行提示里的那条 `ssh ... exit`，问 "Are you sure..." 时输入 `yes`。两辆车各做一次，然后再双击启动 |
 | `NOT ON THE NETWORK` | 车没开机或没连上 Wi-Fi：检查电源，等 1–2 分钟。刚换过 Wi-Fi 的话运行 `python3 scripts/net.py` |
 | `check` 里 `== tracker` 没有数据 | tracker 发数据的地址不对：用 `python3 scripts/net.py` 最后打印的命令重新启动 tracker |
 | 抓取时报 VLM 连不上 / 一直 "not found" | 车里的 VLM 地址是旧的：运行 `python3 scripts/net.py`；VLM 本身没开就运行 `bash scripts/vlm.sh` |

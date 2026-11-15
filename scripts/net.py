@@ -50,6 +50,27 @@ def my_network():
     sys.exit("This Mac has no network address - is Wi-Fi on and connected?")
 
 
+def ssh(host, cmd, timeout=40):
+    """Run cmd on host over ssh (no questions asked: BatchMode). -> (ok, stdout + stderr)."""
+    try:
+        r = subprocess.run(["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", host, cmd],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, r.stdout + r.stderr
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+
+
+HOSTKEY_HELP = """
+   This Mac has not connected to car {n} at {ip} before, so ssh asks you to confirm the car once.
+   Run this in a Terminal and type  yes  when it asks "Are you sure you want to continue connecting":
+
+       ssh {user}@{ip} exit
+
+   (If it says "REMOTE HOST IDENTIFICATION HAS CHANGED", another device had this address before: check
+    that car {n} really is at {ip}, then run   ssh-keygen -R {ip}   and the ssh command above again.)
+   Then double-click the start file again."""
+
+
 def norm_mac(m):
     return ":".join(p.zfill(2) for p in m.lower().split(":"))
 
@@ -109,6 +130,7 @@ def main():
             f.write("\n")
 
     url = f"http://{ip}:8090"
+    not_set = []
     for n in ("A", "B"):
         if n not in found:
             continue
@@ -116,7 +138,7 @@ def main():
         f = f"{d}/masterpi_lite/vlm_server.json"
         print(f"car {n}: VLM address -> {url}" + ("  (dry run)" if a.dry_run else ""))
         if a.dry_run:
-            print("   now: " + sh(["ssh", "-o", "ConnectTimeout=6", "-o", "BatchMode=yes", f"{user}@{found[n]}", f'cat "{f}"']).strip())
+            print("   now: " + ssh(f"{user}@{found[n]}", f'cat "{f}"')[1].strip())
             continue
         script = (f'cd "{d}" && f=masterpi_lite/vlm_server.json && cp -p "$f" "$f.before_net" 2>/dev/null; '
                   f'python3 -c "import json,sys; p=sys.argv[1]; c=json.load(open(p)) if __import__(\'os\').path.exists(p) else {{}}; '
@@ -124,12 +146,24 @@ def main():
                   f'p=$(pgrep -f "^python3 -u agent.py"); [ -n "$p" ] && kill $p; sleep 1.5; '
                   f'(setsid nohup python3 -u agent.py --name {n} --min-duty 30 > agent.log 2>&1 < /dev/null &); sleep 5; '
                   f'pgrep -f "^python3 -u agent.py" >/dev/null && echo "   program running" || echo "   PROGRAM DID NOT START"')
-        print("   " + sh(["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", f"{user}@{found[n]}", script], 40).strip().replace("\n", "\n   "))
+        ok, out = ssh(f"{user}@{found[n]}", script)
+        out = out.strip()
+        if "Host key verification failed" in out or "REMOTE HOST IDENTIFICATION HAS CHANGED" in out:
+            print(HOSTKEY_HELP.format(n=n, ip=found[n], user=user))
+            not_set.append(n)
+        elif "program running" not in out:
+            print("   " + (out or "no answer over ssh").replace("\n", "\n   "))
+            print(f"   !! car {n} was NOT set up")
+            not_set.append(n)
+        else:
+            print("   " + out.replace("\n", "\n   "))
 
     print("\nVLM server on this Mac: " + ("running" if '"ok"' in sh(["curl", "-s", "-m", "2", "http://127.0.0.1:8090/health"])
                                          else "NOT running - start it:  bash scripts/vlm.sh"))
     print("\nOn the OVERHEAD-CAMERA computer (same Wi-Fi), start the tracker with THIS address:")
     print(f"    python cam_control/run_tracker.py --antcolony {ip}")
+    if not_set and not a.dry_run:
+        sys.exit(f"\ncar(s) {', '.join(not_set)} NOT ready - fix that first (see above).")
 
 
 if __name__ == "__main__":
