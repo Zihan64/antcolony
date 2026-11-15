@@ -3,3 +3,8 @@ __pycache__/
 .DS_Store
 .venv/
 .env
+
+# model weights / partial downloads
+*.pt
+*.ts
+*.part
