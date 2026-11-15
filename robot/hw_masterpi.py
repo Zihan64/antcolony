@@ -17,6 +17,18 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def reach_offset():
+    """cm this car's arm stops short of where it is sent: "--y-offset" in grab_defaults.json next to
+    this file (car A: 1.8, measured 2026-11-14; no file = 0). grab_runner.py gives it to the grab,
+    drop() adds it here - without it car A let go only 2-3 cm inside the tray's rim."""
+    try:
+        import json
+        with open(os.path.join(HERE, "grab_defaults.json")) as f:
+            return float(json.load(f).get("--y-offset", 0) or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
 CARRY = (0, 12, 12)          # cm, gripper-tip pose while driving with an object
 # Pose while driving WITHOUT an object: the same forward pose, not arm.home(). HOME (0, 6, 18)
 # folds the arm back over the chassis - elbow 6 cm and wrist 4 cm BEHIND the base axis, 21 cm
@@ -199,6 +211,10 @@ class MasterPi:
         if not self.use_arm:
             return False, "no arm"
         x, y, z = float(args.get("x_cm", 0)), float(args.get("y_cm", 18)), float(args.get("z_cm", 10))
+        off = reach_offset()                     # this car's arm stops short (grab_defaults.json): reach that much
+        r0 = math.hypot(x, y)                    # farther along the same line, as the grab does
+        if off and r0 > 1:
+            x, y = x * (r0 + off) / r0, y * (r0 + off) / r0
         with self.lock:                          # x: cm to the right of the car's line (the arm base turns)
             r = self.arm.move_to(x, y, z, pitch=-45, pitch_min=-90, pitch_max=30, ms=1500)
         if r is None:
