@@ -1,0 +1,13 @@
+{
+  "_about": "The team's trained detector (cam_control/models/warehouse_yolo26.pt on branch multiview, 7 classes) for the car's own camera. Copy to detector.json next to vlm_grab.py to make the grab use it instead of the laptop VLM; delete detector.json to go back to the VLM.",
+  "backend": "yolo",
+  "model": "models/warehouse_yolo26.onnx",
+  "_model": "yolo export model=warehouse_yolo26.pt format=onnx imgsz=416 opset=12 end2end=False  (class names travel inside the .onnx)",
+  "engine": "auto",
+  "targets": "all",
+  "_classes": "bracket, knob, slotted_block, cup, holder, stand, block. A name like 'red block' matches the class 'block'; the model does not know colours.",
+  "conf": 0.5,
+  "_conf": "photos from the cars, 2026-11-14: real blocks 0.70-0.92, false boxes (the gripper's red tips, a carpet stripe) at most 0.45",
+  "iou": 0.5,
+  "imgsz": 416
+}
