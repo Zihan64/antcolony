@@ -21,7 +21,7 @@ and takes no further part (it is not driven back: the tag does not say which way
 reliably enough). No tracker data, or a car's tag not seen: no fence for it - the walls and the
 car's own sonar (it never drives up to something tall while looking for objects) are the first line.
 
-Tray (shared knowledge): an AprilTag on the tray (--tray-tag, default bin.tag) that only the
+Tray (shared knowledge): an AprilTag on the tray (--tray-tag, default 54 on top and 53 on the front) that only the
 overhead camera reads. A car holding an object is first turned to face the tray by it (class
 Guide), then finds, approaches and docks at the tray with its own camera as before. Tag not in
 view: the car looks around for the tray by itself.
@@ -155,14 +155,16 @@ class Guide:
     (th_sign, th_off: tag yaw -> the car's heading; tag_off: where the tag sits on the car)."""
 
     def __init__(self, snapshot, tags, tray_tag, calib, sleep=time.sleep, tol_deg=12.0):
-        self.snapshot, self.tags, self.tray_tag, self.calib, self.sleep = snapshot, tags, str(tray_tag), calib, sleep
+        self.snapshot, self.tags, self.calib, self.sleep = snapshot, tags, calib, sleep
+        self.tray_tags = [str(i) for i in (tray_tag if isinstance(tray_tag, (list, tuple)) else [tray_tag])]   # first one in view counts
         self.tol = math.radians(tol_deg)
 
     def where(self, name):
         """-> (angle the car must turn, + = left, rad; distance to the tray, m) or None if unknown."""
         m = self.snapshot()
         tags = (m or {}).get("tags") or {}
-        car, tray = tags.get(str(self.tags[name])), tags.get(self.tray_tag)
+        car = tags.get(str(self.tags[name]))
+        tray = next((tags[i] for i in self.tray_tags if i in tags), None)
         if not car or not tray:
             return None
         c = self.calib.get(name) or {}
@@ -331,7 +333,8 @@ def main():
     ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
-    ap.add_argument("--tray-tag", type=int, help="AprilTag on the tray, read by the overhead camera (default: bin.tag in the config)")
+    ap.add_argument("--tray-tag", type=int, nargs="+", default=[54, 53],
+                    help="AprilTag(s) on the tray, read by the overhead camera; the first one in view counts (54 = on top, 53 = on the front)")
     ap.add_argument("--no-guide", action="store_true", help="do not turn the cars to the tray by the overhead camera")
     ap.add_argument("--max-min", type=float, default=20, help="stop everything after this many minutes")
     ap.add_argument("--min-volt", type=float, default=7.0, help="do not start below this battery voltage (0 = start anyway)")
@@ -382,9 +385,9 @@ def main():
                     calib[n] = json.load(f)
             except (OSError, ValueError):
                 print(f"  guide: no calib/{n}.json - {n} searches for the tray with its own camera only")
-        tray_tag = a.tray_tag if a.tray_tag is not None else (cfg.get("bin") or {}).get("tag")
+        tray_tag = a.tray_tag
         guide = Guide(fence.newest, {n: cfg["robots"][n]["tag"] for n in names if n in calib}, tray_tag, calib)
-        seen = str(tray_tag) in ((fence.newest() or {}).get("tags") or {})
+        seen = any(str(i) in ((fence.newest() or {}).get("tags") or {}) for i in tray_tag)
         print(f"  guide: tray tag {tray_tag} " + ("is in the overhead camera's view - cars are turned to face the tray before they search"
                                                  if seen else "NOT in the overhead camera's view right now - cars search with their own cameras"))
         for n in list(guide.tags):
