@@ -1,0 +1,4 @@
+{
+  "_note": "car A only: copy to the car as grab_defaults.json next to grab_runner.py. Its arm stops about 1.8 cm short of the reach table in vlm_grab.py (measured on car B), 2026-11-14.",
+  "--y-offset": 1.8
+}

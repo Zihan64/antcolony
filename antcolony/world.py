@@ -5,6 +5,14 @@ Snapshot (from the tracker bridge, JSON over UDP):
      "tags": {"10": [x_m, y_m, heading_rad], ...},
      "objects": [{"id": 1000, "label": "bag", "x": .., "y": .., "w": .., "l": .., "ang": ..}, ...]}
 Everything is in the tracker's floor frame, metres. `ang` (long-axis direction) is optional.
+Optional extras: "floor": {"29": [x, y], ...} = paper tags lying on the floor (robots keep off
+them), "corners": [29, 32, 31, 30] = which of those mark the arena corners, "camera": [x, y, z]
+= where the camera is. A camera that looks at a slant sees a tall robot lying across the floor
+behind it; detections in that shadow are parts of the robot, not objects (see World.hidden).
+
+deliver.mode "edge" (instead of the bin): an object counts as delivered once it lies in the
+band `deliver.edge_zone` wide along the arena boundary. Detections in that band are never
+targets, only obstacles (`parked`).
 """
 import math
 
@@ -18,13 +26,19 @@ class Robot:
     def __init__(self, name, rc):
         self.name, self.rc, self.role = name, rc, rc["role"]
         self.radius = rc.get("radius", 0.15)
-        self.home = tuple(rc["home"])
+        h = rc.get("home")                 # [x, y], or "start" = wherever the robot is first seen
+        self.home = tuple(h) if isinstance(h, (list, tuple)) else None
         self.x = self.y = self.th = None
         self.seen_t = -1e9
         self.telem = None
         # detections this close to the tag-derived centre are the robot itself; for the dozer the mask
         # must end just behind the blade face, or the object it is pushing would vanish too
         self.mask_r = rc.get("mask_r", 0.22 if self.role == "arm" else rc.get("blade_fwd", 0.14) - 0.02)
+        self.height = rc.get("height", 0.35 if self.role == "arm" else 0.12)   # tallest part above the floor, m
+        self.shadow_r = rc.get("shadow_r", 0.12)       # half width of what that tall part covers (the arm column)
+        # where the tall part is: metres ahead of the centre. The arm rests stretched forward
+        # (hw_masterpi CARRY), so its shadow starts in front of the car, not at its centre
+        self.arm_at = rc.get("arm_at", (0.0, 0.07, 0.14, 0.21) if self.role == "arm" else (0.0,))
 
     def set_tag(self, x, y, h, now):
         """Tag pose -> pose of the chassis centre, using this robot's calibration."""
@@ -33,6 +47,8 @@ class Robot:
         ox, oy = rc.get("tag_off", (0.0, 0.0))            # tag position in the robot frame (fwd, left)
         c, s = math.cos(th), math.sin(th)
         self.x, self.y, self.th, self.seen_t = x - (c * ox - s * oy), y - (s * ox + c * oy), th, now
+        if self.home is None:
+            self.home = (self.x, self.y)
 
     @property
     def pose(self):
@@ -55,6 +71,7 @@ class Bin:
         self.x, self.y = bc["pose"][0], bc["pose"][1]
         self.th = math.radians(bc["pose"][2])              # direction the open (mouth) side faces
         self.r = bc["radius"]
+        self.on = True                     # False in edge mode: there is no bin on the floor
 
     @property
     def xy(self):
@@ -108,6 +125,12 @@ class World:
         self.cfg, self.oc = cfg, cfg["objects"]
         self.robots = {n: Robot(n, rc) for n, rc in cfg["robots"].items()}
         self.bin = Bin(cfg["bin"])
+        self.dc = cfg.get("deliver", {})
+        self.edge = self.dc.get("mode", "bin") == "edge"
+        self.bin.on = not self.edge
+        self.floor_tags = {}             # id -> (x, y) of paper tags on the floor
+        self.camera = None               # (x, y, z) of the overhead camera, if the tracker says
+        self.parked = []                 # edge mode: [x, y, last seen] of things lying in the edge band
         self.objects = []                # live + held
         self.delivered = []
         self.n_seen = 0
@@ -119,11 +142,34 @@ class World:
         a = self.cfg["arena"]
         return a["xmin"] - pad <= p[0] <= a["xmax"] + pad and a["ymin"] - pad <= p[1] <= a["ymax"] + pad
 
+    def edge_dist(self, p):
+        """Distance from `p` to the arena boundary (negative outside)."""
+        a = self.cfg["arena"]
+        return min(p[0] - a["xmin"], a["xmax"] - p[0], p[1] - a["ymin"], a["ymax"] - p[1])
+
     def hidden(self, p, now, pad=0.0):
         """True where the tracker cannot be trusted: under a robot or in the bin."""
-        if dist(p, self.bin.xy) < self.bin.r + 0.02:
+        if self.bin.on and dist(p, self.bin.xy) < self.bin.r + 0.02:
             return True
-        return any(r.x is not None and dist(p, r.xy) < r.mask_r + pad for r in self.robots.values())
+        for r in self.robots.values():
+            if r.x is None:
+                continue
+            if dist(p, r.xy) < r.mask_r + pad:
+                return True
+            cam = self.camera
+            if cam and cam[2] > r.height + 0.2:
+                # a point `height` up, seen from the camera, lands on the floor this far behind where
+                # it stands. Only the arm is that tall, so the strips are narrow (shadow_r), one from
+                # each of a few points along the arm (centre ... gripper)
+                k = r.height / (cam[2] - r.height)
+                c, s = math.cos(r.th), math.sin(r.th)
+                for f in r.arm_at:
+                    ax, ay = r.x + c * f, r.y + s * f
+                    dx, dy = (ax - cam[0]) * k, (ay - cam[1]) * k
+                    t = clamp(((p[0] - ax) * dx + (p[1] - ay) * dy) / max(dx * dx + dy * dy, 1e-9), 0.0, 1.0)
+                    if dist(p, (ax + t * dx, ay + t * dy)) < r.shadow_r + pad:
+                        return True
+        return False
 
     # ------------------------------------------------------------------ update
     def update(self, snap, now):
@@ -138,8 +184,28 @@ class World:
             self.bin.x, self.bin.y = t[0], t[1]
             self.bin.th = wrap(t[2] + math.radians(self.bin.bc.get("th_off_deg", 0.0)))
 
+        if snap.get("camera"):
+            self.camera = tuple(snap["camera"][:3])
+        if snap.get("floor"):
+            own = {str(r.rc["tag"]) for r in self.robots.values()} | {str(self.bin.bc.get("tag"))}
+            self.floor_tags = {str(k): (v[0], v[1]) for k, v in snap["floor"].items() if str(k) not in own}
+
         dets = [d for d in snap.get("objects", [])
                 if self._in_arena((d["x"], d["y"]), 0.05) and not self.hidden((d["x"], d["y"]), now)]
+        max_h = self.oc.get("max_h")             # taller than this = not something to pick up
+        if max_h:
+            dets = [d for d in dets if not d.get("h") or d["h"] <= max_h]
+        if self.edge:                            # things in the edge band are done: obstacles, not targets
+            zone = self.dc.get("edge_zone", 0.20)
+            for d in dets:
+                if self.edge_dist((d["x"], d["y"])) < zone:
+                    near = [p for p in self.parked if dist(p, (d["x"], d["y"])) < 0.08]
+                    if near:
+                        near[0][:] = [d["x"], d["y"], now]
+                    else:
+                        self.parked.append([d["x"], d["y"], now])
+            self.parked = [p for p in self.parked if now - p[2] < 5.0 or self.hidden(p, now, 0.05)]
+            dets = [d for d in dets if self.edge_dist((d["x"], d["y"])) >= zone]
         live = [o for o in self.objects if o.state in LIVE]
         pairs = sorted((dist(o.xy, (d["x"], d["y"])), oi, di)
                        for oi, o in enumerate(live) for di, d in enumerate(dets))
@@ -157,6 +223,8 @@ class World:
                 self.objects.append(Obj(d, now, self.oc["default_size"]))
 
         for o in list(self.objects):
+            if o.state == "free" and o.cls == "push":    # first sized too big (merged with a shadow, ...): look again
+                o.cls = self.classify(o)
             if o.state == "new":
                 if o.hits >= self.oc["min_hits"]:
                     o.state, o.cls = "free", self.classify(o)

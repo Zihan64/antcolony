@@ -1,0 +1,16 @@
+# Tracker PC (run_tracker.py / apriltag_tracker_gui.py)
+#   python -m pip install -r cam_control/requirements.txt
+#
+# Use "python -m pip" so the packages land in the interpreter that runs the tracker.
+# opencv-contrib-python includes ArUco. If plain opencv-python is already installed,
+# remove it first (pip uninstall opencv-python): the two packages conflict.
+
+numpy
+opencv-contrib-python
+pupil-apriltags
+PyQt6
+pyqtgraph
+pygrabber; sys_platform == "win32"    # Windows only: lists cameras by name
+
+# Optional: object detection (YOLO / YOLOE). Large download (pulls in torch).
+# ultralytics

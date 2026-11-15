@@ -1,0 +1,12 @@
+{
+  "th_sign": 1,
+  "th_off": 1.5735,
+  "tag_off": [
+    -0.0868,
+    -0.0167
+  ],
+  "w_sign": 1,
+  "vy_sign": 1,
+  "strafe_ok": false,
+  "v_fwd_at_0.3": 0.303
+}

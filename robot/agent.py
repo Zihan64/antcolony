@@ -12,7 +12,15 @@ Protocol (JSON datagrams, coordinator -> UDP 9200, telemetry -> coordinator UDP 
   {"type":"vel","vx":..,"vy":..,"w":..,"dur":0.2,"guard":true}
         normalised -1..1 (forward, left, counter-clockwise). Runs for `dur` seconds (default and
         maximum = the 0.4 s watchdog), then the car stops by itself. Ignored while a skill runs.
-  {"type":"skill","id":17,"name":"grab","args":{...}}     names: grab, drop, home, open, stop
+  {"type":"skill","id":17,"name":"grab","args":{...}}     names: grab, drop, carry, seek, home, open, stop
+        carry (arm cars): {"dist_cm": 20} forward with the object, round tall things (front sonar)
+        seek (arm cars): {"target": "white box", "stop_cm": 22} find it with the camera + VLM, drive up to it
+        arm (arm cars): {"x": 0, "y": 15, "z": 10, "pitch": -45, "ms": 250, "grip": "open"} one step of live arm control
+        clean (dozer C): {"minutes": 15} push every piece of irregular trash into the open cardboard box
+              (robot/cleaner.py); detail at the end: "<n> pieces in the box"
+  {"type":"peers","peers":[{"name":"A","dist":0.8,"bearing_deg":30}, ..]}
+        where the other cars are, relative to this one (from the overhead camera, antcolony.clear --dozer).
+        Written to PEERS_FILE for cleaner.py: it keeps away from them and never takes them for trash.
         Re-sending the same id is harmless. A new id cancels a running skill.
   telemetry, 10 Hz: {"type":"telem","name":"A","batt_mv":7900,"sonar_cm":35.0,
                      "skill":{"id":17,"state":"running|ok|fail","detail":".."},"holding":false}
@@ -26,6 +34,7 @@ import threading
 import time
 
 PORT_CMD, PORT_TELEM, WATCHDOG = 9200, 9201, 0.4
+PEERS_FILE = "/tmp/antcolony_peers.json"     # the other cars' positions, for a skill running in another process
 
 
 class MockHW:
@@ -76,7 +85,21 @@ class Agent:
     def busy(self):
         return self.worker is not None and self.worker.is_alive()
 
+    def on_peers(self, m):
+        """Store where the other cars are (atomic write: the clean skill reads it at any time)."""
+        try:
+            import os
+            tmp = PEERS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"t": time.time(), "peers": m.get("peers", [])}, f)
+            os.replace(tmp, PEERS_FILE)
+        except OSError:
+            pass
+
     def on_msg(self, m, now):
+        if m.get("type") == "peers":
+            self.on_peers(m)
+            return
         if m.get("type") == "vel":
             if not self.busy():
                 dur = min(float(m.get("dur", WATCHDOG)), WATCHDOG)
@@ -161,13 +184,15 @@ def main():
     ap.add_argument("--rot-max", type=float, default=80, help="freenove")
     ap.add_argument("--pcb", type=int, default=2, choices=[1, 2], help="freenove: shield PCB version (battery reading only)")
     ap.add_argument("--stop-cm", type=float, default=8, help="sonar emergency stop distance, 0 = off")
+    ap.add_argument("--no-sonar", action="store_true",
+                    help="freenove: do not use the front ultrasonic (e.g. when the blade blocks it)")
     a = ap.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))          # `kill` also stops the motors (see finally)
     if a.hw == "mock":
         hw = MockHW()
     elif a.hw == "freenove":
         from hw_freenove import Freenove
-        hw = Freenove(a.min_duty or 35, a.max_duty or 65, a.rot_min, a.rot_max, pcb=a.pcb)
+        hw = Freenove(a.min_duty or 35, a.max_duty or 65, a.rot_min, a.rot_max, pcb=a.pcb, sonar=not a.no_sonar)
     else:
         from hw_masterpi import MasterPi
         hw = MasterPi(a.min_duty or 30, a.max_duty or 45, a.rate_min, a.rate_max, arm=not a.no_arm)
