@@ -2,9 +2,17 @@
 """
 build_warehouse_dataset.py
 
-Builds the training set for the 5-class warehouse detector (bracket, knob, slotted_block, cup,
-holder) from datasets/yolo26_warehouse (the photos + labels from yolo_dataset.csv), and adds
-what those 30 countertop photos lack: carpet.
+Builds the training set for the warehouse detector from datasets/yolo26_warehouse (the photos +
+labels of yolo_dataset.csv; class names from its data.yaml: 7 classes since the 2026-11-14 data,
+bracket, knob, slotted_block, cup, holder, stand, block), and adds what countertop photos lack:
+carpet.
+
+Held-out photos for classes the CSV puts only in train (--holdout, default 0.2): the 2026-11-14
+data has no `stand` or `block` in val or test, so best.pt would be chosen and the model scored
+blind to them. About 1 in 5 train photos of each such class (spread over its variants, e.g. the
+red / green / blue blocks; near-duplicate pairs kept together) moves to VAL in the built set.
+The source folders and the CSV are not changed; the test split (real multi-object scenes) is
+never touched.
 
 The photos were all taken on a white marble counter. A detector trained on them alone has never
 seen carpet, so speckle, fibers and woven patterns on the arena floor are "unknown" and can
@@ -32,7 +40,54 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SRC = ROOT / "datasets" / "yolo26_warehouse"
 OUT = ROOT / "datasets" / "warehouse_carpet"
-NAMES = {0: "bracket", 1: "knob", 2: "slotted_block", 3: "cup", 4: "holder"}
+NAMES = {int(k): v for k, v in yaml.safe_load(open(SRC / "data.yaml"))["names"].items()} \
+    if (SRC / "data.yaml").exists() else {0: "bracket", 1: "knob", 2: "slotted_block", 3: "cup", 4: "holder"}
+IMG_EXT = (".jpeg", ".jpg", ".png")
+SPLIT = {}          # image stem -> split in the BUILT set (overrides for held-out photos), see plan_holdout
+
+
+def split_images(split):
+    """(image path, label path) of a split, after the hold-out moves."""
+    out = []
+    for src_split in ("train", "val", "test"):
+        for ip in sorted((SRC / "images" / src_split).iterdir()):
+            if ip.suffix.lower() in IMG_EXT and SPLIT.get(ip.stem, src_split) == split:
+                out.append((ip, SRC / "labels" / src_split / (ip.stem + ".txt")))
+    return out
+
+
+def plan_holdout(frac, seed=0):
+    """Move ~frac of the train photos of every class that has no val photo to val (whole variants
+    spread, near-duplicates kept together). Returns {class: [stems]}."""
+    import csv
+    import re
+    rows = list(csv.DictReader(open(SRC / "annotations.csv", encoding="utf-8")))
+    in_val = {r["class_name"] for r in rows if r["split"] == "val"}
+    dup = {r["filename"].rsplit(".", 1)[0] for r in rows if re.search(r"near duplicate", r["notes"], re.I)}
+    moved = {}
+    for cls in sorted({r["class_name"] for r in rows if r["split"] == "train"} - in_val):
+        groups = {}
+        for r in rows:
+            stem = r["filename"].rsplit(".", 1)[0]
+            if r["class_name"] == cls and r["split"] == "train" and stem not in dup:
+                # variant = the note without per-photo remarks (edge / clutter / hand-boxed)
+                var = re.sub(r";?\s*(touches frame edge|cluttered background|boxed by hand|"
+                             r"truncated[^;]*|background object)", "", r["notes"]).strip("; ")
+                groups.setdefault(var, set()).add(stem)
+        take = []
+        for var, stems in sorted(groups.items()):
+            st = sorted(stems)
+            n = max(1, int(round(frac * len(st)))) if len(st) >= 3 else 0
+            # prefer clean photos (not cut off at the edge) as the held-out examples
+            clean = [x for x in st if not any(x == r["filename"].rsplit(".", 1)[0] and "edge" in r["notes"]
+                                              for r in rows)]
+            pool = clean if len(clean) >= n else st
+            idx = np.linspace(0, len(pool) - 1, n + 2)[1:-1].round().astype(int) if n else []
+            take += [pool[i] for i in idx]
+        for stem in take:
+            SPLIT[stem] = "val"
+        moved[cls] = sorted(take)
+    return moved
 
 # carpet base colours (BGR): beige, cream, greys, taupe, brown, blue-grey, navy, green-grey, red rug
 CARPET_COLOURS = [(150, 170, 185), (190, 205, 215), (120, 120, 120), (90, 92, 95), (160, 160, 158),
@@ -139,10 +194,10 @@ def read_labels(p):
 def cutouts(split):
     """GrabCut every labeled object of a split out of its photo -> list of (cls, BGR, mask)."""
     out = []
-    for ip in sorted((SRC / "images" / split).glob("*.jpeg")):
+    for ip, lp in split_images(split):
         img = cv2.imread(str(ip))
         H, W = img.shape[:2]
-        for c, xc, yc, bw, bh in read_labels(SRC / "labels" / split / (ip.stem + ".txt")):
+        for c, xc, yc, bw, bh in read_labels(lp):
             x1, y1 = int((xc - bw / 2) * W), int((yc - bh / 2) * H)
             x2, y2 = int((xc + bw / 2) * W), int((yc + bh / 2) * H)
             if (x2 - x1) < 40 or (y2 - y1) < 40 or y1 <= 2:      # truncated slivers at the edge
@@ -234,13 +289,13 @@ def composite(rng, objs, size):
 
 def counter_negative(rng, split):
     """A crop of an original photo that contains no labeled object (marble, veins, shadow)."""
-    ims = sorted((SRC / "images" / split).glob("*.jpeg"))
+    ims = split_images(split)
     for _ in range(50):
-        ip = ims[rng.integers(len(ims))]
+        ip, lp = ims[rng.integers(len(ims))]
         img = cv2.imread(str(ip))
         H, W = img.shape[:2]
         bx = [((xc - bw / 2) * W, (yc - bh / 2) * H, (xc + bw / 2) * W, (yc + bh / 2) * H)
-              for _, xc, yc, bw, bh in read_labels(SRC / "labels" / split / (ip.stem + ".txt"))]
+              for _, xc, yc, bw, bh in read_labels(lp)]
         s = int(rng.uniform(0.3, 0.55) * min(W, H))
         x, y = int(rng.uniform(0, W - s)), int(rng.uniform(0, H - s))
         if all(x + s < b[0] or x > b[2] or y + s < b[1] or y > b[3] for b in bx):
@@ -259,12 +314,18 @@ def write(split, name, img, boxes):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--train-composites", type=int, default=260)
-    ap.add_argument("--train-carpet-neg", type=int, default=140)
-    ap.add_argument("--train-counter-neg", type=int, default=30)
-    ap.add_argument("--orig-repeat", type=int, default=4, help="copies of each real train photo")
+    # 2026-11-14 data: 143 train photos (was 22), 7 classes: more composites, fewer repeats
+    ap.add_argument("--train-composites", type=int, default=420)
+    ap.add_argument("--train-carpet-neg", type=int, default=180)
+    ap.add_argument("--train-counter-neg", type=int, default=40)
+    ap.add_argument("--orig-repeat", type=int, default=2, help="copies of each real train photo")
+    ap.add_argument("--holdout", type=float, default=0.2,
+                    help="fraction of train photos of classes absent from val moved to val (0 = off)")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
+    if a.holdout > 0:
+        for cls, stems in plan_holdout(a.holdout, a.seed).items():
+            print(f"held out to val for '{cls}' (no val photo of it in the CSV): {stems}")
 
     if OUT.exists():
         shutil.rmtree(OUT)
@@ -274,17 +335,17 @@ def main():
 
     plan = {  # split: (composites, carpet negatives, counter negatives, seed offset)
         "train": (a.train_composites, a.train_carpet_neg, a.train_counter_neg, 0),
-        "val": (60, 40, 5, 1000),
+        "val": (90, 40, 5, 1000),
         "test": (60, 0, 0, 2000),
     }
     for split, (n_comp, n_neg, n_cneg, off) in plan.items():
         rng = np.random.default_rng(a.seed + off)
         # 1. the real photos (repeated in train so the composites do not drown them out)
-        for ip in sorted((SRC / "images" / split).glob("*.jpeg")):
+        for ip, lp in split_images(split):
             img = cv2.imread(str(ip))
             H, W = img.shape[:2]
             bx = [(c, (xc - bw / 2) * W, (yc - bh / 2) * H, (xc + bw / 2) * W, (yc + bh / 2) * H)
-                  for c, xc, yc, bw, bh in read_labels(SRC / "labels" / split / (ip.stem + ".txt"))]
+                  for c, xc, yc, bw, bh in read_labels(lp)]
             for r in range(a.orig_repeat if split == "train" else 1):
                 write(split, f"{ip.stem}_r{r}", img, bx)
         # 2. objects of THIS split pasted on carpet

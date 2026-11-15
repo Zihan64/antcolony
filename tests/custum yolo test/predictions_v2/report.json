@@ -1,0 +1,402 @@
+{
+  "model": "models\\warehouse_yolo26.pt",
+  "conf": 0.5,
+  "imgsz": 640,
+  "images": {
+    "IMG_9704.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.866,
+          "iou": 0.96,
+          "verdict": "correct",
+          "box": [
+            717,
+            762,
+            827,
+            870
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.859,
+          "iou": 0.78,
+          "verdict": "correct",
+          "box": [
+            310,
+            682,
+            503,
+            897
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.842,
+          "iou": 0.94,
+          "verdict": "correct",
+          "box": [
+            119,
+            415,
+            382,
+            606
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.77,
+          "iou": 0.88,
+          "verdict": "correct",
+          "box": [
+            60,
+            605,
+            296,
+            925
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.733,
+          "iou": 0.88,
+          "verdict": "correct",
+          "box": [
+            369,
+            382,
+            772,
+            677
+          ]
+        }
+      ],
+      "missed": [],
+      "n_labels": 5
+    },
+    "IMG_9705.jpeg": {
+      "detections": [
+        {
+          "name": "holder",
+          "conf": 0.893,
+          "iou": 0.78,
+          "verdict": "correct",
+          "box": [
+            618,
+            583,
+            893,
+            784
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.834,
+          "iou": 0.85,
+          "verdict": "correct",
+          "box": [
+            518,
+            118,
+            614,
+            270
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.834,
+          "iou": 0.74,
+          "verdict": "correct",
+          "box": [
+            124,
+            300,
+            305,
+            496
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.81,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            246,
+            550,
+            469,
+            749
+          ]
+        },
+        {
+          "name": "knob",
+          "conf": 0.551,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            445,
+            815,
+            520,
+            899
+          ]
+        }
+      ],
+      "missed": [],
+      "n_labels": 5
+    },
+    "IMG_9706.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.877,
+          "iou": 0.81,
+          "verdict": "correct",
+          "box": [
+            380,
+            795,
+            509,
+            921
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.853,
+          "iou": 0.91,
+          "verdict": "correct",
+          "box": [
+            569,
+            539,
+            849,
+            803
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.749,
+          "iou": 0.89,
+          "verdict": "correct",
+          "box": [
+            166,
+            253,
+            546,
+            653
+          ]
+        }
+      ],
+      "missed": [],
+      "n_labels": 3
+    },
+    "IMG_9707.jpeg": {
+      "detections": [
+        {
+          "name": "cup",
+          "conf": 0.881,
+          "iou": 0.82,
+          "verdict": "correct",
+          "box": [
+            298,
+            220,
+            510,
+            473
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.847,
+          "iou": 0.88,
+          "verdict": "correct",
+          "box": [
+            519,
+            450,
+            829,
+            585
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.608,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            751,
+            1,
+            935,
+            153
+          ]
+        }
+      ],
+      "missed": [
+        "slotted_block"
+      ],
+      "n_labels": 3
+    },
+    "IMG_9708.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.921,
+          "iou": 0.85,
+          "verdict": "correct",
+          "box": [
+            304,
+            286,
+            391,
+            379
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.834,
+          "iou": 0.83,
+          "verdict": "correct",
+          "box": [
+            622,
+            519,
+            885,
+            714
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.808,
+          "iou": 0.72,
+          "verdict": "correct",
+          "box": [
+            562,
+            290,
+            735,
+            452
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.73,
+          "iou": 0.8,
+          "verdict": "correct",
+          "box": [
+            134,
+            472,
+            381,
+            832
+          ]
+        }
+      ],
+      "missed": [
+        "slotted_block"
+      ],
+      "n_labels": 5
+    },
+    "IMG_9709.jpeg": {
+      "detections": [
+        {
+          "name": "knob",
+          "conf": 0.877,
+          "iou": 0.85,
+          "verdict": "correct",
+          "box": [
+            333,
+            290,
+            419,
+            386
+          ]
+        },
+        {
+          "name": "bracket",
+          "conf": 0.839,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            629,
+            565,
+            887,
+            777
+          ]
+        },
+        {
+          "name": "cup",
+          "conf": 0.791,
+          "iou": 0.74,
+          "verdict": "correct",
+          "box": [
+            479,
+            169,
+            666,
+            352
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.769,
+          "iou": 0.79,
+          "verdict": "correct",
+          "box": [
+            124,
+            466,
+            384,
+            839
+          ]
+        }
+      ],
+      "missed": [
+        "slotted_block"
+      ],
+      "n_labels": 5
+    },
+    "IMG_9710.jpeg": {
+      "detections": [
+        {
+          "name": "bracket",
+          "conf": 0.86,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            335,
+            368,
+            529,
+            558
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.855,
+          "iou": 0.84,
+          "verdict": "correct",
+          "box": [
+            575,
+            354,
+            898,
+            684
+          ]
+        },
+        {
+          "name": "slotted_block",
+          "conf": 0.815,
+          "iou": 0.81,
+          "verdict": "correct",
+          "box": [
+            451,
+            741,
+            754,
+            984
+          ]
+        },
+        {
+          "name": "holder",
+          "conf": 0.573,
+          "iou": 0.0,
+          "verdict": "false detection",
+          "box": [
+            618,
+            1,
+            933,
+            75
+          ]
+        }
+      ],
+      "missed": [
+        "knob",
+        "cup"
+      ],
+      "n_labels": 5
+    }
+  },
+  "summary": {
+    "tp": 26,
+    "fp": 2,
+    "fn": 5,
+    "wrong_class": 0,
+    "precision": 0.929,
+    "recall": 0.839
+  }
+}

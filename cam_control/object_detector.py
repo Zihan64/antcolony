@@ -23,8 +23,8 @@ What "class-agnostic" means here
   it appears; the model's own class label is discarded.
 
 Models
-  models/warehouse_yolo26.pt  default: trained detector for bracket, knob, slotted_block, cup,
-                        holder (training/build_warehouse_dataset.py + train_warehouse_yolo.py).
+  models/warehouse_yolo26.pt  default: trained detector for bracket, knob, slotted_block, cup, holder, stand, block (7 classes
+                        since the 2026-11-14 data; training/build_warehouse_dataset.py + train_warehouse_yolo.py).
                         Trained with carpet-only negatives, so floor texture is background; its
                         class names are kept and confidence is floored at CLOSED_SET_MIN_CONF.
   yoloe-26s-seg-pf.pt   prompt-free: segments everything that looks like an object (including
@@ -62,7 +62,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 WAREHOUSE_MODEL = os.path.join(_HERE, "models", "warehouse_yolo26.pt")
 
 MODEL_CHOICES = [
-    (WAREHOUSE_MODEL, "Trained warehouse detector (bracket, knob, slotted_block, cup, holder); "
+    (WAREHOUSE_MODEL, "Trained warehouse detector (bracket, knob, slotted_block, cup, holder, stand, block); "
                       "trained with carpet negatives so floor texture is not detected (default)"),
     ("yoloe-26s-seg-pf.pt", "YOLOE-26s prompt-free: any object, no class list (fires on carpet texture)"),
     ("yoloe-26n-seg-pf.pt", "YOLOE-26n prompt-free: any object, faster"),

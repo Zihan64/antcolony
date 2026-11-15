@@ -11,6 +11,7 @@ score it: a prediction is correct when it has the right class and IoU >= 0.5 wit
 
 Drawing: predicted boxes in the class colour with "class conf"; ground-truth boxes thin white.
 Output: <dir>/predictions/*.jpg, <dir>/predictions/contact_sheet.jpg, <dir>/predictions/report.json
+        (or --out <folder>, e.g. one folder per model to compare them)
 """
 import argparse
 import json
@@ -25,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 import object_detector as od  # noqa: E402
 
 COLOURS = {"bracket": (0, 165, 255), "knob": (255, 0, 255), "slotted_block": (255, 128, 0),
-           "cup": (0, 200, 0), "holder": (0, 0, 255)}
+           "cup": (0, 200, 0), "holder": (0, 0, 255), "stand": (200, 200, 0), "block": (0, 255, 255)}
 
 
 def iou(a, b):
@@ -41,13 +42,14 @@ def main():
     ap.add_argument("--model", default=od.WAREHOUSE_MODEL)
     ap.add_argument("--conf", type=float, default=od.CLOSED_SET_MIN_CONF)
     ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--out", help="output folder (default <folder>/predictions): keep one per model to compare")
     a = ap.parse_args()
 
     from ultralytics import YOLO
     m = YOLO(a.model)
     names = m.names
     d = Path(a.folder)
-    out = d / "predictions"
+    out = Path(a.out) if a.out else d / "predictions"
     out.mkdir(exist_ok=True)
     report, tiles = {"model": str(a.model), "conf": a.conf, "imgsz": a.imgsz, "images": {}}, []
     tot = dict(tp=0, fp=0, fn=0, wrong_class=0)

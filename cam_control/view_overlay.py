@@ -99,7 +99,7 @@ def text(img, s, org, color, scale=None, bold=False):
     # outline = the same text (same thickness: OpenCV's glyph spacing grows with thickness, so a
     # thicker black copy would run longer than the label) shifted around the label
     o = max(1, int(round(fs * 2.4)))
-    for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
+    for dx, dy in ((-o, -o), (o, o), (-o, o), (o, -o)):        # 4 diagonal copies: same outline, half the cost
         cv2.putText(img, s, (x + dx, y + dy), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), th, cv2.LINE_AA)
     cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, fs, color, th, cv2.LINE_AA)
 

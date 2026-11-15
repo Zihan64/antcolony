@@ -356,6 +356,7 @@ class Worker(QtCore.QThread):
         self.replan_period = 0.3
         self.robot_body = (0.08, None) # radius, height (None = from the robot tag)
         self.arena_free = True
+        self.map_base = None           # cumulative map background (planner thread), see _arena_step
         self.arena_last = {}
         self.udp = None                # (socket, (host, port))
         # tags + detected objects -> the AntColony coordinator (--antcolony HOST or ANTCOLONY_WORLD)
@@ -592,10 +593,15 @@ class Worker(QtCore.QThread):
             if cap:
                 self.rig.capture_background()
             gate = self.rig.confirm_cells if on_ else None
-        # Fuse into the map at most ~10x per second; tag tracking keeps running every frame.
+        # Fuse into the map ~5x per second (map_period_s): the floor map changes slowly, and the
+        # fusion (~50 ms) + object extraction (~20 ms) every frame kept the planner thread ~100 %
+        # busy, so frames queued and the map view lagged. Tags, robot and path are drawn live on
+        # the GUI thread from the newest tracking result (MainWindow._compose_cumulative).
         fuse_ok = floor.locked or not floor.auto_lock   # pause while the camera is moving
         info["map_paused"] = not fuse_ok
-        if fuse_ok and (cap or now - getattr(self, "_fuse_t", 0) >= 0.05):
+        fused = False
+        if fuse_ok and (cap or now - getattr(self, "_fuse_t", 0) >= float(a.get("map_period_s", 0.2))):
+            fused = True
             gm.update(raw, floor, K, D, now, clear_polys=clear, max_range=float(a["max_range_m"]),
                       min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap, attach_polys=attach,
                       confirm=gate)
@@ -663,7 +669,7 @@ class Worker(QtCore.QThread):
             (self.auto_replan and now - self._last_plan_t > self.replan_period))
         if replan:
             self._pair_key = key
-        draw = self.arena_free and now - getattr(self, "_draw_t", 0) > 0.1
+        draw = fused or self.map_base is None          # repaint the background only when the map changed
         foot = blocked = None
         cell = gm.plan_resolution()
         if replan or draw:
@@ -715,96 +721,22 @@ class Worker(QtCore.QThread):
                              "anchors": sorted(floor.world_corners), "locked": floor.locked}})
         self.arena_last = info
 
-        if not draw:
-            if info["events"] or info.get("background_captured"):
-                self.arena_ready.emit(QtGui.QImage(), 1.0, info)
-            return
-        self._draw_t = now
-        self.arena_free = False
-        vis = am.render_global(gm, blocked, foot, cell, now)
-        # Scale to display size FIRST (up or down), then draw: labels stay sharp and readable on
-        # the big central view (the map itself is only ~500 px at 4 mm cells)
-        s_ = min(1400 / max(vis.shape[1], 1), 1000 / max(vis.shape[0], 1))
-        vis = cv2.resize(vis, None, fx=s_, fy=s_, interpolation=cv2.INTER_NEAREST if s_ > 1 else cv2.INTER_AREA)
-        k_ = vis.shape[1] / 960.0                       # line / marker size follows the image
-
-        def P(pts):
-            return np.round(gm.w2p(pts) * s_).astype(np.int32)
-
-        def lbl(txt, p, col, bold=False):
-            vo.text(vis, txt, (int(p[0]), int(p[1])), col, bold=bold)
-
-        lw = max(1, int(round(2 * k_)))
-        if gm.view is not None:
-            r0, r1, c0, c1, _ = gm.view
-            cv2.rectangle(vis, (int(c0 * s_), int(r0 * s_)), (int(c1 * s_) - 1, int(r1 * s_) - 1), (255, 255, 255), 1)
-        vo._PLACED[id(vis)] = []                         # labels avoid each other
-        try:
-            if plan and plan.get("waypoints"):
-                cv2.polylines(vis, [P(plan["waypoints"])], False, (0, 0, 0), lw + 4, cv2.LINE_AA)
-                cv2.polylines(vis, [P(plan["waypoints"])], False, (0, 230, 0), lw + 1, cv2.LINE_AA)
-                if plan.get("length_m") is not None:
-                    lbl(f"A* {plan['length_m']:.2f} m", P([plan["waypoints"][-1]])[0] + [12, 26], (0, 230, 0), True)
-            # objects without tags: magenta = unknown (appearance, BOTH cameras), orange = known (detector, EITHER)
-            for o in r["objects"]:
-                if o.get("footprint_poly") is None:
-                    continue
-                known = o.get("method") == "detect"
-                col = (0, 165, 255) if known else (255, 0, 255)
-                if o.get("obstacle") is False:
-                    col = tuple(int(c * 0.6) for c in col)
-                cv2.polylines(vis, [P(o["footprint_poly"])], True, col, lw, cv2.LINE_AA)
-                p_ = P([(o["x"], o["y"])])[0]
-                name = o.get("name") or "object"
-                lbl(f"{o['id']} {name}" if known else f"{o['id']} unknown", p_ + [8, -8], col)
-            # tags: OR gate (either camera). Label: id, and which cameras saw it
-            for o in objs.values():
-                if o["id"] >= od.DET_ID_BASE or o.get("frame") != "world":
-                    continue
-                p = P([(o["x"], o["y"])])[0]
-                h = math.radians(o.get("yaw_deg", 0))
-                col = (255, 0, 255) if robot is not None and o is robot else (255, 255, 0)
-                cv2.circle(vis, tuple(p), int(5 * k_) + 1, col, -1, cv2.LINE_AA)
-                cv2.line(vis, tuple(p), (int(p[0] + 16 * k_ * math.cos(h)), int(p[1] - 16 * k_ * math.sin(h))), col, lw)
-                cams = o.get("cams") or []
-                lbl(f"tag {o['id']}" + (f"  [{'+'.join(cams)}]" if cams else ""), p + [10, 18], col)
-            if robot is not None:
-                p = P([(robot["x"], robot["y"])])[0]
-                cv2.circle(vis, tuple(p), int(round(a["robot_radius_m"] / gm.res * s_)), (255, 0, 255), lw)
-            if start is not None and robot is None:
-                cv2.drawMarker(vis, tuple(P([start])[0]), (255, 0, 255), cv2.MARKER_SQUARE, int(14 * k_), lw)
-            for n_, xy, done in self._route_draw:
-                p = P([xy])[0]
-                col = (150, 150, 150) if done else (0, 200, 255)
-                cv2.circle(vis, tuple(p), int(10 * k_), col, lw, cv2.LINE_AA)
-                lbl(f"stop {n_}" + (" (done)" if done else ""), p + [int(12 * k_), -int(10 * k_)], col)
-            if goal is not None:
-                p = P([goal])[0]
-                cv2.drawMarker(vis, tuple(p), (0, 255, 0), cv2.MARKER_STAR, int(22 * k_), lw)
-                if pair:
-                    lbl(f"goal {'tag' if pair[1] < od.DET_ID_BASE else 'object'} {pair[1]}", p + [12, -10], (0, 255, 0), True)
-            if pair and robot is not None:
-                p = P([(robot["x"], robot["y"])])[0]
-                lbl(f"start {'tag' if pair[0] < od.DET_ID_BASE else 'object'} {pair[0]}", p + [12, -12], (255, 0, 255), True)
-            if cmd:
-                cv2.circle(vis, tuple(P([cmd["target_xy"]])[0]), int(6 * k_), (0, 255, 255), lw)
-            # the cameras that feed the map
-            for name, c in (r.get("cameras") or ({"main": [r["camera"]["x"], r["camera"]["y"], r["camera"]["z"]]}
-                                                 if r.get("camera") else {})).items():
-                p = P([(c[0], c[1])])[0]
-                if 0 <= p[0] < vis.shape[1] and 0 <= p[1] < vis.shape[0]:
-                    cv2.drawMarker(vis, tuple(p), (255, 255, 255), cv2.MARKER_TRIANGLE_UP, int(16 * k_), lw)
-                    lbl(f"cam {name}", p + [10, -8], (255, 255, 255))
-        finally:
-            vo._PLACED.pop(id(vis), None)
-        gate = self.rig.gate_state if (self.rig and self.appearance) else \
-            ("single camera" if not self.rig else "unknown-object detection off")
-        vo.header(vis, "CUMULATIVE MAP", f"tags + known objects: either camera  |  unknown objects: both cameras  "
-                                          f"|  {gate}", warn=bool(self.rig) and self.appearance and "open" in gate)
-        rgb = np.ascontiguousarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
-        hh, ww = rgb.shape[:2]
-        qimg = QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy()
-        self.arena_ready.emit(qimg, s_, info)
+        if draw:
+            # background layer: floor colors, obstacles, inflated footprints, the camera's view
+            # (scaled to display size once here; the live layer is drawn on a copy ~20x per second)
+            vis = am.render_global(gm, blocked, foot, cell, now)
+            s_ = min(1400 / max(vis.shape[1], 1), 1000 / max(vis.shape[0], 1))
+            vis = cv2.resize(vis, None, fx=s_, fy=s_,
+                             interpolation=cv2.INTER_NEAREST if s_ > 1 else cv2.INTER_AREA)
+            if gm.view is not None:
+                r0, r1, c0, c1, _ = gm.view
+                cv2.rectangle(vis, (int(c0 * s_), int(r0 * s_)), (int(c1 * s_) - 1, int(r1 * s_) - 1),
+                              (255, 255, 255), 1)
+            self.map_base = {"img": vis, "s": s_, "x0": gm.x0, "y1": gm.y1, "res": gm.res,
+                             "robot_r_m": float(a.get("robot_radius_m", 0.1)), "t": now}
+        if info["events"] or info.get("background_captured") or now - getattr(self, "_info_t", 0) > 0.1:
+            self._info_t = now                      # status text only (the picture: GUI thread)
+            self.arena_ready.emit(QtGui.QImage(), self.map_base["s"] if self.map_base else 1.0, info)
 
     def _publish_extras_only(self, now):
         """The main camera delivered nothing for a while (unplugged, USB stall, stopped video):
@@ -2460,11 +2392,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_arena(self, qimg, scale, info):
         for ev in info.get("events", []):
             self.log_msg("Floor: " + ev)
-        if qimg.isNull():
+        if not qimg.isNull():                   # (the picture is composed by _compose_cumulative)
+            self.arena_view.set_frame(qimg, scale)
+        if not info.get("valid"):
             return
-        self.arena_view.set_frame(qimg, scale)
-        if self.worker:
-            self.worker.arena_free = True
         if info.get("background_captured"):
             self.log_msg("Empty floor captured. Obstacles are now detected.")
         txt = []
@@ -2896,6 +2827,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self._extra_tick = getattr(self, "_extra_tick", 0) + 1
         return self._extra_tick
 
+    def _compose_cumulative(self, r):
+        """The cumulative map view: the planner's cached background (floor map, obstacles; redrawn
+        ~5x per second) + the LIVE layer drawn here from the newest tracking result: tags (either
+        camera), objects without tags (known: either camera, unknown: both cameras), robot, A* path,
+        stops, goal, cameras, header. ~5 ms, so the robot on the map is as fresh as the tracking."""
+        w = self.worker
+        base = w.map_base if w else None
+        if base is None:
+            return
+        vis = base["img"].copy()
+        s_, x0, y1, res = base["s"], base["x0"], base["y1"], base["res"]
+        k_ = vis.shape[1] / 960.0
+        lw = max(1, int(round(2 * k_)))
+
+        def P(pts):
+            xy = np.asarray(pts, np.float64).reshape(-1, 2)
+            return np.round(np.stack([(xy[:, 0] - x0) / res - 0.5, (y1 - xy[:, 1]) / res - 0.5], 1) * s_).astype(np.int32)
+
+        def lbl(txt, p, col, bold=False):
+            vo.text(vis, txt, (int(p[0]), int(p[1])), col, bold=bold)
+
+        info = w.arena_last or {}
+        plan, pair = w._plan, w.pair
+        objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world"}
+        rid = view_robot_id(self.cfg, pair)
+        robot = objs.get(rid) if rid is not None else None
+        goal, start, cmd = info.get("goal"), info.get("start"), info.get("command")
+        vo._PLACED[id(vis)] = []
+        try:
+            if plan and plan.get("status") == "ok" and plan.get("waypoints"):
+                pts = P(plan["waypoints"])
+                cv2.polylines(vis, [pts], False, (0, 0, 0), lw + 4, cv2.LINE_AA)
+                cv2.polylines(vis, [pts], False, (0, 230, 0), lw + 1, cv2.LINE_AA)
+                if plan.get("length_m") is not None:
+                    lbl(f"A* {plan['length_m']:.2f} m", pts[-1] + [12, 26], (0, 230, 0), True)
+            for o in r["objects"]:                      # objects without tags
+                if o.get("footprint_poly") is None or o.get("frame") != "world":
+                    continue
+                known = o.get("method") == "detect"
+                col = vo.KNOWN if known else vo.UNKNOWN
+                if o.get("obstacle") is False:
+                    col = tuple(int(c * 0.6) for c in col)
+                cv2.polylines(vis, [P(o["footprint_poly"])], True, col, lw, cv2.LINE_AA)
+                lbl(f"{o['id']} {o.get('name') or 'object'}" if known else f"{o['id']} unknown",
+                    P([(o["x"], o["y"])])[0] + [8, -8], col)
+            for o in objs.values():                     # tags
+                if o["id"] >= od.DET_ID_BASE:
+                    continue
+                p = P([(o["x"], o["y"])])[0]
+                h = math.radians(o.get("yaw_deg", 0))
+                col = (255, 0, 255) if o is robot else (255, 255, 0)
+                cv2.circle(vis, tuple(p), int(5 * k_) + 1, col, -1, cv2.LINE_AA)
+                cv2.line(vis, tuple(p), (int(p[0] + 16 * k_ * math.cos(h)), int(p[1] - 16 * k_ * math.sin(h))), col, lw)
+                cams = o.get("cams") or []
+                lbl(f"tag {o['id']}" + (f"  [{'+'.join(cams)}]" if cams else ""), p + [10, 18], col)
+            if robot is not None:
+                p = P([(robot["x"], robot["y"])])[0]
+                cv2.circle(vis, tuple(p), int(round(base["robot_r_m"] / res * s_)), (255, 0, 255), lw)
+                if pair:
+                    lbl(f"start {'tag' if pair[0] < od.DET_ID_BASE else 'object'} {pair[0]}", p + [12, -12],
+                        (255, 0, 255), True)
+            elif start is not None:
+                cv2.drawMarker(vis, tuple(P([start])[0]), (255, 0, 255), cv2.MARKER_SQUARE, int(14 * k_), lw)
+            for n_, xy, done in list(w._route_draw):
+                p = P([xy])[0]
+                col = (150, 150, 150) if done else (0, 200, 255)
+                cv2.circle(vis, tuple(p), int(10 * k_), col, lw, cv2.LINE_AA)
+                lbl(f"stop {n_}" + (" (done)" if done else ""), p + [int(12 * k_), -int(10 * k_)], col)
+            if goal is not None:
+                p = P([goal])[0]
+                cv2.drawMarker(vis, tuple(p), (0, 255, 0), cv2.MARKER_STAR, int(22 * k_), lw)
+                if pair:
+                    lbl(f"goal {'tag' if pair[1] < od.DET_ID_BASE else 'object'} {pair[1]}", p + [12, -10],
+                        (0, 255, 0), True)
+            if cmd:
+                cv2.circle(vis, tuple(P([cmd["target_xy"]])[0]), int(6 * k_), (0, 255, 255), lw)
+            cams = r.get("cameras") or ({"main": [r["camera"]["x"], r["camera"]["y"], r["camera"]["z"]]}
+                                        if r.get("camera") else {})
+            for name, c in cams.items():
+                p = P([(c[0], c[1])])[0]
+                if 0 <= p[0] < vis.shape[1] and 0 <= p[1] < vis.shape[0]:
+                    cv2.drawMarker(vis, tuple(p), (255, 255, 255), cv2.MARKER_TRIANGLE_UP, int(16 * k_), lw)
+                    lbl(f"cam {name}", p + [10, -8], (255, 255, 255))
+        finally:
+            vo._PLACED.pop(id(vis), None)
+        gate = w.rig.gate_state if (w.rig and w.appearance) else \
+            ("single camera" if not w.rig else "unknown-object detection off")
+        vo.header(vis, "CUMULATIVE MAP", f"tags + known objects: either camera  |  unknown objects: both cameras  "
+                                          f"|  {gate}", warn=bool(w.rig) and w.appearance and "open" in gate)
+        rgb = np.ascontiguousarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+        hh, ww = rgb.shape[:2]
+        self.arena_view.set_frame(QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy(), s_)
+
     def _draw_map_cameras(self, cams):
         """Extra cameras on the top-down map: orange square + name (the main camera is the white dot)."""
         items = getattr(self, "_map_cam_items", None)
@@ -2948,6 +2972,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pair_goal.setEditText(str(want[1]))
             self.pair_btn.setChecked(True)
         now = time.perf_counter()
+        if self.tabs.currentIndex() == 0 and r is not getattr(self, "_composed_r", None) \
+                and now - getattr(self, "_composed_t", 0) >= 0.04:
+            self._composed_r, self._composed_t = r, now      # live cumulative map, <= 25 per second
+            try:
+                self._compose_cumulative(r)
+            except Exception as ex:                  # noqa: BLE001 - drawing must not stop the GUI
+                if getattr(self, "_compose_err", None) != repr(ex):
+                    self._compose_err = repr(ex)
+                    self.log_msg(f"Cumulative map: {ex!r}")
 
         # pivot tags: how many are in view, plane state
         piv = sorted((self.cfg.get("arena") or {}).get("corner_ids") or [])

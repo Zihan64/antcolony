@@ -1,32 +1,32 @@
 {
   "test_all": {
-    "mAP50": 0.99436,
-    "mAP50_95": 0.8410569805163187,
-    "precision": 0.9818548855671798,
-    "recall": 0.9720231384141467,
+    "mAP50": 0.9917298115418417,
+    "mAP50_95": 0.8681106135260406,
+    "precision": 0.988296943053711,
+    "recall": 0.9774631345416918,
     "per_class_mAP50_95": {
-      "bracket": 0.8343012565137515,
-      "knob": 0.8641767241379309,
-      "slotted_block": 0.8629551645911715,
-      "cup": 0.8111140981240983,
-      "holder": 0.8327376592146412
+      "bracket": 0.8297206521739129,
+      "knob": 0.9415877412907877,
+      "slotted_block": 0.837350631293023,
+      "cup": 0.845347073175509,
+      "holder": 0.8865469696969697
     }
   },
   "test_real_photos": {
-    "mAP50": 0.9949999999999999,
-    "mAP50_95": 0.8158999999999998,
-    "precision": 0.8641940739199008,
-    "recall": 1.0
+    "mAP50": 0.9870000000000001,
+    "mAP50_95": 0.7215514285714286,
+    "precision": 0.9564288870102737,
+    "recall": 0.9489553286506076
   },
   "carpet_false_positives": {
     "conf>=0.1": {
       "images_with_any": 1,
-      "total_boxes": 1,
+      "total_boxes": 2,
       "images": 200
     },
     "conf>=0.25": {
-      "images_with_any": 1,
-      "total_boxes": 1,
+      "images_with_any": 0,
+      "total_boxes": 0,
       "images": 200
     },
     "conf>=0.4": {
@@ -45,11 +45,11 @@
       "images": 200
     }
   },
-  "carpet_max_conf": 0.2779591679573059,
+  "carpet_max_conf": 0.18813402950763702,
   "base_model": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\training\\yolo26n.pt",
-  "epochs": 12,
+  "epochs": 15,
   "freeze": 10,
   "train_imgsz": 512,
   "eval_imgsz": 640,
-  "run_dir": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\runs\\warehouse_yolo26"
+  "run_dir": "C:\\Users\\yunin\\Downloads\\princeton\\antcolony\\cam_control\\runs\\warehouse_yolo26_v2"
 }

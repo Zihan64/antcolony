@@ -1,0 +1,198 @@
+filename,class_name,class_id,img_width,img_height,xmin,ymin,xmax,ymax,x_center_norm,y_center_norm,width_norm,height_norm,split,notes
+IMG_9704.jpeg,bracket,0,935,1247,124,421,380,605,0.269519,0.411387,0.273797,0.147554,test,multi-object scene
+IMG_9704.jpeg,knob,1,935,1247,719,764,827,870,0.826738,0.655172,0.115508,0.085004,test,multi-object scene
+IMG_9704.jpeg,slotted_block,2,935,1247,73,611,289,919,0.193583,0.613472,0.231016,0.246993,test,multi-object scene
+IMG_9704.jpeg,cup,3,935,1247,315,665,492,880,0.431551,0.619487,0.189305,0.172414,test,multi-object scene
+IMG_9704.jpeg,holder,4,935,1247,379,392,761,665,0.609626,0.423817,0.408556,0.218925,test,multi-object scene
+IMG_9705.jpeg,bracket,0,935,1247,521,123,613,285,0.606417,0.163593,0.098396,0.129912,test,multi-object scene
+IMG_9705.jpeg,knob,1,935,1247,448,818,518,890,0.516578,0.684844,0.074866,0.057739,test,multi-object scene
+IMG_9705.jpeg,slotted_block,2,935,1247,253,564,458,736,0.380214,0.521251,0.219251,0.137931,test,multi-object scene
+IMG_9705.jpeg,cup,3,935,1247,133,305,297,465,0.229947,0.308741,0.175401,0.128308,test,multi-object scene
+IMG_9705.jpeg,holder,4,935,1247,627,590,879,760,0.805348,0.541299,0.269519,0.136327,test,multi-object scene
+IMG_9706.jpeg,knob,1,935,1247,383,796,513,941,0.479144,0.696472,0.139037,0.116279,test,multi-object scene
+IMG_9706.jpeg,cup,3,935,1247,572,545,840,795,0.755080,0.537289,0.286631,0.200481,test,multi-object scene
+IMG_9706.jpeg,holder,4,935,1247,181,264,543,636,0.387166,0.360866,0.387166,0.298316,test,multi-object scene; holder upside down: pose not in train
+IMG_9707.jpeg,bracket,0,935,1247,517,458,827,578,0.718717,0.415397,0.331551,0.096231,test,multi-object scene
+IMG_9707.jpeg,slotted_block,2,935,1247,194,734,559,924,0.402674,0.664796,0.390374,0.152366,test,multi-object scene; slotted_block on its side: pose not in train
+IMG_9707.jpeg,cup,3,935,1247,303,245,498,470,0.428342,0.286688,0.208556,0.180433,test,multi-object scene
+IMG_9708.jpeg,bracket,0,935,1247,631,529,875,703,0.805348,0.493986,0.260963,0.139535,test,multi-object scene
+IMG_9708.jpeg,knob,1,935,1247,308,289,387,377,0.371658,0.267041,0.084492,0.070569,test,multi-object scene
+IMG_9708.jpeg,slotted_block,2,935,1247,489,887,781,988,0.679144,0.751804,0.312299,0.080994,test,multi-object scene; slotted_block on its side: pose not in train
+IMG_9708.jpeg,cup,3,935,1247,571,297,725,485,0.693048,0.313553,0.164706,0.150762,test,multi-object scene
+IMG_9708.jpeg,holder,4,935,1247,153,485,378,802,0.283957,0.516038,0.240642,0.254210,test,multi-object scene
+IMG_9709.jpeg,bracket,0,935,1247,639,576,877,770,0.810695,0.539695,0.254545,0.155573,test,multi-object scene
+IMG_9709.jpeg,knob,1,935,1247,336,295,416,383,0.402139,0.271852,0.085561,0.070569,test,multi-object scene
+IMG_9709.jpeg,slotted_block,2,935,1247,464,952,762,1030,0.655615,0.794707,0.318717,0.062550,test,multi-object scene; slotted_block on its side: pose not in train
+IMG_9709.jpeg,cup,3,935,1247,484,178,656,325,0.609626,0.201684,0.183957,0.117883,test,multi-object scene
+IMG_9709.jpeg,holder,4,935,1247,144,478,372,813,0.275936,0.517642,0.243850,0.268645,test,multi-object scene
+IMG_9710.jpeg,bracket,0,935,1247,339,377,522,572,0.460428,0.380513,0.195722,0.156375,test,multi-object scene
+IMG_9710.jpeg,knob,1,935,1247,153,679,251,784,0.216043,0.586608,0.104813,0.084202,test,multi-object scene
+IMG_9710.jpeg,slotted_block,2,935,1247,457,754,742,964,0.641176,0.688853,0.304813,0.168404,test,multi-object scene
+IMG_9710.jpeg,cup,3,935,1247,311,138,468,285,0.416578,0.169607,0.167914,0.117883,test,multi-object scene
+IMG_9710.jpeg,holder,4,935,1247,586,365,884,664,0.786096,0.412590,0.318717,0.239775,test,multi-object scene
+IMG_9674.jpeg,holder,4,935,1247,204,340,691,713,0.478610,0.422213,0.520856,0.299118,train,
+IMG_9675.jpeg,holder,4,935,1247,91,458,637,753,0.389305,0.485565,0.583957,0.236568,train,
+IMG_9676.jpeg,holder,4,935,1247,353,395,618,827,0.519251,0.489976,0.283422,0.346431,train,
+IMG_9678.jpeg,holder,4,935,1247,280,533,612,805,0.477005,0.536488,0.355080,0.218123,train,
+IMG_9679.jpeg,holder,4,935,1247,123,423,594,677,0.383422,0.441059,0.503743,0.203689,train,moved from test to train
+IMG_9680.jpeg,holder,4,935,1247,280,403,605,843,0.473262,0.499599,0.347594,0.352847,train,
+IMG_9681.jpeg,cup,3,935,1247,336,422,548,722,0.472727,0.458701,0.226738,0.240577,train,box tightened by hand to exclude cast shadow
+IMG_9682.jpeg,cup,3,935,1247,270,443,500,745,0.411765,0.476343,0.245989,0.242181,train,box tightened by hand to exclude cast shadow
+IMG_9683.jpeg,cup,3,935,1247,133,207,421,562,0.296257,0.308340,0.308021,0.284683,train,box tightened by hand to exclude cast shadow
+IMG_9685.jpeg,cup,3,935,1247,384,570,521,737,0.483957,0.524058,0.146524,0.133921,train,box tightened by hand to exclude cast shadow; moved from test to train
+IMG_9686.jpeg,bracket,0,935,1247,467,458,582,776,0.560963,0.494787,0.122995,0.255012,train,near duplicate of IMG_9687 (kept together in train)
+IMG_9687.jpeg,bracket,0,935,1247,496,475,616,797,0.594652,0.510024,0.128342,0.258220,train,near duplicate of IMG_9686 (kept together in train)
+IMG_9688.jpeg,bracket,0,935,1247,290,721,649,869,0.502139,0.637530,0.383957,0.118685,train,
+IMG_9689.jpeg,bracket,0,935,1247,290,335,479,735,0.411230,0.429030,0.202139,0.320770,train,
+IMG_9691.jpeg,bracket,0,935,1247,443,387,578,757,0.545989,0.458701,0.144385,0.296712,train,moved from test to train
+IMG_9692.jpeg,knob,1,935,1247,363,476,630,755,0.531016,0.493585,0.285561,0.223737,train,
+IMG_9693.jpeg,knob,1,935,1247,356,668,558,878,0.488770,0.619888,0.216043,0.168404,train,
+IMG_9694.jpeg,knob,1,935,1247,364,516,531,675,0.478610,0.477546,0.178610,0.127506,train,
+IMG_9695.jpeg,knob,1,935,1247,312,306,456,466,0.410695,0.309543,0.154011,0.128308,train,
+IMG_9697.jpeg,knob,1,935,1247,490,414,604,530,0.585027,0.378508,0.121925,0.093023,train,moved from test to train
+IMG_9698.jpeg,slotted_block,2,935,1247,285,522,643,859,0.496257,0.553729,0.382888,0.270249,train,
+IMG_9699.jpeg,slotted_block,2,935,1247,254,578,664,823,0.490909,0.561748,0.438503,0.196472,train,
+IMG_9700.jpeg,slotted_block,2,935,1247,328,432,559,844,0.474332,0.511628,0.247059,0.330393,train,
+IMG_9701.jpeg,bracket,0,935,1247,7,0,275,19,0.150802,0.007618,0.286631,0.015237,train,truncated at top edge; class inferred from flat yellow face
+IMG_9701.jpeg,slotted_block,2,935,1247,239,268,804,578,0.557754,0.339214,0.604278,0.248597,train,unlabeled yellow object truncated at top edge
+IMG_9703.jpeg,slotted_block,2,935,1247,343,323,587,568,0.497326,0.357257,0.260963,0.196472,train,moved from test to train
+IMG_9711.jpeg,knob,1,935,1247,269,462,571,762,0.449198,0.490778,0.322995,0.240577,train,close-up
+IMG_9712.jpeg,knob,1,935,1247,443,500,650,718,0.584492,0.488372,0.221390,0.174820,train,knob on its side; bottom edge tightened by hand
+IMG_9713.jpeg,knob,1,935,1247,305,501,527,725,0.444920,0.491580,0.237433,0.179631,train,knob upside down; bottom edge tightened by hand
+IMG_9714.jpeg,knob,1,935,1247,352,505,549,682,0.481818,0.475942,0.210695,0.141941,train,knob upside down; bottom edge tightened by hand
+IMG_9715.jpeg,holder,4,935,1247,165,326,803,752,0.517647,0.432237,0.682353,0.341620,train,holder upside down
+IMG_9716.jpeg,holder,4,935,1247,181,457,693,993,0.467380,0.581395,0.547594,0.429832,train,holder on its side
+IMG_9717.jpeg,holder,4,935,1247,278,177,703,944,0.524599,0.449479,0.454545,0.615076,train,holder on its side
+IMG_9718.jpeg,holder,4,935,1247,287,157,749,1126,0.554011,0.514435,0.494118,0.777065,train,holder on its side
+IMG_9719.jpeg,holder,4,935,1247,239,392,711,1127,0.508021,0.609062,0.504813,0.589415,train,close-up
+IMG_9720.jpeg,holder,4,935,1247,104,247,785,809,0.475401,0.423416,0.728342,0.450682,train,close-up
+IMG_9721.jpeg,holder,4,935,1247,45,392,801,700,0.452406,0.437851,0.808556,0.246993,train,holder side profile
+IMG_9722.jpeg,holder,4,935,1247,0,75,835,592,0.446524,0.267442,0.893048,0.414595,train,truncated at left edge; box set by hand to exclude background clutter
+IMG_9723.jpeg,holder,4,935,1247,140,472,842,782,0.525134,0.502807,0.750802,0.248597,train,holder side profile
+IMG_9724.jpeg,holder,4,935,1247,89,651,746,1117,0.446524,0.708901,0.702674,0.373697,train,close-up
+IMG_9725.jpeg,holder,4,935,1247,18,235,768,970,0.420321,0.483160,0.802139,0.589415,train,close-up
+IMG_9726.jpeg,holder,4,935,1247,172,409,673,1077,0.451872,0.595830,0.535829,0.535686,train,holder on its side
+IMG_9727.jpeg,holder,4,935,1247,53,387,871,773,0.494118,0.465116,0.874866,0.309543,train,holder side profile
+IMG_9728.jpeg,holder,4,935,1247,185,104,679,1009,0.462032,0.446271,0.528342,0.725742,train,close-up
+IMG_9729.jpeg,holder,4,935,1247,0,0,833,903,0.445455,0.362069,0.890909,0.724138,train,truncated at top and left edges
+IMG_9730.jpeg,knob,1,935,1247,496,0,643,85,0.609091,0.034082,0.157219,0.068164,train,"truncated at top edge, background object"
+IMG_9730.jpeg,holder,4,935,1247,113,161,935,697,0.560428,0.344026,0.879144,0.429832,train,close-up
+IMG_9731.jpeg,holder,4,935,1247,160,157,814,960,0.520856,0.447875,0.699465,0.643945,train,close-up
+IMG_9732.jpeg,holder,4,935,1247,68,139,915,1155,0.525668,0.518845,0.905882,0.814755,train,close-up
+IMG_9733.jpeg,knob,1,935,1247,330,459,648,778,0.522995,0.495990,0.340107,0.255814,train,close-up
+IMG_9734.jpeg,knob,1,935,1247,305,320,707,757,0.541176,0.431836,0.429947,0.350441,train,close-up
+IMG_9735.jpeg,cup,3,935,1247,185,288,838,918,0.547059,0.483561,0.698396,0.505213,train,on its side; cup on its side
+IMG_9736.jpeg,cup,3,935,1247,140,330,742,918,0.471658,0.500401,0.643850,0.471532,train,cup on its side
+IMG_9736.jpeg,holder,4,935,1247,0,0,277,183,0.148128,0.073376,0.296257,0.146752,train,"truncated at top-left corner, background object"
+IMG_9737.jpeg,cup,3,935,1247,541,418,935,1000,0.789305,0.568565,0.421390,0.466720,train,truncated at right edge
+IMG_9738.jpeg,cup,3,935,1247,393,390,808,988,0.642246,0.552526,0.443850,0.479551,train,close-up
+IMG_9739.jpeg,cup,3,935,1247,165,295,873,985,0.555080,0.513232,0.757219,0.553328,train,cup on its side
+IMG_9739.jpeg,holder,4,935,1247,0,0,493,145,0.263636,0.058140,0.527273,0.116279,train,"truncated at top edge, background object"
+IMG_9740.jpeg,cup,3,935,1247,272,383,787,908,0.566310,0.517642,0.550802,0.421010,train,lid side up
+IMG_9740.jpeg,holder,4,935,1247,276,0,689,188,0.516043,0.075381,0.441711,0.150762,train,"truncated at top edge, background object"
+IMG_9741.jpeg,cup,3,935,1247,302,412,718,860,0.545455,0.510024,0.444920,0.359262,train,open rim visible
+IMG_9742.jpeg,cup,3,935,1247,180,305,585,862,0.409091,0.467923,0.433155,0.446672,train,open rim visible
+IMG_9742.jpeg,holder,4,935,1247,685,0,935,254,0.866310,0.101844,0.267380,0.203689,train,"truncated at top-right corner, background object"
+IMG_9743.jpeg,cup,3,935,1247,255,375,660,785,0.489305,0.465116,0.433155,0.328789,train,open rim visible
+IMG_9744.jpeg,cup,3,935,1247,312,472,705,1055,0.543850,0.612269,0.420321,0.467522,train,open rim visible
+IMG_9745.jpeg,cup,3,935,1247,440,683,852,1072,0.690909,0.703689,0.440642,0.311949,train,open rim visible
+IMG_9746.jpeg,cup,3,935,1247,15,168,510,712,0.280749,0.352847,0.529412,0.436247,train,"open rim visible, top-down"
+IMG_9747.jpeg,cup,3,935,1247,272,155,862,790,0.606417,0.378909,0.631016,0.509222,train,"open rim visible, top-down"
+IMG_9748.jpeg,cup,3,935,1247,152,230,862,890,0.542246,0.449078,0.759358,0.529270,train,cup on its side
+IMG_9749.jpeg,cup,3,935,1247,160,222,728,865,0.474866,0.435846,0.607487,0.515638,train,"cup on its side, lid end visible"
+IMG_9750.jpeg,bracket,0,935,1247,102,232,935,832,0.554545,0.426624,0.890909,0.481155,train,"close-up, touches right edge; bottom edge tightened by hand"
+IMG_9751.jpeg,bracket,0,935,1247,63,632,578,1058,0.342781,0.677626,0.550802,0.341620,train,right edge tightened by hand
+IMG_9751.jpeg,holder,4,935,1247,356,0,709,131,0.569519,0.052526,0.377540,0.105052,train,"truncated at top edge, background object"
+IMG_9755.jpeg,bracket,0,935,1247,299,381,696,901,0.532086,0.514034,0.424599,0.417001,train,close-up
+IMG_9756.jpeg,bracket,0,935,1247,145,593,847,884,0.530481,0.592221,0.750802,0.233360,train,close-up
+IMG_9757.jpeg,bracket,0,935,1247,101,292,886,684,0.527807,0.391339,0.839572,0.314354,train,close-up
+IMG_9758.jpeg,bracket,0,935,1247,118,192,815,881,0.498930,0.430233,0.745455,0.552526,train,close-up
+IMG_9759.jpeg,bracket,0,935,1247,201,193,680,1102,0.471123,0.519246,0.512299,0.728949,train,close-up
+IMG_9760.jpeg,bracket,0,935,1247,241,188,797,705,0.555080,0.358059,0.594652,0.414595,train,bottom edge tightened by hand (object partly in shadow)
+IMG_9761.jpeg,slotted_block,2,935,1247,175,247,862,1121,0.554545,0.548516,0.734759,0.700882,train,on its side: lattice face visible
+IMG_9762.jpeg,slotted_block,2,935,1247,482,41,874,753,0.725134,0.318364,0.419251,0.570970,train,"close-up, object near top edge"
+IMG_9763.jpeg,slotted_block,2,935,1247,0,276,912,901,0.487701,0.471933,0.975401,0.501203,train,truncated at left edge; right edge tightened by hand
+IMG_9764.jpeg,slotted_block,2,935,1247,214,347,759,807,0.520321,0.462711,0.582888,0.368885,train,close-up
+IMG_9765.jpeg,slotted_block,2,935,1247,183,99,829,1074,0.541176,0.470329,0.690909,0.781877,train,close-up
+IMG_9766.jpeg,slotted_block,2,935,1247,124,259,777,879,0.481818,0.456295,0.698396,0.497193,train,on its side: lattice face visible
+IMG_9767.jpeg,slotted_block,2,935,1247,173,250,866,1181,0.555615,0.573777,0.741176,0.746592,train,on its side: lattice face visible
+IMG_9768.jpeg,slotted_block,2,935,1247,308,200,647,930,0.510695,0.453087,0.362567,0.585405,train,on its side: lattice face visible
+IMG_9769.jpeg,slotted_block,2,935,1247,238,239,557,1000,0.425134,0.496792,0.341176,0.610265,train,on its side: lattice face visible
+IMG_9770.jpeg,stand,5,935,1247,72,8,918,848,0.529412,0.343224,0.904813,0.673617,train,new class
+IMG_9771.jpeg,stand,5,935,1247,35,290,910,875,0.505348,0.467121,0.935829,0.469126,train,new class; cluttered background
+IMG_9772.jpeg,knob,1,935,1247,0,455,82,540,0.043850,0.398957,0.087701,0.068164,train,background object; truncated at left edge
+IMG_9772.jpeg,stand,5,935,1247,30,70,800,1062,0.443850,0.453889,0.823529,0.795509,train,new class; cluttered background
+IMG_9773.jpeg,stand,5,935,1247,390,62,735,1072,0.601604,0.454691,0.368984,0.809944,train,new class
+IMG_9774.jpeg,knob,1,935,1247,0,560,72,648,0.038503,0.484362,0.077005,0.070569,train,background object; truncated at left edge
+IMG_9774.jpeg,stand,5,935,1247,30,185,782,1247,0.434225,0.574178,0.804278,0.851644,train,new class; touches frame edge; cluttered background
+IMG_9775.jpeg,stand,5,935,1247,0,285,850,1018,0.454545,0.522454,0.909091,0.587811,train,new class; touches frame edge; cluttered background
+IMG_9776.jpeg,stand,5,935,1247,0,268,935,958,0.500000,0.491580,1.000000,0.553328,train,new class; touches frame edge; cluttered background
+IMG_9777.jpeg,stand,5,935,1247,172,90,870,1247,0.557219,0.536087,0.746524,0.927827,train,new class; touches frame edge
+IMG_9778.jpeg,stand,5,935,1247,125,108,735,1085,0.459893,0.478348,0.652406,0.783480,train,new class
+IMG_9779.jpeg,knob,1,935,1247,512,255,580,332,0.583957,0.235365,0.072727,0.061748,train,background object
+IMG_9779.jpeg,slotted_block,2,935,1247,222,58,410,166,0.337968,0.089816,0.201070,0.086608,train,background object
+IMG_9779.jpeg,stand,5,935,1247,0,380,898,792,0.480214,0.469928,0.960428,0.330393,train,new class; touches frame edge
+IMG_9780.jpeg,stand,5,935,1247,22,278,885,855,0.485027,0.454290,0.922995,0.462711,train,new class; cluttered background
+IMG_9781.jpeg,stand,5,935,1247,0,160,710,1005,0.379679,0.467121,0.759358,0.677626,train,new class; touches frame edge; cluttered background
+IMG_9782.jpeg,stand,5,935,1247,15,262,885,1150,0.481283,0.566159,0.930481,0.712109,train,new class
+IMG_9783.jpeg,stand,5,935,1247,138,158,935,1000,0.573797,0.464314,0.852406,0.675221,train,new class; touches frame edge
+IMG_9784.jpeg,stand,5,935,1247,42,195,935,1020,0.522460,0.487169,0.955080,0.661588,train,new class; touches frame edge
+IMG_9785.jpeg,stand,5,935,1247,5,250,885,995,0.475936,0.499198,0.941176,0.597434,train,new class
+IMG_9786.jpeg,block,6,935,1247,304,483,633,832,0.501070,0.527265,0.351872,0.279872,train,green variant of block class
+IMG_9787.jpeg,block,6,935,1247,330,643,604,892,0.499465,0.615477,0.293048,0.199679,train,green variant of block class
+IMG_9788.jpeg,block,6,935,1247,176,252,635,749,0.433690,0.401363,0.490909,0.398557,train,green variant of block class
+IMG_9789.jpeg,block,6,935,1247,266,510,544,810,0.433155,0.529270,0.297326,0.240577,train,green variant of block class
+IMG_9790.jpeg,block,6,935,1247,383,582,633,809,0.543316,0.557739,0.267380,0.182037,train,green variant of block class
+IMG_9791.jpeg,block,6,935,1247,411,332,846,773,0.672193,0.443063,0.465241,0.353649,train,green variant of block class
+IMG_9792.jpeg,block,6,935,1247,165,466,560,825,0.387701,0.517642,0.422460,0.287891,train,green variant of block class
+IMG_9793.jpeg,block,6,935,1247,195,224,698,693,0.477540,0.367682,0.537968,0.376103,train,green variant of block class
+IMG_9794.jpeg,block,6,935,1247,84,266,672,870,0.404278,0.455493,0.628877,0.484362,train,green variant of block class
+IMG_9795.jpeg,knob,1,935,1247,133,42,225,148,0.191444,0.076183,0.098396,0.085004,train,background object
+IMG_9795.jpeg,block,6,935,1247,333,439,673,829,0.537968,0.508420,0.363636,0.312751,train,green variant of block class
+IMG_9796.jpeg,block,6,935,1247,281,526,522,767,0.429412,0.518444,0.257754,0.193264,train,green variant of block class
+IMG_9797.jpeg,knob,1,935,1247,667,278,743,358,0.754011,0.255012,0.081283,0.064154,train,background object
+IMG_9797.jpeg,slotted_block,2,935,1247,447,135,640,205,0.581283,0.136327,0.206417,0.056135,train,"background object, partly occluded"
+IMG_9797.jpeg,stand,5,935,1247,588,0,935,300,0.814439,0.120289,0.371123,0.240577,train,background object; truncated at top and right edges; boxed by hand
+IMG_9797.jpeg,block,6,935,1247,359,622,527,828,0.473797,0.581395,0.179679,0.165196,train,green variant of block class
+IMG_9798.jpeg,block,6,935,1247,417,575,594,755,0.540642,0.533280,0.189305,0.144346,train,green variant of block class
+IMG_9799.jpeg,block,6,935,1247,462,259,745,597,0.645455,0.343224,0.302674,0.271051,train,green variant of block class
+IMG_9800.jpeg,knob,1,935,1247,859,48,935,173,0.959358,0.088613,0.081283,0.100241,train,background object; truncated at right edge
+IMG_9800.jpeg,block,6,935,1247,235,539,651,1008,0.473797,0.620289,0.444920,0.376103,train,red variant of block class
+IMG_9801.jpeg,block,6,935,1247,352,422,721,828,0.573797,0.501203,0.394652,0.325581,train,red variant of block class
+IMG_9802.jpeg,block,6,935,1247,377,341,776,775,0.616578,0.447474,0.426738,0.348035,train,red variant of block class
+IMG_9803.jpeg,block,6,935,1247,195,466,664,945,0.459358,0.565758,0.501604,0.384122,train,red variant of block class
+IMG_9804.jpeg,block,6,935,1247,341,602,659,973,0.534759,0.631516,0.340107,0.297514,train,red variant of block class
+IMG_9805.jpeg,block,6,935,1247,243,513,814,1115,0.565241,0.652767,0.610695,0.482759,train,red variant of block class
+IMG_9806.jpeg,knob,1,935,1247,511,0,615,112,0.602139,0.044908,0.111230,0.089816,train,background object; truncated at top edge
+IMG_9806.jpeg,block,6,935,1247,270,444,673,884,0.504278,0.532478,0.431016,0.352847,train,red variant of block class
+IMG_9807.jpeg,block,6,935,1247,204,301,640,792,0.451337,0.438252,0.466310,0.393745,train,red variant of block class
+IMG_9808.jpeg,block,6,935,1247,347,585,579,825,0.495187,0.565357,0.248128,0.192462,train,red variant of block class
+IMG_9809.jpeg,block,6,935,1247,184,548,484,908,0.357219,0.583801,0.320856,0.288693,train,red variant of block class
+IMG_9810.jpeg,block,6,935,1247,95,629,476,1097,0.305348,0.692061,0.407487,0.375301,train,red variant of block class
+IMG_9811.jpeg,block,6,935,1247,158,391,681,876,0.448663,0.508019,0.559358,0.388933,train,red variant of block class
+IMG_9812.jpeg,block,6,935,1247,373,464,630,714,0.536364,0.472334,0.274866,0.200481,train,red variant of block class
+IMG_9813.jpeg,block,6,935,1247,385,539,616,833,0.535294,0.550120,0.247059,0.235766,train,red variant of block class
+IMG_9814.jpeg,block,6,935,1247,375,566,710,924,0.580214,0.597434,0.358289,0.287089,train,red variant of block class
+IMG_9815.jpeg,block,6,935,1247,215,493,506,789,0.385561,0.514034,0.311230,0.237370,train,green variant of block class
+IMG_9816.jpeg,block,6,935,1247,245,475,608,842,0.456150,0.528067,0.388235,0.294306,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9817.jpeg,block,6,935,1247,268,402,605,775,0.466845,0.471933,0.360428,0.299118,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9818.jpeg,block,6,935,1247,203,506,720,1050,0.493583,0.623897,0.552941,0.436247,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9819.jpeg,block,6,935,1247,258,386,695,810,0.509626,0.479551,0.467380,0.340016,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9820.jpeg,block,6,935,1247,290,203,690,665,0.524064,0.348035,0.427807,0.370489,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9821.jpeg,block,6,935,1247,258,268,712,752,0.518717,0.408982,0.485561,0.388132,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9822.jpeg,block,6,935,1247,250,482,825,1080,0.574866,0.626303,0.614973,0.479551,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9823.jpeg,block,6,935,1247,142,345,670,905,0.434225,0.501203,0.564706,0.449078,train,blue variant of block class; blue LED lighting; boxed by hand
+IMG_9824.jpeg,block,6,935,1247,315,531,606,800,0.492513,0.533681,0.311230,0.215718,train,blue variant of block class
+IMG_9825.jpeg,block,6,935,1247,331,431,573,699,0.483422,0.453087,0.258824,0.214916,train,blue variant of block class
+IMG_9826.jpeg,block,6,935,1247,299,559,622,881,0.492513,0.577386,0.345455,0.258220,train,blue variant of block class
+IMG_9827.jpeg,block,6,935,1247,131,403,678,915,0.432620,0.528468,0.585027,0.410585,train,blue variant of block class
+IMG_9828.jpeg,block,6,935,1247,309,288,673,676,0.525134,0.386528,0.389305,0.311147,train,blue variant of block class
+knob_extra_01.jpeg,knob,1,935,1247,120,512,540,898,0.352941,0.565357,0.449198,0.309543,train,uploaded as photo.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
+knob_extra_02.jpeg,knob,1,935,1247,197,410,512,785,0.379144,0.479150,0.336898,0.300722,train,uploaded as photo_1.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
+knob_extra_03.jpeg,knob,1,935,1247,223,355,682,770,0.483957,0.451083,0.490909,0.332799,train,uploaded as photo_2ec672.jpeg; knob on its side or upside down; bottom edge tightened by hand to exclude shadow
+IMG_9677.jpeg,holder,4,935,1247,346,343,752,728,0.587166,0.429431,0.434225,0.308741,val,
+IMG_9684.jpeg,cup,3,935,1247,407,340,637,684,0.558289,0.410585,0.245989,0.275862,val,"background clutter (phone, red bag) left unlabeled"
+IMG_9690.jpeg,bracket,0,935,1247,323,352,679,676,0.535829,0.412189,0.380749,0.259824,val,
+IMG_9696.jpeg,knob,1,1247,935,595,257,776,449,0.549719,0.377540,0.145148,0.205348,val,landscape orientation
+IMG_9702.jpeg,bracket,0,935,1247,348,0,497,37,0.451872,0.014836,0.159358,0.029671,val,truncated at top edge; class inferred from flat yellow face
+IMG_9702.jpeg,slotted_block,2,935,1247,365,389,589,611,0.510160,0.400962,0.239572,0.178027,val,unlabeled yellow and black objects truncated at top edge

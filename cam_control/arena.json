@@ -6,25 +6,25 @@
       "x": 0.0,
       "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 15.47
+      "yaw_deg": 12.71
     },
     "32": {
-      "x": 1.46075,
+      "x": 1.54876,
       "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 177.856
+      "yaw_deg": 176.62
     },
     "31": {
-      "x": 1.22031,
-      "y": 2.22375,
+      "x": 1.57797,
+      "y": 1.92464,
       "z": 0.0,
-      "yaw_deg": 158.454
+      "yaw_deg": 149.401
     },
     "30": {
-      "x": -0.01283,
-      "y": 2.19524,
+      "x": 0.32891,
+      "y": 2.06895,
       "z": 0.0,
-      "yaw_deg": 8.36
+      "yaw_deg": 0.47
     }
   },
   "objects": {},
@@ -39,7 +39,7 @@
     "tape_m": null,
     "width_m": null,
     "height_m": null,
-    "focal_px": 974.59,
+    "focal_px": 955.04,
     "positions": null,
     "margin_m": 0.0,
     "max_range_m": 4.0,
@@ -64,8 +64,8 @@
     },
     "focal_source": "tags",
     "focal_at_px": [
-      1920,
-      1080
+      1280,
+      720
     ],
     "k1": 0.0
   },
@@ -84,12 +84,12 @@
       30
     ],
     "camera_distance_m": {
-      "32": 1.4608,
-      "30": 2.1953
+      "32": 1.5488,
+      "30": 2.0949
     },
     "tape_m": {},
-    "fit_px_free": 1.716,
-    "focal_free_px": 974.59,
+    "fit_px_free": 0.679,
+    "focal_free_px": 955.04,
     "source": "printed tag sizes (no tape yet): enter tape distances 29->32 and 29->30 for a precise scale",
     "tags": {
       "29": {
@@ -101,58 +101,58 @@
           0.0,
           0.0
         ],
-        "yaw_deg": 15.47
+        "yaw_deg": 12.71
       },
       "32": {
         "xy_m": [
-          1.4608,
+          1.5488,
           0.0
         ],
         "camera_saw_xy_m": [
-          1.4608,
+          1.5488,
           0.0
         ],
-        "yaw_deg": 177.86
+        "yaw_deg": 176.62
       },
       "31": {
         "xy_m": [
-          1.2203,
-          2.2238
+          1.578,
+          1.9246
         ],
         "camera_saw_xy_m": [
-          1.2203,
-          2.2238
+          1.578,
+          1.9246
         ],
-        "yaw_deg": 158.45
+        "yaw_deg": 149.4
       },
       "30": {
         "xy_m": [
-          -0.0128,
-          2.1952
+          0.3289,
+          2.0689
         ],
         "camera_saw_xy_m": [
-          -0.0128,
-          2.1952
+          0.3289,
+          2.0689
         ],
-        "yaw_deg": 8.36
+        "yaw_deg": 0.47
       }
     },
     "warnings": [],
-    "fit_px": 1.716,
-    "focal_px": 974.59,
+    "fit_px": 0.679,
+    "focal_px": 955.04,
     "focal_estimated": true,
     "k1": 0.0,
-    "camera_height_m": 1.454,
+    "camera_height_m": 1.7645,
     "plane_rms_mm": 0.0,
     "focal_estimate": {
-      "f_px": 974.59,
-      "f_mm_full_frame": 18.22
+      "f_px": 955.04,
+      "f_mm_full_frame": 26.79
     },
     "mm_per_camera_pixel": {
-      "c0": 6.03,
-      "c1": 2.22,
-      "c2": 2.42,
-      "c3": 5.46
+      "c0": 4.8,
+      "c1": 2.74,
+      "c2": 2.2,
+      "c3": 4.28
     }
   }
 }
