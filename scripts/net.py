@@ -36,7 +36,7 @@ CARS = {  # name: (MAC of the Pi's Wi-Fi, ssh user, program folder on the car or
 def sh(cmd, timeout=20):
     try:
         return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout).stdout
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):          # OSError: too many open files etc. - treat as no answer
         return ""
 
 
@@ -54,20 +54,26 @@ def norm_mac(m):
     return ":".join(p.zfill(2) for p in m.lower().split(":"))
 
 
-def find_cars(net):
+def find_cars(net, known=None):
+    found = {}
+    for n, ip_ in (known or {}).items():                 # the addresses we already know, if they are on this network
+        if n in CARS and ip_ and ipaddress.ip_address(ip_) in net and "bytes from" in sh(["ping", "-c", "2", "-t", "2", ip_], 6):
+            found[n] = ip_
+    if all(n in found for n in ("A", "B")):
+        print("found at the known addresses - no scan needed")
+        return found
     hosts = list(net.hosts())
     if len(hosts) > 2048:
         sys.exit(f"network {net} is too big to scan")
     print(f"scanning {len(hosts)} addresses of {net} ...", flush=True)
-    with ThreadPoolExecutor(128) as ex:
+    with ThreadPoolExecutor(32) as ex:
         list(ex.map(lambda h: sh(["ping", "-c", "1", "-t", "1", str(h)], 3), hosts))
-    found = {}
     for line in sh(["arp", "-an"]).splitlines():
         m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-fA-F:]+)", line)
         if not m:
             continue
         for name, (mac, _, _) in CARS.items():
-            if norm_mac(m[2]) == mac:
+            if norm_mac(m[2]) == mac and name not in found:
                 found[name] = m[1]
     return found
 
@@ -78,15 +84,12 @@ def main():
     a = ap.parse_args()
     ifc, ip, net = my_network()
     print(f"this Mac: {ip} on {net} ({ifc})")
-    found = find_cars(net)
-    cfg_path0 = os.path.join(ROOT, "config.json")
-    with open(cfg_path0, encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as f:
         prof0 = (json.load(f).get("networks") or {})
-    for pname in ("here", "lan", "hyatt"):              # not found by MAC (ARP can miss a sleepy Pi): try the known addresses
-        for n, known in (prof0.get(pname) or {}).items():
-            if n in CARS and n not in found and known and ipaddress.ip_address(known) in net \
-                    and "bytes from" in sh(["ping", "-c", "2", "-t", "2", known], 6):
-                found[n] = known
+    known = {}
+    for pname in ("hyatt", "lan", "here"):              # later profiles win
+        known.update({n: v for n, v in (prof0.get(pname) or {}).items() if v})
+    found = find_cars(net, known)
     for n in CARS:
         print(f"  car {n}: " + (found[n] if n in found else "NOT FOUND (switched off, or on another Wi-Fi)"))
     if not any(n in found for n in ("A", "B")):
