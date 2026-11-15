@@ -17,7 +17,7 @@ COLOURS = ("red", "blue", "green", "yellow")
 
 class World:
     def __init__(self, objects):
-        self.objects, self.tray, self.at_tray, self.both_at_tray, self.same_time = list(objects), [], set(), False, False
+        self.objects, self.tray, self.at_tray, self.both_at_tray, self.same_time, self.seeks = list(objects), [], set(), False, False, []
         self.working = {}
 
 
@@ -57,11 +57,16 @@ class FakeCar:
                 self.hold = col
                 return True, "done - holding", 1
             if skill == "seek":
+                self.w.seeks.append((self.name, args.get("arrive_cm")))
+                if args.get("arrive_cm", 40) > 60:           # told to stop short: not at the tray yet
+                    return True, "in front of the white tray: about 80 cm", 1
+                self.near = True
+                return True, "in front of the white tray", 1
+            if skill == "dock":
                 if self.w.at_tray - {self.name}:
                     self.w.both_at_tray = True
                 self.w.at_tray.add(self.name)
-                return True, "in front of the white tray", 1
-            if skill == "dock":
+                time.sleep(0.05)
                 self.w.tray.append(self.hold)
                 self.hold = None
                 self.w.working.pop(self.name, None)
@@ -77,7 +82,7 @@ class FakeCar:
 
 
 ARGS = types.SimpleNamespace(noun="block", obj_height=3.0, tries=2, back_cm=18, find_bottom=0.4, target="white tray",
-                             seek="{}", place_z=10, away_cm=35, choose_s=5)
+                             seek="{}", place_z=10, away_cm=35, choose_s=5, queue_cm=80)
 
 
 def play(objects, a_kw=None, b_kw=None, da=None, db=None):
@@ -103,7 +108,7 @@ def check(name, cond, info=""):
 
 w, r = play(["red", "blue", "green"])
 check("three objects: all in the tray, both cars worked", sorted(w.tray) == ["blue", "green", "red"] and not w.objects and r["A"] + r["B"] == 3, r)
-check("  never both cars at the tray, never the same object at the same time", not w.both_at_tray and not w.same_time)
+check("  never both cars at the rim, never the same object at the same time", not w.both_at_tray and not w.same_time)
 w, r = play(["red", "red", "blue", "blue", "green"])
 check("five objects, colours repeated: floor cleared", not w.objects and len(w.tray) == 5 and not w.same_time, r)
 w, r = play(["red", "blue"], da={"blue": 1, "red": 5}, db={"blue": 1, "red": 5})

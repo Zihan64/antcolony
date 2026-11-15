@@ -11,7 +11,8 @@ Each car, again and again (the steps of antcolony.duo, same car skills):
            after the other, not at the same time (the cars cannot tell them apart).
   grab     up to --tries; after a miss: back up, line up on it again by its colour.
            None held: this car leaves that colour to the other car and chooses again.
-  tray     one car at a time: seek the tray, place, back away.
+  tray     both cars may search for the tray and drive to it at once; only the last stretch (up to
+           the rim, place, back away) is one car at a time - a car arriving meanwhile waits --queue-cm short.
 A car is done when it finds nothing more to take (a whole look-around with nothing in it).
 
 Boundary (backup): the tracker's snapshots (UDP 9100) give the arena corner tags and each car's
@@ -198,12 +199,24 @@ def run_car(name, link, team, a, say, other=None, first=True):
                 if not colour:
                     return delivered
                 continue
+            # Both cars may look for the tray and drive towards it at the same time (user, 2026-11-14: the
+            # tray is far away, a car holding its object must not stand idle while the other one searches).
+            # Only the last stretch is one at a time: a car that arrives while the other is placing stops
+            # --queue-cm short of the tray (room for the other to back away), then goes on when it is free.
+            sargs = dict(json.loads(a.seek), target=a.target)
+            queued = team.tray.locked()
+            say(f"to the tray - seek: '{a.target}'" + (f" (the other car is there: stopping {a.queue_cm:.0f} cm short)" if queued else "") + " ...")
+            ok, detail, secs = link.skill("seek", dict(sargs, arrive_cm=a.queue_cm) if queued else sargs, 390)
+            say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+            if not ok:
+                say(f"STOPPING: tray not found - I still hold the {label}")
+                return delivered
             if team.tray.locked():
-                say("holding it - waiting for my turn at the tray")
+                say("near the tray - waiting for the other car to finish there")
             with team.tray:
-                say(f"my turn at the tray - seek: '{a.target}' ...")
-                ok, detail, secs = link.skill("seek", dict(json.loads(a.seek), target=a.target), 390)
-                say(f"  {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
+                if queued:                                   # the rest of the way, now that the tray is free
+                    ok, detail, secs = link.skill("seek", sargs, 200)
+                    say(f"  my turn - up to the tray: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
                 if ok:
                     ok, detail, secs = link.skill("dock", {"drop": True, "z_cm": a.place_z}, 150)
                     say(f"  place: {'ok' if ok else 'FAILED'} - {detail}  ({secs:.0f} s)")
@@ -233,6 +246,7 @@ def main():
     ap.add_argument("--seek", default='{"img_tokens": 576, "view": "far"}')
     ap.add_argument("--place-z", type=float, default=10)
     ap.add_argument("--away-cm", type=float, default=35)
+    ap.add_argument("--queue-cm", type=float, default=80, help="a car that arrives while the other is at the tray stops this far short of it")
     ap.add_argument("--choose-s", type=float, default=120)
     ap.add_argument("--fence-m", type=float, default=0.30, help="stop a car whose tag is this far outside the corner tags (0 = no fence)")
     ap.add_argument("--max-min", type=float, default=20, help="stop everything after this many minutes")
