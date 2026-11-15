@@ -171,7 +171,7 @@ class Guide:
     def __init__(self, snapshot, tags, tray_tag, calib, sleep=time.sleep, tol_deg=12.0):
         self.snapshot, self.tags, self.calib, self.sleep = snapshot, tags, calib, sleep
         self.tray_tags = [str(i) for i in (tray_tag if isinstance(tray_tag, (list, tuple)) else [tray_tag])]   # first one in view counts
-        self.tol = math.radians(tol_deg)
+        self.tol, self.wait_s = math.radians(tol_deg), 3.0
 
     def where(self, name):
         """-> (angle the car must turn, + = left, rad; distance to the tray, m) or None if unknown."""
@@ -237,9 +237,12 @@ class Guide:
         """Turn the car until it faces the tray. -> True if it does, False if the camera cannot say."""
         c = self.calib.get(name) or {}
         sign, rate = float(c.get("w_sign", 1)), math.radians(rate_deg_s)
-        first = self.where(name)
+        first, t_w = self.where(name), time.monotonic()
+        while first is None and time.monotonic() - t_w < self.wait_s:   # hidden for a moment (the arm, a hand)
+            self.sleep(0.2)
+            first = self.where(name)
         if first is None:
-            say("  overhead camera: tray tag or my tag not in view - searching with my own camera")
+            say(f"  overhead camera: tray tag or my tag not in view for {self.wait_s:.0f} s - searching with my own camera")
             return False
         say(f"  overhead camera: the tray is {abs(math.degrees(first[0])):.0f} deg to my "
             f"{'left' if first[0] > 0 else 'right'}, {100 * first[1]:.0f} cm away - turning to it")

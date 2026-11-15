@@ -471,9 +471,12 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
     lost_near = None
+    heading, lock = [0.0], {"deg": None, "n": 0}          # the target's direction once seen twice alike
+    keep_dir = args.get("detector", "vlm") == "vlm" and not args.get("look_only")
 
     def turn(deg):
         """Turn about `deg` (+ = left) with one timed pulse. -> seconds it lasted."""
+        heading[0] += deg                                 # where the car points now, as far as it knows
         t = min(0.6, dead + max(0.02, abs(deg) / rate))
         hw.set_velocity(0.0, 0.0, math.copysign(w_cmd, deg) * sign)
         t_end = time.monotonic() + t
@@ -527,6 +530,24 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
                 return finish(s is not None, f"{target}: " + ("not in the picture" if s is None else
                               f"{abs(s['bearing']):.0f} deg {'left' if s['bearing'] > 0 else 'right'}, "
                               f"{100 * s['wide']:.0f} % of the width") + f"; sonar {d if d is None else round(d)} cm")
+            if s is not None and keep_dir:               # 2026-11-15, car B: the 'tray' 40 deg left, then 59 deg right,
+                wb = heading[0] + s["bearing"]            # then left again - two white things, and the car turned between
+                off = abs(((wb - lock["deg"] + 180) % 360) - 180) if lock["deg"] is not None else 0.0   # them for minutes
+                if lock["deg"] is None or (lock["n"] < 2 and off > 40):
+                    lock["deg"], lock["n"] = wb, 1
+                elif off <= 40:
+                    lock["deg"], lock["n"] = 0.5 * (lock["deg"] + wb), lock["n"] + 1
+                else:
+                    say(f"look {looks}: a '{target}' {abs(s['bearing']):.0f} deg {'left' if s['bearing'] > 0 else 'right'} - "
+                        f"not where I saw it twice before; ignoring it")
+                    s = None
+            if s is None and keep_dir and lock["n"] >= 2 and not args.get("look_only"):
+                back = ((lock["deg"] - heading[0] + 180) % 360) - 180
+                if abs(back) > 15:
+                    say(f"look {looks}: turning back to where the {target} was ({abs(back):.0f} deg {'left' if back > 0 else 'right'})")
+                    turn(back)
+                    lock["n"] = 1                         # it must be seen there again
+                    continue
             if s is None and lost_near is not None and not args.get("look_only"):
                 back = -0.5 * lost_near
                 say(f"look {looks}: lost the {target} right after turning - turning back {abs(back):.0f} deg")

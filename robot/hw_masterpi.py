@@ -38,10 +38,34 @@ CARRY = (0, 12, 12)          # cm, gripper-tip pose while driving with an object
 TRANS_EPS, ROT_EPS = 0.02, 0.02
 
 
+HOLD_FILE = os.path.join(HERE, ".holding")
+
+
 class MasterPi:
+    # "holding" lives in a file next to this one, so that a restarted agent still knows that the gripper
+    # holds something (2026-11-15: after a restart for an update car A reported holding: no and went
+    # looking for a new object with the old one still in its jaws).
+    @property
+    def holding(self):
+        return self._holding
+
+    @holding.setter
+    def holding(self, v):
+        self._holding = bool(v)
+        try:
+            with open(HOLD_FILE, "w") as f:
+                f.write("1" if v else "0")
+        except OSError:
+            pass
+
     def __init__(self, min_duty=30, max_duty=45, rate_min=0.20, rate_max=0.36, arm=True):
         self.min_duty, self.max_duty, self.rate_min, self.rate_max = min_duty, max_duty, rate_min, rate_max
-        self.use_arm, self.holding = arm, False
+        self.use_arm = arm
+        try:
+            with open(HOLD_FILE) as f:
+                self._holding = f.read().strip() == "1"
+        except OSError:
+            self._holding = False
         self.lock = threading.RLock()        # serial port owner
         self.board = self.car = self.arm = self.sonar = None
         self._open()
