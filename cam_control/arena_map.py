@@ -99,6 +99,7 @@ ARENA_DEFAULTS = {
     "obstacle_threshold": 30,         # color difference vs empty floor that counts as obstacle
     "min_obstacle_area_m2": 0.0004,   # ignore blobs smaller than 2 x 2 cm
     "appearance_z": 5.0,              # object = this many robust std devs unlike the floor
+    "max_streak_width_m": 0.03,       # thinner + 5x longer blobs = carpet streak / seam / cable, not an object
     "route_switch_rel": 0.10,         # keep the current route unless a new one is this much shorter
     "route_switch_m": 0.05,           #   ... plus this (hysteresis: no flipping between twin routes)
 }
@@ -625,6 +626,8 @@ def _plane_layer(shape, poly, labels, color, geo):
         for k, col in ((1, (0, 0, 255)), (2, (0, 200, 0)), (3, (255, 80, 0))):
             cv2.arrowedLine(dst, tuple(o[0]), tuple(o[k]), c(col), 3, cv2.LINE_AA, tipLength=0.2)
         for (x, y), lab, q in zip(poly, labels, corner_px):
+            if not lab:                 # no label (the tracker GUI labels the pivots itself)
+                continue
             txt = f"{lab} ({x:.3f}, {y:.3f})"
             (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             org = (int(q[0]) - tw // 2, int(q[1]) + 30)
@@ -975,11 +978,14 @@ class GlobalMap:
         return cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32), (5, 5), 0)
 
     def update(self, frame, floor, K, D, now, clear_polys=(), max_range=4.0, min_px_per_cell=0.35,
-               capture_bg=False, adapt_rate=0.02, attach_polys=()):
+               capture_bg=False, adapt_rate=0.02, attach_polys=(), confirm=None):
         """Fuse one camera frame into the map. Returns the current window's obstacle mask.
         clear_polys: never obstacles (robot body, flat tags). attach_polys: an obstacle blob lying
         mostly (>= 50 %) inside one of these belongs to it (the robot's arm, wheels...) and is removed
-        as a whole; one that only touches it (an obstacle next to the robot) stays."""
+        as a whole; one that only touches it (an obstacle next to the robot) stays.
+        confirm: optional f(map, r0, r1, c0, c1) -> bool mask of the window (or None = no gate):
+        an obstacle cell only counts where the mask is True (AND gate with other cameras).
+        Cells it rejects count as free floor, so their evidence decays."""
         if not floor.valid:
             self.view = None
             return None
@@ -1023,7 +1029,14 @@ class GlobalMap:
                 score = score[..., 0]
             sources.append((score > float(self.arena["obstacle_threshold"])) & vis & bg_ok)
         if self.detect_appearance:
-            sources.append(appearance_mask(rect, vis, ppc, self.res, float(self.arena.get("appearance_z", 5.0))))
+            app = appearance_mask(rect, vis, ppc, self.res, float(self.arena.get("appearance_z", 5.0)))
+            if self.bg_enabled:
+                # With an empty-floor reference, the floor's own odd-looking parts (carpet streaks,
+                # seams, a lamp base) are IN the reference: "unlike the floor" only counts where the
+                # floor also changed since the reference. (Before, the two cues were OR'ed and every
+                # blue streak of the carpet became an object, even after Capture empty floor.)
+                app &= (score > 0.5 * float(self.arena["obstacle_threshold"])) | ~bg_ok
+            sources.append(app)
         if sources:
             raw = np.logical_or.reduce(sources).astype(np.uint8) * 255
             raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -1034,6 +1047,19 @@ class GlobalMap:
             n, labl, stats, _ = cv2.connectedComponentsWithStats(raw, connectivity=8)
             keep = np.zeros(n, bool)
             keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= float(self.arena["min_obstacle_area_m2"]) / self.res ** 2
+            # Long thin blobs are the floor's pattern (carpet streaks, plank seams) or cables, not
+            # objects: thinner than thin_m and over 5x longer than wide. Dropped here, so they leave
+            # neither an object nor obstacle evidence that would block the A* path.
+            thin_m = float(self.arena.get("max_streak_width_m", 0.03))
+            for i in np.flatnonzero(keep):
+                x_, y_, w_, h_ = stats[i, :4]
+                if min(w_, h_) * self.res > 6 * thin_m:
+                    continue                                   # clearly wide in both directions
+                ys_, xs_ = np.nonzero(labl[y_:y_ + h_, x_:x_ + w_] == i)
+                (_, _), (rw_, rh_), _ = cv2.minAreaRect(np.column_stack([xs_, ys_]).astype(np.float32))
+                thin, long_ = (min(rw_, rh_) + 1) * self.res, (max(rw_, rh_) + 1) * self.res
+                if thin < thin_m and long_ > 5 * thin:
+                    keep[i] = False
             attached = np.zeros(vis.shape, bool)
             if attach_polys and n > 1:
                 am_ = np.zeros(vis.shape, np.uint8)
@@ -1047,6 +1073,12 @@ class GlobalMap:
                     keep[parts] = False
                     attached = np.isin(labl, parts)
             obst = keep[labl] & vis
+            self.gate_dropped = 0
+            if confirm is not None:
+                ok_ = confirm(self, r0, r1, c0, c1)
+                if ok_ is not None:
+                    self.gate_dropped = int((obst & ~ok_).sum())
+                    obst &= ok_
             judged = vis if self.detect_appearance else (vis & bg_ok)
             free = judged & ~obst
             # Evidence builds and clears in 1-2 updates so a moving object (a driving car) is shown
@@ -1150,6 +1182,9 @@ class GlobalMap:
                 (_, _), (rw, rh), _ = cv2.minAreaRect(c)
                 if min(rw, rh) * self.res < 0.015:     # a sliver along an edge, not an object
                     continue
+                thin_, long_ = min(rw, rh) * self.res, max(rw, rh) * self.res
+                if thin_ < float(self.arena.get("max_streak_width_m", 0.03)) and long_ > 5 * thin_:
+                    continue                            # carpet streak / seam / cable (see update)
                 hull = cv2.convexHull(c).reshape(-1, 2).astype(np.float64) + [x, y]
                 world = np.column_stack([self.x0 + (c0 + hull[:, 0] + 0.5) * self.res,
                                          self.y1 - (r0 + hull[:, 1] + 0.5) * self.res])

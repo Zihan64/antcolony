@@ -41,6 +41,13 @@ Run
   python apriltag_tracker_gui.py --synthetic --autostart
   python apriltag_tracker_gui.py --calib calib.npz --autostart
 
+  python apriltag_tracker_gui.py --extra-camera "name=go3s,camera=Insta360,fps=30"
+  python apriltag_tracker_gui.py --synthetic --extra-camera synthetic --autostart   # fusion demo
+
+Extra cameras (multi_camera.py): each locates the tags against the same 4 pivots on its own
+thread; every tag's pose is fused across the cameras that see it (outliers voted out), and while
+the main camera is silent the robots' poses still go out from the extras alone.
+
 Keep apriltag_sheet_a4.json next to the scripts: it holds the printed marker sizes.
 AprilTags and ArUco markers are tracked together. IDs are global: AprilTag 0-86 keep their
 number, ArUco 0-14 become 87-101 (the table's Name column shows e.g. "aruco3" for id 90).
@@ -73,6 +80,8 @@ import apriltag_floor_mapper as m  # noqa: E402
 import arena_map as am  # noqa: E402
 import object_detector as od  # noqa: E402
 import antcolony_pub  # noqa: E402
+import multi_camera as mc  # noqa: E402
+import view_overlay as vo  # noqa: E402
 
 RESOLUTIONS = ["1920x1080", "3840x2160", "2560x1440", "1280x720"]
 
@@ -225,6 +234,20 @@ class SyntheticScene:
         self.rng = np.random.default_rng(0)
         self.empty_frames = 0          # >0: render without objects (for "Capture empty floor")
 
+    def view_from(self, C, target=(0.6, 0.4, 0.0), t0=None):
+        """Move this scene's camera (same arena, another viewpoint): a second synthetic camera
+        for testing multi-camera fusion. t0: share another scene's clock (same robot motion)."""
+        self.C = np.asarray(C, float)
+        z = (np.asarray(target, float) - self.C) / np.linalg.norm(np.asarray(target, float) - self.C)
+        x = np.cross(z, [0, 0, 1.0])
+        x /= np.linalg.norm(x)
+        self.R = np.vstack([x, np.cross(z, x), z])
+        self.rvec, _ = cv2.Rodrigues(self.R)
+        self.tvec = -self.R @ self.C
+        if t0 is not None:
+            self.t0 = t0
+        return self
+
     def _proj(self, P):
         return cv2.projectPoints(np.asarray(P, float).reshape(-1, 3), self.rvec, self.tvec,
                                  self.K, self.D)[0].reshape(-1, 2)
@@ -355,6 +378,12 @@ class Worker(QtCore.QThread):
         self.stops = []
         self._next_stop = 0            # with a robot: stops before this index are reached
         self._route_draw = []          # (number, xy, done) for drawing
+        # extra cameras (multi_camera.CameraRig): their tag poses are fused into every result, and
+        # while this (main) camera is silent the robots' poses still go out from the extras alone
+        self.rig = None
+        self.pub_floor = None          # the floor the publisher uses (an extra's if the main has none)
+        self.primary_silent_s = 0.15   # main camera silent this long -> publish from the extras only
+        self.view_title = "MAIN"       # header of the main camera view (set by the window)
 
     def start_recording(self, path):
         with self.rec_lock:
@@ -394,6 +423,16 @@ class Worker(QtCore.QThread):
             objs = od.localize(dets, floor, self.mapper.K, self.mapper.D) if floor.valid else []
             tag_pts = [(o["x"], o["y"]) for o in r["objects"]
                        if o.get("frame") == "world" and o.get("method") != "detect"]
+            # pivot sheets too: once the floor is locked the pivots are not searched every frame,
+            # so drop_tag_boxes does not see them (a pivot read as a "slotted_block")
+            tag_pts += [tuple(np.mean(c[:, :2], 0)) for c in floor.world_corners.values()]
+            for o_ in objs:
+                o_["cam"] = "main"
+            if self.rig:
+                # known objects: OR gate. Every camera runs the detector; their floor objects are
+                # pooled and the same object seen by two cameras is merged (dedupe keeps the more
+                # confident one), so an object one camera misses still comes from the other
+                objs = objs + self.rig.detector_objects(now)
             objs = od.dedupe(objs, tag_pts)
             # keep tracks alive for a few detector cycles, however slow the detector is
             self.tracker.ttl = max(1.5, 3.5 * self.objdet.infer_ms / 1000.0)
@@ -544,12 +583,22 @@ class Worker(QtCore.QThread):
             self.capture_bg -= 1
             cap = self.capture_bg == 0
         gm.detect_appearance = self.appearance
+        # untagged objects: AND gate with the extra cameras (each builds its own object map; a cell
+        # counts only where they also see an object). AprilTags stay an OR gate (fuse_tags).
+        gate = None
+        if self.rig:
+            on_ = self.appearance or self.objdet is not None
+            self.rig.set_objects(a if on_ else None, cfg.get("floor_tags", {}), gm.res)
+            if cap:
+                self.rig.capture_background()
+            gate = self.rig.confirm_cells if on_ else None
         # Fuse into the map at most ~10x per second; tag tracking keeps running every frame.
         fuse_ok = floor.locked or not floor.auto_lock   # pause while the camera is moving
         info["map_paused"] = not fuse_ok
         if fuse_ok and (cap or now - getattr(self, "_fuse_t", 0) >= 0.05):
             gm.update(raw, floor, K, D, now, clear_polys=clear, max_range=float(a["max_range_m"]),
-                      min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap, attach_polys=attach)
+                      min_px_per_cell=float(a["min_px_per_cell"]), capture_bg=cap, attach_polys=attach,
+                      confirm=gate)
             self._fuse_t = now
             if self.appearance:
                 found = gm.objects_in_view()
@@ -673,56 +722,106 @@ class Worker(QtCore.QThread):
         self._draw_t = now
         self.arena_free = False
         vis = am.render_global(gm, blocked, foot, cell, now)
+        # Scale to display size FIRST (up or down), then draw: labels stay sharp and readable on
+        # the big central view (the map itself is only ~500 px at 4 mm cells)
+        s_ = min(1400 / max(vis.shape[1], 1), 1000 / max(vis.shape[0], 1))
+        vis = cv2.resize(vis, None, fx=s_, fy=s_, interpolation=cv2.INTER_NEAREST if s_ > 1 else cv2.INTER_AREA)
+        k_ = vis.shape[1] / 960.0                       # line / marker size follows the image
+
+        def P(pts):
+            return np.round(gm.w2p(pts) * s_).astype(np.int32)
+
+        def lbl(txt, p, col, bold=False):
+            vo.text(vis, txt, (int(p[0]), int(p[1])), col, bold=bold)
+
+        lw = max(1, int(round(2 * k_)))
         if gm.view is not None:
             r0, r1, c0, c1, _ = gm.view
-            cv2.rectangle(vis, (c0, r0), (c1 - 1, r1 - 1), (255, 255, 255), 1)
-        if plan and plan.get("waypoints"):
-            pts = np.round(gm.w2p(plan["waypoints"])).astype(np.int32)
-            cv2.polylines(vis, [pts], False, (0, 220, 0), 2, cv2.LINE_AA)
-        for o in objs.values():
-            p = tuple(np.round(gm.w2p([(o["x"], o["y"])])[0]).astype(int))
-            h = math.radians(o.get("yaw_deg", 0))
-            col = (255, 0, 255) if robot is not None and o is robot else (255, 255, 0)
-            cv2.circle(vis, p, 5, col, -1)
-            cv2.line(vis, p, (int(p[0] + 14 * math.cos(h)), int(p[1] - 14 * math.sin(h))), col, 2)
-        for o in r["objects"]:
-            if o.get("footprint_poly") is not None:
-                col = (255, 0, 255) if o.get("obstacle") is not False else (180, 120, 180)
-                cv2.polylines(vis, [np.round(gm.w2p(o["footprint_poly"])).astype(np.int32)], True, col, 2)
-                p_ = tuple(np.round(gm.w2p([(o["x"], o["y"])])[0]).astype(int))
-                cv2.putText(vis, f"{o['id']} {o['name']}", (p_[0] + 6, p_[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.45, col, 1, cv2.LINE_AA)
-        if robot is not None:
-            p = tuple(np.round(gm.w2p([(robot["x"], robot["y"])])[0]).astype(int))
-            cv2.circle(vis, p, int(round(a["robot_radius_m"] / gm.res)), (255, 0, 255), 1)
-        if start is not None and robot is None:
-            p = tuple(np.round(gm.w2p([start])[0]).astype(int))
-            cv2.drawMarker(vis, p, (255, 0, 255), cv2.MARKER_SQUARE, 12, 2)
-        for n_, xy, done in self._route_draw:
-            p = tuple(np.round(gm.w2p([xy])[0]).astype(int))
-            col = (150, 150, 150) if done else (0, 200, 255)
-            cv2.circle(vis, p, 9, col, 2, cv2.LINE_AA)
-            cv2.putText(vis, str(n_), (p[0] - 4, p[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
-        if goal is not None:
-            p = tuple(np.round(gm.w2p([goal])[0]).astype(int))
-            cv2.drawMarker(vis, p, (0, 255, 0), cv2.MARKER_STAR, 18, 2)
-            if pair:
-                cv2.putText(vis, f"goal {'tag' if pair[1] < od.DET_ID_BASE else 'object'} {pair[1]}", (p[0] + 10, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (0, 255, 0), 1, cv2.LINE_AA)
-        if pair and robot is not None:
-            p = tuple(np.round(gm.w2p([(robot["x"], robot["y"])])[0]).astype(int))
-            cv2.putText(vis, f"start {'tag' if pair[0] < od.DET_ID_BASE else 'object'} {pair[0]}", (p[0] + 10, p[1] + 16), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (255, 0, 255), 1, cv2.LINE_AA)
-        if cmd:
-            p = tuple(np.round(gm.w2p([cmd["target_xy"]])[0]).astype(int))
-            cv2.circle(vis, p, 6, (0, 255, 255), 2)
-        s_ = min(1.0, 1000 / max(vis.shape[1], 1), 800 / max(vis.shape[0], 1))
-        if s_ < 1:
-            vis = cv2.resize(vis, None, fx=s_, fy=s_, interpolation=cv2.INTER_AREA)
+            cv2.rectangle(vis, (int(c0 * s_), int(r0 * s_)), (int(c1 * s_) - 1, int(r1 * s_) - 1), (255, 255, 255), 1)
+        vo._PLACED[id(vis)] = []                         # labels avoid each other
+        try:
+            if plan and plan.get("waypoints"):
+                cv2.polylines(vis, [P(plan["waypoints"])], False, (0, 0, 0), lw + 4, cv2.LINE_AA)
+                cv2.polylines(vis, [P(plan["waypoints"])], False, (0, 230, 0), lw + 1, cv2.LINE_AA)
+                if plan.get("length_m") is not None:
+                    lbl(f"A* {plan['length_m']:.2f} m", P([plan["waypoints"][-1]])[0] + [12, 26], (0, 230, 0), True)
+            # objects without tags: magenta = unknown (appearance, BOTH cameras), orange = known (detector, EITHER)
+            for o in r["objects"]:
+                if o.get("footprint_poly") is None:
+                    continue
+                known = o.get("method") == "detect"
+                col = (0, 165, 255) if known else (255, 0, 255)
+                if o.get("obstacle") is False:
+                    col = tuple(int(c * 0.6) for c in col)
+                cv2.polylines(vis, [P(o["footprint_poly"])], True, col, lw, cv2.LINE_AA)
+                p_ = P([(o["x"], o["y"])])[0]
+                name = o.get("name") or "object"
+                lbl(f"{o['id']} {name}" if known else f"{o['id']} unknown", p_ + [8, -8], col)
+            # tags: OR gate (either camera). Label: id, and which cameras saw it
+            for o in objs.values():
+                if o["id"] >= od.DET_ID_BASE or o.get("frame") != "world":
+                    continue
+                p = P([(o["x"], o["y"])])[0]
+                h = math.radians(o.get("yaw_deg", 0))
+                col = (255, 0, 255) if robot is not None and o is robot else (255, 255, 0)
+                cv2.circle(vis, tuple(p), int(5 * k_) + 1, col, -1, cv2.LINE_AA)
+                cv2.line(vis, tuple(p), (int(p[0] + 16 * k_ * math.cos(h)), int(p[1] - 16 * k_ * math.sin(h))), col, lw)
+                cams = o.get("cams") or []
+                lbl(f"tag {o['id']}" + (f"  [{'+'.join(cams)}]" if cams else ""), p + [10, 18], col)
+            if robot is not None:
+                p = P([(robot["x"], robot["y"])])[0]
+                cv2.circle(vis, tuple(p), int(round(a["robot_radius_m"] / gm.res * s_)), (255, 0, 255), lw)
+            if start is not None and robot is None:
+                cv2.drawMarker(vis, tuple(P([start])[0]), (255, 0, 255), cv2.MARKER_SQUARE, int(14 * k_), lw)
+            for n_, xy, done in self._route_draw:
+                p = P([xy])[0]
+                col = (150, 150, 150) if done else (0, 200, 255)
+                cv2.circle(vis, tuple(p), int(10 * k_), col, lw, cv2.LINE_AA)
+                lbl(f"stop {n_}" + (" (done)" if done else ""), p + [int(12 * k_), -int(10 * k_)], col)
+            if goal is not None:
+                p = P([goal])[0]
+                cv2.drawMarker(vis, tuple(p), (0, 255, 0), cv2.MARKER_STAR, int(22 * k_), lw)
+                if pair:
+                    lbl(f"goal {'tag' if pair[1] < od.DET_ID_BASE else 'object'} {pair[1]}", p + [12, -10], (0, 255, 0), True)
+            if pair and robot is not None:
+                p = P([(robot["x"], robot["y"])])[0]
+                lbl(f"start {'tag' if pair[0] < od.DET_ID_BASE else 'object'} {pair[0]}", p + [12, -12], (255, 0, 255), True)
+            if cmd:
+                cv2.circle(vis, tuple(P([cmd["target_xy"]])[0]), int(6 * k_), (0, 255, 255), lw)
+            # the cameras that feed the map
+            for name, c in (r.get("cameras") or ({"main": [r["camera"]["x"], r["camera"]["y"], r["camera"]["z"]]}
+                                                 if r.get("camera") else {})).items():
+                p = P([(c[0], c[1])])[0]
+                if 0 <= p[0] < vis.shape[1] and 0 <= p[1] < vis.shape[0]:
+                    cv2.drawMarker(vis, tuple(p), (255, 255, 255), cv2.MARKER_TRIANGLE_UP, int(16 * k_), lw)
+                    lbl(f"cam {name}", p + [10, -8], (255, 255, 255))
+        finally:
+            vo._PLACED.pop(id(vis), None)
+        gate = self.rig.gate_state if (self.rig and self.appearance) else \
+            ("single camera" if not self.rig else "unknown-object detection off")
+        vo.header(vis, "CUMULATIVE MAP", f"tags + known objects: either camera  |  unknown objects: both cameras  "
+                                          f"|  {gate}", warn=bool(self.rig) and self.appearance and "open" in gate)
         rgb = np.ascontiguousarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
         hh, ww = rgb.shape[:2]
         qimg = QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy()
         self.arena_ready.emit(qimg, s_, info)
+
+    def _publish_extras_only(self, now):
+        """The main camera delivered nothing for a while (unplugged, USB stall, stopped video):
+        the extra cameras alone keep the robots' poses going to the coordinator and the GUI."""
+        r = self.rig.fuse_into(None, None, self.mapper.floor, self.mapper.K, self.mapper.tag_size, now)
+        r.update(latency_ms=0.0, proc_fps=0.0, grab_fps=0.0, truth=None, wall=now, _floor=None,
+                 planner_ms=self.planner_ms)
+        self.pub_floor = self.rig.pub_floor(self.mapper.floor)
+        r["floor_valid"] = bool(self.pub_floor is not None and self.pub_floor.valid)
+        self._fast_control(r, now)
+        if self.world_pub is not None:
+            self.world_pub.publish(r, self.pub_floor, self.amap.arena.get("corner_ids") if self.amap is not None
+                                   else (self.mapper.cfg.get("arena") or {}).get("corner_ids"))
+        self.results.append(r)
+        if self.results_free:
+            self.results_free = False
+            self.results_ready.emit()
 
     def run(self):
         self._planner_in, self._planner_ev, self._planner_stop = None, threading.Event(), False
@@ -731,13 +830,21 @@ class Worker(QtCore.QThread):
         planner.start()
         try:
             fid, n, t_fps, fps = 0, 0, time.perf_counter(), 0.0
+            last_main = last_fallback = time.perf_counter()
             while not self.isInterruptionRequested():
                 K, D = self.mapper.K, self.mapper.D
-                frame, fid, stamp = self.source.latest(fid, timeout=0.5)
+                frame, fid, stamp = self.source.latest(fid, timeout=0.05 if self.rig else 0.5)
                 if frame is None:
+                    if self.rig:
+                        t_ = time.perf_counter()
+                        if t_ - last_main > self.primary_silent_s and t_ - last_fallback > 0.033:
+                            last_fallback = t_
+                            self._publish_extras_only(t_)
+                        continue
                     if not self.source.running:
                         raise RuntimeError("Source stopped delivering frames.")
                     continue
+                last_main = time.perf_counter()
                 meta = getattr(self.source, "last_meta", None)
                 if self.pending_detector is not None:
                     old = self.mapper.detector
@@ -754,9 +861,12 @@ class Worker(QtCore.QThread):
                 raw = frame.copy() if (self.amap is not None or self.objdet is not None) else None
                 if self.objdet is not None:
                     self.objdet.submit(raw, stamp)
-                r = self.mapper.process(frame, stamp)
+                r = self.mapper.process(frame, stamp, draw=False)   # drawn below (view_overlay)
                 if self.objdet is not None:
                     self._merge_detections(r, stamp)
+                if self.rig:
+                    # one pose per tag from every camera that sees it (outliers voted out)
+                    self.rig.fuse_into(r, stamp, self.mapper.floor, K, self.mapper.tag_size)
                 now = time.perf_counter()
                 n += 1
                 if now - t_fps >= 1.0:
@@ -772,9 +882,10 @@ class Worker(QtCore.QThread):
                     self._planner_in = (raw, dict(r, objects=list(r["objects"])), now)
                     self._planner_ev.set()
                 r["objects"].extend(self._app_objs)       # newest objects from the planner
+                self.pub_floor = self.rig.pub_floor(floor) if self.rig else floor
                 self._fast_control(r, now)
                 if self.world_pub is not None:            # --antcolony: tags + objects -> the coordinator
-                    self.world_pub.publish(r, floor, self.amap.arena.get("corner_ids") if self.amap is not None
+                    self.world_pub.publish(r, self.pub_floor, self.amap.arena.get("corner_ids") if self.amap is not None
                                            else (self.mapper.cfg.get("arena") or {}).get("corner_ids"))
                 self.results.append(r)
                 if self.results_free:
@@ -786,7 +897,7 @@ class Worker(QtCore.QThread):
                     if self.show_grid and floor.valid:
                         if self.amap is not None:
                             ids = self.amap.arena["corner_ids"]
-                            am.draw_plane(frame, self.amap.corners, [f"tag {i}" for i in ids], floor, K, D,
+                            am.draw_plane(frame, self.amap.corners, ["" for _ in ids], floor, K, D,   # labels: view_overlay
                                           max_range=float(self.amap.arena.get("max_range_m", 4.0)))
                         else:
                             m.draw_floor_grid(frame, floor, K, D)
@@ -809,35 +920,21 @@ class Worker(QtCore.QThread):
                                 x1, y1, x2, y2 = [int(v) for v in o["box"]]
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), (200, 0, 200), 2)
                                 m._put(frame, f"{o['name']} {o['conf']:.2f} (no floor yet)", (x1, y1 - 6), (200, 0, 200))
-                    plan = self._plan
-                    if floor.valid and plan and plan.get("status") == "ok" and len(plan["waypoints"]) >= 2:
-                        # the A* path drawn on the camera image (on the floor plane)
-                        pts = []
-                        for (ax, ay), (bx, by) in zip(plan["waypoints"], plan["waypoints"][1:]):
-                            for t_ in np.linspace(0, 1, 12, endpoint=False):
-                                pts.append([ax + t_ * (bx - ax), ay + t_ * (by - ay), 0.0])
-                        pts.append([*plan["waypoints"][-1], 0.0])
-                        px = np.round(floor.world_to_pixel(pts, K, D)).astype(np.int32)
-                        cv2.polylines(frame, [px], False, (0, 0, 0), 7, cv2.LINE_AA)
-                        cv2.polylines(frame, [px], False, (0, 255, 0), 4, cv2.LINE_AA)
-                        for wp in floor.world_to_pixel([[x_, y_, 0] for x_, y_ in plan["waypoints"]], K, D):
-                            cv2.circle(frame, (int(wp[0]), int(wp[1])), 6, (0, 120, 0), -1)
-                        g_ = floor.world_to_pixel([[*plan["waypoints"][-1], 0]], K, D)[0]
-                        cv2.drawMarker(frame, (int(g_[0]), int(g_[1])), (0, 255, 0), cv2.MARKER_STAR, 26, 3)
-                        m._put(frame, f"A* {plan['length_m']:.3f} m", (int(g_[0]) + 14, int(g_[1]) - 10), (0, 255, 0))
-                    if floor.valid:
-                        for n_, xy, done in list(self._route_draw):
-                            u_, v_ = floor.world_to_pixel([[xy[0], xy[1], 0.0]], K, D)[0]
-                            if np.isfinite(u_) and np.isfinite(v_):
-                                col = (150, 150, 150) if done else (0, 200, 255)
-                                cv2.circle(frame, (int(u_), int(v_)), 14, (0, 0, 0), 5, cv2.LINE_AA)
-                                cv2.circle(frame, (int(u_), int(v_)), 14, col, 3, cv2.LINE_AA)
-                                m._put(frame, f"stop {n_}" + (" (done)" if done else ""), (int(u_) + 16, int(v_) - 12), col)
-                    if floor.valid:
-                        for p in list(self.pins):
-                            u, v = floor.world_to_pixel([p], K, D)[0]
-                            if np.isfinite(u) and np.isfinite(v):
-                                cv2.drawMarker(frame, (int(u), int(v)), (0, 140, 255), cv2.MARKER_CROSS, 22, 2)
+                    if floor.valid or r.get("_dets"):
+                        # the same overlay as every extra camera's view (view_overlay): arena, A* path,
+                        # stops, tags with their fused floor position, tags only another camera sees
+                        pose = vo.CameraPose.from_floor(floor, K, D, (frame.shape[1], frame.shape[0]))
+                        objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world" and o["id"] < 1000}
+                        pivots = {t for t in floor.world_corners if t not in floor.learned}
+                        corners, cids = arena_outline(self.amap, self.mapper.cfg)
+                        vo.draw_view(frame, pose, 1.0, r.get("_dets", []), objs, "main", pivots, corners, cids,
+                                     self._plan if floor.valid else None, list(self._route_draw), list(self.pins),
+                                     robot_id=view_robot_id(self.mapper.cfg, self.pair),
+                                     arena_outline=not (self.show_grid and self.amap is not None))
+                    fl_txt = ("locked" if floor.locked else "ok") if floor.valid else \
+                        (f"REJECTED {floor.last_reject[0]:.0f} px" if floor.last_reject else "no pivot in view")
+                    vo.header(frame, self.view_title, f"floor {fl_txt}  |  {fps:.0f} fps  |  {r['n_tags']} tags",
+                              warn=not floor.valid)
                     self.last_frame = frame
                     s = min(1.0, self.max_display_w / frame.shape[1])
                     disp = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else frame
@@ -862,6 +959,62 @@ class Worker(QtCore.QThread):
 # Widgets
 # --------------------------------------------------------------------------
 
+def arena_outline(amap, cfg):
+    """(corners (N, 2), ids) of the arena between the pivots, or (None, ())."""
+    if amap is not None:
+        return amap.corners, list(amap.arena["corner_ids"])
+    ids = list((cfg.get("arena") or {}).get("corner_ids") or [])
+    ft = cfg.get("floor_tags") or {}
+    if len(ids) >= 3 and all(i in ft for i in ids):
+        return np.array([[ft[i]["x"], ft[i]["y"]] for i in ids], np.float64), ids
+    return None, ()
+
+
+def view_robot_id(cfg, pair=None):
+    """The tag drawn as the robot: the A* start tag, else the arena's robot tag."""
+    if pair:
+        return pair[0]
+    return (cfg.get("arena") or {}).get("robot_id")
+
+
+class CameraGrid(QtWidgets.QSplitter):
+    """The main camera view and one view per extra camera, all the same size. The orientation
+    follows the space: side by side when the area is wide, stacked when it is tall (whichever
+    gives each 16:9 picture more pixels). The handle between views stays draggable."""
+
+    def __init__(self, main_view):
+        super().__init__(Qt.Orientation.Horizontal)
+        self.setHandleWidth(7)
+        self.setChildrenCollapsible(False)
+        self.addWidget(main_view)
+
+    def add_view(self, view):
+        self.addWidget(view)
+        self._orient(force=True)
+
+    def remove_extra_views(self):
+        for i in reversed(range(1, self.count())):
+            w = self.widget(i)
+            w.setParent(None)
+            w.deleteLater()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._orient()
+
+    def _orient(self, force=False):
+        n = self.count()
+        if n < 2:
+            return
+        W, H, a = max(self.width(), 1), max(self.height(), 1), 16 / 9
+        side = min(W / n / a, H)            # picture height, side by side
+        stack = min(W / a, H / n)           # picture height, stacked
+        want = Qt.Orientation.Horizontal if side >= stack else Qt.Orientation.Vertical
+        if force or self.orientation() != want:
+            self.setOrientation(want)
+            self.setSizes([10 ** 4] * n)
+
+
 class VideoView(QtWidgets.QLabel):
     hovered = pyqtSignal(float, float)
     clicked = pyqtSignal(float, float, int)
@@ -871,7 +1024,7 @@ class VideoView(QtWidgets.QLabel):
         self.setMouseTracking(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
-        self.setMinimumSize(480, 270)
+        self.setMinimumSize(320, 180)
         self.setStyleSheet("background:#111; color:#888;")
         self._img, self._scale, self._pm = None, 1.0, None
 
@@ -882,8 +1035,8 @@ class VideoView(QtWidgets.QLabel):
     def _refresh(self):
         if self._img is None:
             return
-        self._pm = QtGui.QPixmap.fromImage(self._img).scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        self._pm = QtGui.QPixmap.fromImage(self._img).scaled(       # smooth: labels stay readable
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.setPixmap(self._pm)
 
     def resizeEvent(self, e):
@@ -962,9 +1115,12 @@ def pixel_to_floor(Rt, K, D, u, v):
 class MainWindow(QtWidgets.QMainWindow):
     COLS = ["ID", "Name", "X m", "Y m", "Z m", "Heading°", "Tilt°", "σX mm", "σY mm", "σZ mm",
             "Hz", "Reproj px", "Err mm"]
+    log_signal = pyqtSignal(str)       # log lines from other threads (extra cameras)
 
     def __init__(self, args):
         super().__init__()
+        self.log_signal.connect(self.log_msg)
+        self.extra_thumbs = []
         self.setWindowTitle("AprilTag tracker test GUI")
         self.resize(1700, 950)
         self.args = args
@@ -1139,6 +1295,32 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow("Camera", cam_row)
         f.addRow(self.start_btn)
 
+        # extra cameras: specs in the Settings tab, live status + thumbnails here
+        self.extra_edit = QtWidgets.QLineEdit(self._initial_extra_specs())
+        self.extra_edit.setPlaceholderText("e.g. name=go3s,camera=Insta360,fps=30 ; 2")
+        self.extra_edit.setToolTip(
+            "More cameras for a steadier robot position (separate several with ';'). Each one locates the "
+            "tags against the 4 pivots by itself; the poses are fused and a camera that drops out is simply "
+            "left out. Items: camera (index or part of the name), name, width, height, fps, calib (.npz), "
+            "focal_px, k1, k2, k3, hfov_deg, backend, decimate, max_fps. Applied at Start. 'synthetic' = a "
+            "second test view.\nA wide lens (GO 3S) or a camera that sees few pivots learns its lens and "
+            "pose from the main camera: let the robot pause (or move a tag) at 6+ spots both cameras see.")
+        self.extra_pick = QtWidgets.QComboBox()
+        self.extra_pick.setToolTip("Connected cameras: pick the second view and press Add")
+        extra_add = QtWidgets.QPushButton("Add")
+        extra_add.setToolTip("Add the picked camera as an extra (fused) camera")
+        extra_add.clicked.connect(self._add_extra_camera)
+        extra_clear = QtWidgets.QPushButton("Clear")
+        extra_clear.clicked.connect(lambda: self.extra_edit.setText(""))
+        f = group("Extra cameras (fused)", cl)
+        f.addRow(hrow(self.extra_pick, extra_add, extra_clear))
+        f.addRow(self.extra_edit)
+        self.extra_status = QtWidgets.QLabel("none: pick a second camera above and press Add, then Start")
+        self.extra_status.setWordWrap(True)
+        self.extra_thumb_row = QtWidgets.QHBoxLayout()
+        f.addRow(self.extra_status)
+        f.addRow(self.extra_thumb_row)
+
         f = group("Floor plane (4 pivot tags)", cl)
         self.pivot_label = QtWidgets.QLabel("Pivots: the 4 largest tags on the print sheet.")
         self.pivot_label.setWordWrap(True)
@@ -1267,8 +1449,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for name, desc in od.MODEL_CHOICES:
             self.det_model.addItem(name)
             self.det_model.setItemData(self.det_model.count() - 1, desc, Qt.ItemDataRole.ToolTipRole)
-        self.det_model.setToolTip("Prompt-free models find any object without a class list. "
-                                  "You can also type the path of your own .pt (its labels are ignored).")
+        self.det_model.setToolTip("Default: the trained warehouse detector (5 classes, ignores carpet; "
+                                  f"confidence is never below {od.CLOSED_SET_MIN_CONF}). Prompt-free YOLOE "
+                                  "models find any object without a class list (and fire on carpet texture). "
+                                  "You can also type the path of your own .pt (its class names are kept).")
         mb = QtWidgets.QToolButton(text="…")
         mb.clicked.connect(lambda: self.det_model.setEditText(
             QtWidgets.QFileDialog.getOpenFileName(self, "Model", "", "Models (*.pt *.onnx)")[0]
@@ -1399,21 +1583,31 @@ class MainWindow(QtWidgets.QMainWindow):
         al.setContentsMargins(0, 0, 0, 0)
         al.addWidget(self.arena_view, 1)
         al.addWidget(self.arena_status)
+        # The big view is the CUMULATIVE map: what all cameras agree on (tags and known objects:
+        # either camera; unknown objects: both cameras), the A* path on it. The camera feeds that
+        # supply it sit in a smaller column at the side.
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self.map, "Map")
-        self.tabs.addTab(arena_tab, "Arena / A*")
-        right = QtWidgets.QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(self.tabs)
-        right.addWidget(self.plot)
-        right.setSizes([500, 300])
+        self.tabs.addTab(arena_tab, "Cumulative map (A*)")
+        self.tabs.addTab(self.map, "Tag map")
+        self.tabs.addTab(self.plot, "Tag position plot")
+        self.cam_grid = CameraGrid(self.video)      # + one view per extra camera (at Start)
+        side = QtWidgets.QWidget()
+        sl_ = QtWidgets.QVBoxLayout(side)
+        sl_.setContentsMargins(0, 0, 0, 0)
+        cap_ = QtWidgets.QLabel("Camera feeds (each camera's own detections)")
+        cap_.setStyleSheet("color:#888;")
+        sl_.addWidget(cap_)
+        sl_.addWidget(self.cam_grid, 1)
         top = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
-        top.addWidget(self.video)
-        top.addWidget(right)
-        top.setSizes([900, 520])
+        top.addWidget(self.tabs)
+        top.addWidget(side)
+        top.setSizes([1000, 440])
+        self.top_split = top
         center = QtWidgets.QSplitter(Qt.Orientation.Vertical)
         center.addWidget(top)
         center.addWidget(self.table)
         center.setSizes([700, 220])
+        self.center_split = center
 
         # every panel boundary is draggable: controls | video | map / arena, plot, table
         root = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
@@ -1421,7 +1615,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(center)
         root.setStretchFactor(1, 1)
         root.setSizes([340, 1360])
-        for sp in (root, center, top, right):
+        for sp in (root, center, top):
             sp.setHandleWidth(7)
             sp.setChildrenCollapsible(True)        # drag a panel fully closed to hide it
         root.setContentsMargins(4, 4, 4, 4)
@@ -1432,6 +1626,159 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.hover_label)
         self.refresh_cameras(prefer=self.args.camera)
+
+    def _initial_extra_specs(self):
+        """--extra-camera options, else cameras.json (--cameras or next to arena.json), else last time."""
+        a = self.args
+        if getattr(a, "extra_camera", None):
+            return " ; ".join(a.extra_camera)
+        path = getattr(a, "cameras", None) or mc.DEFAULT_CAMERAS_FILE
+        try:
+            specs = mc.load_specs(path)
+        except Exception as e:                      # noqa: BLE001
+            print(f"Could not read {path}: {e}")
+            specs = []
+        if specs:
+            return " ; ".join(mc.spec_text(s) for s in specs)
+        return QtCore.QSettings("apriltag_floor_mapper", "tracker_gui").value("extra_cameras", "", type=str)
+
+    def _start_extras(self, mode, primary_idx):
+        """Open the extra cameras for this run (each failure is logged and that camera skipped)."""
+        txt = self.extra_edit.text().strip()
+        QtCore.QSettings("apriltag_floor_mapper", "tracker_gui").setValue("extra_cameras", txt)
+        self._clear_extra_thumbs()
+        if not txt:
+            self.extra_status.setText("none: pick a second camera above and press Add, then Start")
+            return None
+        try:
+            specs = mc.parse_specs(txt)
+        except ValueError as e:
+            self.log_msg(f"Extra cameras: {e}")
+            return None
+        failed = []
+
+        def log(msg):
+            if "not used" in msg:
+                failed.append(msg.split("not used:", 1)[-1].strip())
+            self.log_signal.emit(msg)
+        extras = []
+        if mode == "Synthetic":
+            # 'synthetic' specs: the same test arena seen from other sides (fusion test, no hardware)
+            views = [(0.6, 1.55, 1.3), (1.9, 0.4, 1.2), (-0.7, 0.4, 1.2)]
+            for k, spec in enumerate(s for s in specs if s["camera"].lower().startswith("synthetic")):
+                sc = SyntheticScene(raw=self.scene.raw).view_from(views[k % len(views)], t0=self.scene.t0)
+                src = PacedSource(sc.read, min(self.fps_spin.value(), 30))
+                spec = dict(spec, focal_px=spec.get("focal_px") or (None if self.scene.raw else sc.K[0, 0]))
+                try:
+                    extras.append(mc.ExtraCamera(spec, self.cfg, self.smooth_slider.value() / 100,
+                                                 self.ar_adaptive.isChecked(), log, source=src).open().start())
+                except Exception as e:              # noqa: BLE001
+                    src.release()
+                    self.log_msg(f"Extra camera '{spec['name']}' not used: {e}")
+            if len(extras) < len(specs):
+                self.log_msg("Synthetic mode: only 'synthetic' extra cameras are used.")
+        else:
+            QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                extras = mc.open_extras(specs, self.cfg, self.smooth_slider.value() / 100,
+                                        self.ar_adaptive.isChecked(), log, exclude_index=primary_idx)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        if not extras:
+            self.extra_status.setText("NOT RUNNING: " + (failed[-1][:200] if failed else "see the log"))
+            return None
+        for e in extras:
+            # a full view next to the main camera, with the same overlays (arena, tags, A* path)
+            view = VideoView()
+            view.setText(f"{e.name}: waiting for frames")
+            view.setToolTip(f"extra camera '{e.name}': its own tag detections and pose; labels show "
+                            "the fused floor positions")
+            self.cam_grid.add_view(view)
+            self.extra_thumbs.append((e, view))
+        sz = self.center_split.sizes()               # maps and feeds get most of the height
+        if sum(sz) > 0:
+            self.center_split.setSizes([int(sum(sz) * 0.85), int(sum(sz) * 0.15)])
+        if not self.cfg.get("floor_tags"):
+            self.log_msg("Extra cameras wait for the arena: they locate themselves against the 4 pivots "
+                         "once the arena is set up with the main camera.")
+        self.log_msg(f"Extra cameras running: {', '.join(e.name for e in extras)}. They must stay still. "
+                     "Each one places itself with the pivots it sees and learns its lens and pose from the "
+                     "main camera whenever a robot pauses (or a tag is moved) where both cameras see it.")
+        return mc.CameraRig(extras, main_name="main")
+
+    def _fill_extra_pick(self, devices):
+        """Connected cameras for the extra-camera picker; preselect one that is neither the main camera
+        type (Sony / capture card) nor a built-in webcam (e.g. the GO 3S)."""
+        self.extra_pick.clear()
+        for idx, name in devices:
+            self.extra_pick.addItem(f"{idx}: {name}", name)
+            self.extra_pick.setItemData(self.extra_pick.count() - 1, (idx, m.classify_camera(name)),
+                                        Qt.ItemDataRole.UserRole + 1)
+        self._repick_extra()
+
+    def _repick_extra(self, *_):
+        """Preselect an extra camera that is NOT the main camera: a camera / the Sony / a capture
+        card before a built-in webcam."""
+        main_idx = self.cam_combo.currentData()
+        best, rank_best = -1, 9
+        for i in range(self.extra_pick.count()):
+            idx, kind = self.extra_pick.itemData(i, Qt.ItemDataRole.UserRole + 1) or (None, "other")
+            if idx == main_idx:
+                continue
+            rank = {"other": 0, "sony": 1, "capture": 2}.get(kind, 5)
+            if rank < rank_best:
+                best, rank_best = i, rank
+        if best >= 0:
+            self.extra_pick.setCurrentIndex(best)
+
+    def _add_extra_camera(self):
+        """Append the picked camera to the extra-camera specs (by device NAME: survives re-plugging)."""
+        name = self.extra_pick.currentData()
+        if not name:
+            return
+        specs = [s.strip() for s in self.extra_edit.text().split(";") if s.strip()]
+        if any(f"camera={name}" in s or s == name for s in specs):
+            self.log_msg(f"'{name}' is already an extra camera.")
+            return
+        short = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ").strip() or "extra"
+        specs.append(f"name={short},camera={name}")
+        self.extra_edit.setText(" ; ".join(specs))
+        self.log_msg(f"Extra camera '{name}' added: it is used from the next Start"
+                     + (" (stop and start again)." if self.worker else "."))
+
+    def _clear_extra_thumbs(self):
+        self.cam_grid.remove_extra_views()
+        self.extra_thumbs = []
+
+    def _render_extra_view(self, e, view, r):
+        """Extra camera frame + the shared overlay (view_overlay), drawn here on the GUI thread
+        (about 10 times per second) with the newest fused result and A* plan."""
+        v = e.view
+        if v is None:
+            return
+        w = self.worker
+        img = v["img"].copy()
+        objs = {o["id"]: o for o in r["objects"] if o.get("frame") == "world" and o["id"] < 1000}
+        fl = e.floor
+        pivots = {t for t in fl.world_corners if t not in fl.learned} if fl is not None else set()
+        corners, cids = arena_outline(w.amap, self.cfg)
+        pose = v["pose"]
+        vo.draw_view(img, pose, v["scale"], v["dets"], objs, e.name, pivots, corners, cids,
+                     w._plan if pose is not None else None, list(w._route_draw), list(w.pins),
+                     robot_id=view_robot_id(self.cfg, w.pair),
+                     floor_objects=[o for o in r["objects"] if o.get("footprint_poly") is not None])
+        st = e.status()
+        detail = f"floor {st['floor']}  |  {st['fps']:.0f} fps  |  {len(v['dets'])} tags"
+        cc = st.get("crosscal")
+        if cc and not cc["lens"]:
+            detail += f"  |  learning lens {cc['spots']}/{mc.CrossCalibration.MIN_SPOTS_LENS} spots"
+        if st["age_ms"] is not None and st["age_ms"] > 1000:
+            detail += f"  |  SILENT {st['age_ms'] / 1000:.0f} s"
+        vo.header(img, f"EXTRA  {e.name}", detail, warn=pose is None or (st["age_ms"] or 0) > 1000)
+        rgb = np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        hh, ww = rgb.shape[:2]
+        view.set_frame(QtGui.QImage(rgb.data, ww, hh, 3 * ww, QtGui.QImage.Format.Format_RGB888).copy(),
+                       v["scale"])
 
     def _with_browse(self, edit, filt):
         w = QtWidgets.QWidget()
@@ -1467,6 +1814,10 @@ class MainWindow(QtWidgets.QMainWindow):
         labels = {"sony": "Sony", "capture": "capture card", "skip": "webcam/virtual", "other": "camera"}
         for idx, name in devices:
             self.cam_combo.addItem(f"{idx}: {name}  ({labels[m.classify_camera(name)]})", idx)
+        self._fill_extra_pick(devices)
+        if not getattr(self, "_repick_connected", False):
+            self.cam_combo.currentIndexChanged.connect(self._repick_extra)
+            self._repick_connected = True
 
         choice, reason = None, ""
         if prefer.lower() not in ("auto", "sony"):
@@ -1588,6 +1939,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                decimate=self.decim_spin.value())
 
     def start(self):
+        primary_idx = None
         try:
             mode = self.src_combo.currentText()
             if mode == "Synthetic":
@@ -1611,6 +1963,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if not spec:
                         raise RuntimeError("Choose a camera in the Camera list first.")
                     idx, name = m.resolve_camera(spec, self.conn_combo.currentData())
+                    primary_idx = idx
                     backend = self.backend_combo.currentData()
                     self.source = m.CameraStream(idx, w, h, self.fps_spin.value(), m.backend_id(backend))
                     if backend == "msmf":
@@ -1706,6 +2059,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_stops()
         if self.det_chk.isChecked():          # on by default; kept across Stop / Start
             self.toggle_detection(True)
+        self.worker.rig = self._start_extras(mode, primary_idx)
+        if self.worker.rig and self.worker.objdet is not None:
+            # detection was switched on before the extra cameras existed: give them the detector too
+            self.worker.rig.set_detector(self.det_model.currentText().strip(), self.det_conf.value(),
+                                         int(self.det_size.currentText()))
+        if mode == "Camera":
+            i_ = self.cam_combo.currentIndex()
+            cam_name = (self.cam_combo.itemText(i_).split(": ", 1)[-1].rsplit("  (", 1)[0]
+                        if i_ >= 0 else self.cam_combo.currentText())
+        else:
+            cam_name = mode.lower()
+        self.worker.view_title = f"MAIN  {cam_name}"
         self.worker.start()
         self.start_btn.setText("Stop")
         self.src_combo.setEnabled(False)
@@ -1720,7 +2085,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.worker:
             self.worker.requestInterruption()
             self.worker.wait(2000)
+            if self.worker.rig:
+                self.worker.rig.stop()
             self.worker = None
+        self._clear_extra_thumbs()
         if self.source:
             self.source.release()
             self.source = None
@@ -1762,6 +2130,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smooth_label.setText(f"{v / 100:.2f}")
         if self.mapper:
             self.mapper.smoother.alpha = v / 100
+        for e in (self.worker.rig.extras if self.worker and self.worker.rig else []):
+            e.mapper.smoother.alpha = v / 100
 
     def _lock_toggled(self, on):
         if not self.mapper:
@@ -1918,6 +2288,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mapper.floor.auto_lock = on
         if self.worker and self.worker.pending_floor is not None:
             self.worker.pending_floor.auto_lock = on
+        for e in (self.worker.rig.extras if self.worker and self.worker.rig else []):
+            e.auto_lock = on
+            if e.floor is not None:
+                e.floor.auto_lock = on
 
     def _arena_params_changed(self, *_):
         if not (self.worker and self.cfg and self.cfg.get("arena")):
@@ -2000,6 +2374,9 @@ class MainWindow(QtWidgets.QMainWindow):
             amap = self._make_amap(floor)
         self.worker.pending_floor = floor
         self.worker.pending_amap = amap
+        if self.worker.rig:
+            # the extra cameras re-locate themselves against the new pivot positions
+            self.worker.rig.set_floor_tags(self.cfg["floor_tags"])
         self.lock_chk.blockSignals(True)
         self.lock_chk.setChecked(locked)
         self.lock_chk.blockSignals(False)
@@ -2150,6 +2527,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.objdet.stop()
         self.worker.objdet = None
         self.worker._det_objs = []
+        if self.worker.rig:
+            self.worker.rig.set_detector(None)
         self.worker.appearance = on
         if not on:
             self.det_status.setText("off")
@@ -2175,6 +2554,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.det_obstacles = self.det_obst.isChecked()
         self.worker.tracker = od.FloorTracker()
         self.worker.objdet = od.ObjectDetector(name, self.det_conf.value(), int(self.det_size.currentText()))
+        if self.worker.rig:          # every camera runs the detector (known objects: OR gate)
+            self.worker.rig.set_detector(name, self.det_conf.value(), int(self.det_size.currentText()))
         self.log_msg(f"Also loading {name} for YOLO proposals (class-agnostic)…")
 
     def _det_reconfig(self, *_):
@@ -2182,6 +2563,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg["arena"]["appearance_z"] = self.det_app_z.value()   # shared with the live map
         if self.worker and self.worker.objdet is not None:
             self.worker.objdet.configure(self.det_conf.value(), int(self.det_size.currentText()))
+            if self.worker.rig:
+                self.worker.rig.configure_detector(self.det_conf.value(), int(self.det_size.currentText()))
 
     # ---------------- route stops ----------------
     def _add_stop_item(self, spec):
@@ -2261,7 +2644,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log_msg(f"Note: tag {t} is one of the floor's pivot tags.")
         self.worker.pair = ids
         self.pair_btn.setText(f"Stop path {ids[0]} → {ids[1]}")
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(0)                 # the cumulative map
         self.log_msg(f"Planning A* from {ids[0]} (start) to {ids[1]} (goal), replanned live as they move.")
 
     def _swap_pair(self):
@@ -2508,6 +2891,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.map.addItem(it)
                 self.floor_items.append(it)
 
+    def _ui_tick_extra(self):
+        """UI tick counter (the panel timer runs at ~30 Hz): % 3 -> ~10 Hz, % 6 -> ~5 Hz."""
+        self._extra_tick = getattr(self, "_extra_tick", 0) + 1
+        return self._extra_tick
+
+    def _draw_map_cameras(self, cams):
+        """Extra cameras on the top-down map: orange square + name (the main camera is the white dot)."""
+        items = getattr(self, "_map_cam_items", None)
+        if items is None:
+            items = self._map_cam_items = {"scatter": pg.ScatterPlotItem(size=12, symbol="s",
+                                                                          brush=pg.mkBrush(255, 165, 0)),
+                                           "labels": {}}
+            self.map.addItem(items["scatter"])
+        xs = [p[0] for p in cams.values()]
+        ys = [p[1] for p in cams.values()]
+        items["scatter"].setData(xs, ys)
+        for name in list(items["labels"]):
+            if name not in cams:
+                self.map.removeItem(items["labels"].pop(name))
+        for name, p in cams.items():
+            lbl = items["labels"].get(name)
+            if lbl is None:
+                lbl = items["labels"][name] = pg.TextItem(name, color=(255, 165, 0), anchor=(0, 1))
+                self.map.addItem(lbl)
+            lbl.setPos(p[0] + 0.03, p[1] + 0.03)
+
     def _refresh_panels(self):
         r = self.latest
         if r is None or not self.worker:
@@ -2516,15 +2925,17 @@ class MainWindow(QtWidgets.QMainWindow):
         dt = self.worker.objdet
         if self.worker.appearance and dt is None:
             n_ = len(self.worker._app_objs)
-            self.det_status.setText(f"{n_} object(s) on the floor" if self.worker.amap is not None
-                                    else "waiting for the arena (floor plane)")
+            self.det_status.setText((f"{n_} object(s) on the floor" if self.worker.amap is not None
+                                     else "waiting for the arena (floor plane)")
+                                    + (f" | {self.worker.rig.gate_state}" if self.worker.rig else ""))
         if dt is not None:
             if dt.error and dt.status == "failed to load":
                 self.det_status.setText(f"FAILED: {dt.error[:200]}")
             else:
                 n_ = sum(1 for o in self.worker._det_objs if o.get("frame") == "world")
                 self.det_status.setText(f"{dt.model_name}: {dt.status}" + (f", {n_} on the floor" if n_ else "")
-                                        + (f" (last error: {dt.error[:80]})" if dt.error else ""))
+                                        + (f" (last error: {dt.error[:80]})" if dt.error else "")
+                                        + (f" | {self.worker.rig.gate_state}" if self.worker.rig else ""))
         if getattr(self.args, "detect", None) and not getattr(self, "_detect_arg_done", False):
             self._detect_arg_done = True
             self.det_model.setEditText(self.args.detect)
@@ -2570,11 +2981,33 @@ class MainWindow(QtWidgets.QMainWindow):
                             f"map/A* {r.get('planner_ms', 0):5.0f} ms (own thread) | "
                             f"shown {1000 * (now - r['wall']):4.0f} ms after processing | "
                             f"tags {r['n_tags']} | {fl} | {cam_s}{rec}")
+        rig = self.worker.rig
+        if rig:
+            if r.get("main_camera_silent"):
+                self.status.setText("MAIN CAMERA SILENT: robot poses come from the extra cameras only | "
+                                    + self.status.text())
+            tick = self._ui_tick_extra()
+            if tick % 3 == 0:                         # extra views ~10 per second
+                for e, view in self.extra_thumbs:
+                    try:
+                        self._render_extra_view(e, view, r)
+                    except Exception as ex:          # noqa: BLE001 - a drawing error must not stop the GUI
+                        if getattr(self, "_extra_draw_err", None) != repr(ex):
+                            self._extra_draw_err = repr(ex)
+                            self.log_msg(f"Extra view '{e.name}': {ex!r}")
+            if tick % 6 == 0:
+                self.extra_status.setText(rig.status_text(now))
+            cams = r.get("cameras") or {}
+            self._draw_map_cameras({k: v for k, v in cams.items() if k != "main"})
 
         # camera on map
         if cam and r.get("_floor"):
             R, _ = r["_floor"]
             self.cam_scatter.setData([cam["x"]], [cam["y"]])
+            if getattr(self, "_main_cam_label", None) is None:
+                self._main_cam_label = pg.TextItem("main camera", color="w", anchor=(0, 1))
+                self.map.addItem(self._main_cam_label)
+            self._main_cam_label.setPos(cam["x"] + 0.03, cam["y"] + 0.03)
             fwd = R.T @ np.array([0, 0, 1.0])
             n = np.linalg.norm(fwd[:2])
             if n > 1e-6:
@@ -2650,6 +3083,8 @@ class MainWindow(QtWidgets.QMainWindow):
             meth = o.get("method", "")
             name = o["name"] + (" [plane]" if meth == "plane" else " [3D]" if meth.startswith("pose")
                                 else " [vision]" if meth == "detect" else "")
+            if o.get("cams") and (o.get("n_cams", 1) > 1 or o["cams"] != ["main"]):
+                name += f" ({'+'.join(o['cams'])})"     # which cameras this pose is fused from
             vals = [str(tid), name, fmt(o["x"], 4), fmt(o["y"], 4), fmt(o["z"], 4),
                     fmt(o.get("yaw_deg"), 1), fmt(o.get("tilt_deg"), 1), fmt(sd[0], 1), fmt(sd[1], 1),
                     fmt(sd[2], 1), str(int(hz)), fmt(o["reproj_px"], 2), fmt(err, 1)]
@@ -2701,6 +3136,12 @@ def main():
     ap.add_argument("--antcolony", metavar="HOST[:PORT]",
                     help="send tags + detected objects to the AntColony coordinator on that computer "
                          "(port 9100 by default), e.g. --antcolony 127.0.0.1")
+    ap.add_argument("--extra-camera", action="append", metavar="SPEC",
+                    help="another camera to fuse, e.g. 'name=go3s,camera=Insta360,fps=30' (repeat for more; "
+                         "see multi_camera.py). Overrides cameras.json")
+    ap.add_argument("--cameras", metavar="JSON",
+                    help=f"extra cameras from this file (default: {mc.DEFAULT_CAMERAS_FILE} in the working "
+                         "folder, if present)")
     ap.add_argument("--path", nargs=2, type=int, metavar=("START_TAG", "GOAL_TAG"),
                     help="plan the A* path from START_TAG to GOAL_TAG as soon as the floor is ready, "
                          "e.g. --path 28 50")
