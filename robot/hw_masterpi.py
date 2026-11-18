@@ -145,6 +145,8 @@ class MasterPi:
         if name == "dock":                       # the last cm up to a low white tray (camera, calibrated look pose)
             import seek
             return seek.dock(self, args, cancel)
+        if name == "arm":                        # one step of live arm control (antcolony/twin.py)
+            return self.arm_step(args)
         if name == "open":
             with self.lock:
                 self.arm.open(600)
@@ -205,6 +207,38 @@ class MasterPi:
         else:
             self.rest(1500)                      # closes the (empty) gripper; arm forward so the tag stays visible
         return ok, last or f"exit {p.returncode}"
+
+    def arm_step(self, args):
+        """Live arm control, one step: the gripper tip to (x, y, z) cm - x to the right of the car's line,
+        y ahead of the arm base, z up - with the gripper tilt nearest to `pitch` that the arm can do
+        (within pitch_min..pitch_max), taking `ms`; and/or the jaws: {"grip": "open" | "close"}.
+        Returns at once: the servos move on their own. This car's reach offset (grab_defaults.json) is
+        added as in drop(), so that two cars given the same numbers put the tip in the same place.
+        -> (True, "pitch -40, jaws open") or (False, "out of reach ...") - then nothing has moved."""
+        if not self.use_arm:
+            return False, "no arm"
+        ms, done = int(args.get("ms", 250)), []
+        if "x" in args:
+            x, y, z = float(args["x"]), float(args["y"]), float(args["z"])
+            off, r0 = reach_offset(), math.hypot(x, y)
+            if off and r0 > 1:
+                x, y = x * (r0 + off) / r0, y * (r0 + off) / r0
+            with self.lock:
+                if self.arm is None:
+                    return False, "arm busy (serial port closed)"
+                r = self.arm.move_to(x, y, z, pitch=float(args.get("pitch", -45)),
+                                     pitch_min=float(args.get("pitch_min", -90)),
+                                     pitch_max=float(args.get("pitch_max", 20)), ms=ms)
+            if r is None:
+                return False, f"out of reach: ({x:.1f}, {y:.1f}, {z:.1f})"
+            done.append(f"pitch {r[1]:.0f}")
+        if args.get("grip") in ("open", "close"):
+            with self.lock:
+                self.arm.gripper(args["grip"] == "close", ms)
+            if args["grip"] == "open":
+                self.holding = False
+            done.append(f"jaws {args['grip']}")
+        return True, ", ".join(done) or "nothing to do"
 
     def drop(self, args):
         """Reach over the bin rim and let go. Default tip target: 18 cm ahead of the arm base, 10 cm up."""

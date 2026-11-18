@@ -1,0 +1,4 @@
+pyzmq
+opencv-python-headless
+gpiozero
+adafruit-circuitpython-servokit

@@ -344,6 +344,10 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     w_cmd, u = float(args.get("w", 0.3)), float(args.get("u", 0.05))
     cm_s, step = float(args.get("cm_s", 17)), float(args.get("step_s", 0.33))
     seg, max_cm = float(args.get("seg_cm", 30)), float(args.get("max_cm", 200))
+    made = eye is None                                    # the camera first: what it can do decides how to search
+    if made:                                              # (2026-11-14: these checks ran on eye=None, so on the car
+        eye = Eye(hw, target, args.get("view"), args.get("detector", "vlm"), args.get("img_tokens"))   # neither the
+                                                          # arm pan nor the smooth rolling was ever switched on)
     # Searching: the ARM looks left and right first (the camera rides on it) - the car stands still and
     # three looks cover the 170 deg in front of it; only if nothing is there does the car turn, by a
     # third of a circle. Without an arm that can pan (tests): the car turns 30 deg per look as before.
@@ -357,9 +361,6 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
     timeout = float(args.get("timeout", 360))
     say = lambda msg: print(f"  seek: {msg}", flush=True)
     t0, sign, drove, looks, scans, last, had = time.monotonic(), 1.0, 0.0, 0, 0, None, False
-    made = eye is None
-    if made:
-        eye = Eye(hw, target, args.get("view"), args.get("detector", "vlm"), args.get("img_tokens"))
 
     def turn(deg):
         """Turn about `deg` (+ = left) with one timed pulse. -> seconds it lasted."""
@@ -471,9 +472,17 @@ def run(hw, args, cancel, eye=None, carry_pose=None):
             # every camera frame (by its colour, or as the white patch the VLM just named); the car stops as
             # soon as it is near, as soon as the target is missing from two frames in a row, or when the sonar
             # sees something. Then a proper look decides what next - never a move without the target in view.
-            if follow and seg_now >= 12 and not near_by_eye:
+            # (2026-11-14 on car B: a block 1 m away was approached in 8 cm hops because seg_now was capped
+            # once it showed in the lower part of the picture. The per-frame check below already stops at
+            # the right moment, so roll whenever the target is not yet near.)
+            roll = follow and not near_by_eye and (seg_now >= 12
+                                                   or (bstop is not None and s["bottom"] < float(bstop) - 0.08)
+                                                   or (bstop is None and dist is not None and dist > arrive + 10))
+            if roll:
                 d = hw.sonar_med()
-                if d is None or d > stop_cm + 25:
+                if d is not None and d <= stop_cm + 20:
+                    say(f"not rolling: the sonar reads {d:.0f} cm - short steps instead")
+                if d is None or d > stop_cm + 20:
                     t_f, lost, why = time.monotonic(), 0, "long"
                     hw.set_velocity(u, 0.0, 0.0)
                     while time.monotonic() - t_f < float(args.get("follow_s", 10)):
@@ -624,8 +633,13 @@ def white_blob(cv2, np, frame):
     {"off": cm it lies to the LEFT of the car's line (+) / right (-), "dist": cm from the arm base to
     its near edge (21 = at the bottom of the picture or nearer), "area": share of the picture, "box"}."""
     h, w = frame.shape[:2]
-    m = cv2.morphologyEx(white_mask(cv2, np, frame).astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m = white_mask(cv2, np, frame).astype(np.uint8)
     m[int(0.86 * h):, int(0.2 * w): int(0.9 * w)] = 0     # what the gripper holds shows here, and a pale block passes for white
+    # join the pieces of one tray first: its rim lines, a shadow or an object lying in it cut the white into
+    # parts that are each too small (2026-11-14: three parts of 3.3 / 2.8 / 1.8 % of the picture, none counted;
+    # the seams are ~20 px wide: the smoothness test marks a band along every edge as rough)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     n, _, stats, cent = cv2.connectedComponentsWithStats(m, 8)
     best = None
     for i in range(1, n):
