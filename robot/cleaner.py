@@ -102,13 +102,14 @@ class Brain:
         return re.sub(r"[^a-z -]", "", self.ask(self.crop(img, box), NAME_Q, max_tokens=12).lower()).strip()
 
 
-def yolo_all(url, img):
-    """Every box of the 3-class YOLO: [(label, (x1, y1, x2, y2) fractions)]."""
+def yolo_all(url, img, min_conf=0.0):
+    """Every box of the YOLO server with at least min_conf: [(label, (x1, y1, x2, y2) fractions)]."""
     body = json.dumps({"image": b64(img, 480), "target": "all"}).encode()
     req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as r:
         objs = json.loads(r.read()).get("objects", [])
-    return [(o.get("label", "trash"), tuple(v / 1000.0 for v in o["bbox_2d"])) for o in objs]
+    return [(o.get("label", "trash"), tuple(v / 1000.0 for v in o["bbox_2d"])) for o in objs
+            if o.get("conf", 1.0) >= min_conf]
 
 
 class Cleaner(Dozer):
@@ -156,7 +157,7 @@ class Cleaner(Dozer):
         binb = [b for b in self.bin_vlm.find(img)
                 if not self.near_peer((90 - self.pan) + (0.5 - (b[0] + b[2]) / 2) * dz.HFOV)]
         if self.a.fast:                                                 # YOLO: all classes in ~0.1 s
-            labelled = [(lab, b) for lab, b in yolo_all(self.a.yolo3_url, img) if lab != "bin"]
+            labelled = [(lab, b) for lab, b in yolo_all(self.a.yolo3_url, img, self.a.lock_conf) if lab != "bin"]
             labelled = [("cargo" if lab in ("cargo", "block") else "trash", b) for lab, b in labelled]
         else:                                                           # 4B: list, then judge each crop
             labelled = [(None, b) for b in self.brain.objects(img)]
@@ -354,7 +355,7 @@ class Cleaner(Dozer):
 
     def to_blade(self):
         """Close in on the locked trash until it sits at the blade. True when it is there."""
-        misses = 0
+        misses, bearing, v = 0, 0.0, 0.0
         for _ in range(40):
             t = self.see("approach", self.vlm)
             if not t:
@@ -365,8 +366,10 @@ class Cleaner(Dozer):
                     self.head(90, TILT_SEARCH)
                     if t:
                         return True
-                if misses > 4:
+                if misses > 5:
                     return False
+                if v and v < 0.85:                                      # missed one look: keep going its way a little
+                    self.burst(0.12, w=bearing / 25)
                 continue
             misses = 0
             bearing, v = t[0][0], t[0][1]
@@ -376,6 +379,42 @@ class Cleaner(Dozer):
                 self.turn(max(-20.0, min(20.0, bearing * 0.8)))
                 continue
             self.burst(0.25 if v < 0.7 else 0.15, w=bearing / 25)
+        return False
+
+    def shove(self, secs, vx, w=0.0, ramp_s=0.3):
+        """One push, speed ramped up from the slowest over ramp_s: a jump to full duty pulled the supply
+        down and reset the motor board (car C, 2026-11-15). Stops for another car in the way."""
+        t0 = time.time()
+        while time.time() - t0 < secs + ramp_s:
+            if self.peer_in_the_way():
+                self.give_way()
+                break
+            f = min(1.0, (time.time() - t0) / ramp_s)
+            self.car.set_velocity(max(self.a.vx, vx * f), 0, w)
+            time.sleep(0.03)
+        self.car.stop()
+        time.sleep(0.2)
+
+    def shove_until_in(self, check_first=False, shoves=3):
+        """Debris at the mouth: drive up until it is on the blade, then one fast shove over the box's
+        floor lip, a short step back and a look; again until it is inside. (Car C, 2026-11-15: the
+        base class shoved from where the last look was taken, ~30 cm back - it never reached the
+        debris, which sat on the box's front flap through six shoves.)"""
+        if check_first and self.check_in():
+            return True
+        for k in range(shoves):
+            if not self.to_blade():                           # contact first
+                say("  the debris is not in front of the blade any more")
+                return self.check_in()
+            t, b = self.both("shove")
+            aim = 0.0
+            if t and b and abs(b[0][0] - t[0][0]) < 25:
+                aim = max(t[0][0] - 10, min(t[0][0] + 10, b[0][0]))
+            say(f"  shove {k + 1}/{shoves}: {self.a.shove_s:.1f} s at vx {self.a.shove_vx} (soft start)")
+            self.shove(self.a.shove_s, self.a.shove_vx, max(-0.4, min(0.4, aim / 30)))
+            self.drive(0.4, vx=-self.a.vx, guard=False)
+            if self.check_in():
+                return True
         return False
 
     def carry(self):
@@ -477,8 +516,8 @@ def main():
     ap.add_argument("--minutes", type=float, default=10)
     ap.add_argument("--tries", type=int, default=10)
     ap.add_argument("--bin-cm", type=float, default=0)
-    ap.add_argument("--shove-s", type=float, default=0.5)
-    ap.add_argument("--shove-vx", type=float, default=0.4)
+    ap.add_argument("--shove-s", type=float, default=0.9)
+    ap.add_argument("--shove-vx", type=float, default=0.15, help="0.4 pulled the supply down: the motor board reset")
     ap.add_argument("--vx", type=float, default=0.03)
     ap.add_argument("--w", type=float, default=0.05)
     ap.add_argument("--min-duty", type=float, default=35)
@@ -490,6 +529,9 @@ def main():
     ap.add_argument("--fast", action="store_true", help="3-class YOLO finds/judges/tracks; push without stopping")
     ap.add_argument("--peers", default=None,
                     help="file with the other cars' positions (agent.py writes /tmp/antcolony_peers.json in the team run)")
+    ap.add_argument("--lock-conf", type=float, default=0.5,
+                    help="--fast: a YOLO box must be this sure to be chosen; once locked it is followed down to the "
+                         "server's own threshold (0.3): near the box the trash read 0.4-0.55 and was lost every other look")
     ap.add_argument("--fixed-head", action="store_true", help="the pan/tilt servos do not work: turn the body to look round")
     ap.add_argument("--no-verify", dest="verify", action="store_false", help="--fast: skip the 4B cargo check")
     a = ap.parse_args()

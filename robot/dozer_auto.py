@@ -212,10 +212,14 @@ class Dozer:
         """[(bearing_deg (+ = left of the car's nose), bottom_v 0..1, box)] for the target, biggest first."""
         vlm = vlm or self.vlm
         img = self.eye.photo()
-        try:
-            boxes = vlm.find(img)
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
-            raise SystemExit(f"VLM not reachable at {self.a.url} ({e}). Start the tunnel on the laptop.")
+        for attempt in range(4):                               # a detector restarting for a moment is no reason to stop
+            try:
+                boxes = vlm.find(img)
+                break
+            except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+                if attempt == 3:
+                    raise SystemExit(f"detector not reachable at {vlm.url} ({e}). Is its server / tunnel running?")
+                time.sleep(1.5)
         self.shots += 1
         img.save(os.path.join(LOG_DIR, f"{self.shots % 50:02d}_{tag}_p{self.pan}_t{self.tilt}_{len(boxes)}.jpg"))
         out = []
@@ -494,6 +498,8 @@ class Dozer:
         cx = (tb[0] + tb[2]) / 2
         if not (bb[0] - 0.02 < cx < bb[2] + 0.02):
             return "outside"
+        if tb[3] > 0.96:                             # debris touching the bottom of the picture = on the blade,
+            return "mouth"                           # in front of the box (car C, 2026-11-15: called "inside" there)
         if bb[3] > 0.97:                             # box's front edge below the picture (car right at it):
             between = tb[0] >= bb[0] - 0.01 and tb[2] <= bb[2] + 0.01 and tb[2] - tb[0] < 0.8 * (bb[2] - bb[0])
             return "inside" if between and tb[1] > bb[1] + 0.1 * (bb[3] - bb[1]) else "mouth"   # walls decide
@@ -667,11 +673,19 @@ class Dozer:
         return False
 
     def check_in(self):
+        """Is the debris in the box? Judged only once the box's front edge is in the picture: from right
+        at the mouth, debris on the box's front flap and debris just inside look the same (car C,
+        2026-11-15: a piece on the flap was called "inside"). So back off in steps until the edge shows."""
         self.head(90, TILT_SEARCH)
-        t, b = self.see("check", self.vlm), self.see("check", self.bin_vlm)
+        for step in range(4):
+            t, b = self.see("check", self.vlm), self.see("check", self.bin_vlm)
+            too_close = (b and b[0][2][3] > 0.95) or (t and t[0][2][3] > 0.96)
+            if not too_close or step == 3:
+                break
+            self.drive(0.3, vx=-self.a.vx, guard=False)            # step back for a view of the box's front edge
         state = self.where(t, b)
-        if state == "inside" or (not t and b):
-            say("DONE: the debris is in the box" + (" (seen inside it)" if t else " (no longer visible)"))
+        if state == "inside" or (not t and b and b[0][2][3] <= 0.95):
+            say("DONE: the debris is in the box" + (" (seen inside it)" if t else " (no longer visible in front of it)"))
             return True
         say(f"  debris {state}: again")
         return False

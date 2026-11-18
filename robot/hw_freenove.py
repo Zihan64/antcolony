@@ -71,7 +71,17 @@ class Freenove:
         self.min_duty, self.max_duty, self.rot_min, self.rot_max, self.steer = min_duty, max_duty, rot_min, rot_max, steer
         self.reverse, self.flip_front, self.flip_turn, self.pan_center = load_directions()
         self.pcb, self.lock = pcb, threading.Lock()
+        self.bus_no = bus
         self.bus = SMBus(bus)
+        self._pca_init()
+        self.stop()
+        self.look(90, 90)                    # head straight: the sonar stop only makes sense facing forward
+        self.sonar = None
+        if sonar:
+            self._open_sonar(sonar_trig, sonar_echo)
+
+    # ------------------------------------------------------------------ low level
+    def _pca_init(self):
         self.bus.write_byte_data(PCA, 0x00, 0x00)                    # MODE1: wake up
         prescale = int(math.floor(25000000.0 / 4096.0 / 50.0 - 1.0 + 0.5))   # 50 Hz, as Freenove sets it
         old = self.bus.read_byte_data(PCA, 0x00)
@@ -80,19 +90,36 @@ class Freenove:
         self.bus.write_byte_data(PCA, 0x00, old)
         time.sleep(0.005)
         self.bus.write_byte_data(PCA, 0x00, old | 0x80)
-        self.stop()
-        self.look(90, 90)                    # head straight: the sonar stop only makes sense facing forward
-        self.sonar = None
-        if sonar:
-            self._open_sonar(sonar_trig, sonar_echo)
 
-    # ------------------------------------------------------------------ low level
-    def _pwm(self, ch, duty):
-        r = 0x06 + 4 * ch
+    def _write4(self, r, duty):
         self.bus.write_byte_data(PCA, r, 0)
         self.bus.write_byte_data(PCA, r + 1, 0)
         self.bus.write_byte_data(PCA, r + 2, duty & 0xFF)
         self.bus.write_byte_data(PCA, r + 3, duty >> 8)
+
+    def _pwm(self, ch, duty):
+        """One PCA9685 channel. If the board does not answer (car C, 2026-11-15: Remote I/O error when a
+        fast shove pulled the supply down and the board reset), wake it up again and write once more."""
+        r = 0x06 + 4 * ch
+        for attempt in range(6):
+            try:
+                if attempt:
+                    try:
+                        self.bus.close()
+                    except OSError:
+                        pass
+                    self.bus = SMBus(self.bus_no)
+                    self._pca_init()                                 # a reset board sleeps with all outputs off
+                    if getattr(self, "_head", None):                 # ...the head servos too: it went limp, so
+                        pan, tilt = self._head                       # every later look saw the same picture
+                        self._write4(0x06 + 4 * PAN, self._servo_count(PAN, pan))
+                        self._write4(0x06 + 4 * TILT, self._servo_count(TILT, tilt))
+                self._write4(r, duty)
+                return
+            except OSError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.3)                                      # the board needs a moment after a brown-out
 
     def wheel(self, name, pct):
         """One wheel at pct percent duty, + = forward."""
@@ -114,6 +141,11 @@ class Freenove:
             for n in RIGHT:
                 self.wheel(n, right)
 
+    def _servo_count(self, ch, angle):
+        angle = max(PAN_RANGE[0], min(PAN_RANGE[1], angle)) if ch == PAN else max(TILT_RANGE[0], min(TILT_RANGE[1], angle))
+        us = 2500 - (angle + 10) / 0.09 if ch == PAN else 500 + (angle + 10) / 0.09
+        return int(us * 4096 / 20000)
+
     def servo(self, ch, angle):
         """Pan/tilt head (camera + sonar ride on it). ch 8 = pan, 9 = tilt; 90 = straight ahead /
         level. Same angle -> pulse formula as Freenove's servo.py (pan runs mirrored)."""
@@ -134,6 +166,7 @@ class Freenove:
         """Point the head; pan 90 = straight ahead, < 90 = to the left of the car, tilt > 90 = up
         (checked on car C with `gimbal`). pan_center in freenove_directions.json = the servo angle
         that really faces forward (car C: the horn sits ~40 deg off)."""
+        self._head = (pan + self.pan_center - 90, tilt)
         self.servo(PAN, pan + self.pan_center - 90)
         self.servo(TILT, tilt)
 
@@ -235,7 +268,7 @@ class Freenove:
         import signal as sig
         import subprocess
         import urllib.request
-        for port, model, conf in ((11447, "models/warehouse_yolo26.onnx", 0.5), (11448, "models/box.onnx", 0.15)):
+        for port, model, conf in ((11447, "models/warehouse_yolo26.onnx", 0.3), (11448, "models/box.onnx", 0.15)):
             try:
                 urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/detect", b"{}"), timeout=2)
             except urllib.error.HTTPError:
@@ -254,23 +287,30 @@ class Freenove:
         cleaned, last = 0, ""
         try:
             p = subprocess.Popen(cmd, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+            def watch():                                      # a cancel must not wait for cleaner.py's next line
+                while p.poll() is None:
+                    if cancel.wait(0.1):
+                        p.send_signal(sig.SIGTERM)            # cleaner.py stops the motors on SIGTERM
+                        return
+            threading.Thread(target=watch, daemon=True).start()
             for line in p.stdout:
                 print("  [clean]", line.rstrip(), flush=True)
                 last = line.strip() or last
                 m = re.search(r"trash #(\d+) is in the box", line)
                 if m:
                     cleaned = int(m[1])
-                if cancel.is_set():
-                    p.send_signal(sig.SIGTERM)                # cleaner.py stops the motors on SIGTERM
-                    break
             try:
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait()
         finally:
             self.__init__(**self._args)                       # take the hardware back
         if cancel.is_set():
             return False, f"cancelled - {cleaned} pieces in the box"
+        if p.returncode < 0 or "FINISHED" not in last:
+            return False, f"stopped early - {cleaned} pieces in the box ({last[:80]})"
         return p.returncode == 0, f"{cleaned} pieces in the box" + ("" if p.returncode == 0 else f" ({last[:80]})")
 
     def close(self):

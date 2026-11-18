@@ -81,6 +81,7 @@ class Agent:
         self.skill = {"id": 0, "state": "idle", "detail": ""}
         self.worker, self.cancel = None, threading.Event()
         self.applied, self.applied_t = None, 0.0
+        self.ended = set()                           # ids of skills cancelled by a newer one
 
     def busy(self):
         return self.worker is not None and self.worker.is_alive()
@@ -105,10 +106,11 @@ class Agent:
                 dur = min(float(m.get("dur", WATCHDOG)), WATCHDOG)
                 self.vel = (float(m.get("vx", 0)), float(m.get("vy", 0)), float(m.get("w", 0)), m.get("guard", True))
                 self.vel_until = now + dur
-        elif m.get("type") == "skill" and m.get("id") != self.skill["id"]:
+        elif m.get("type") == "skill" and m.get("id") != self.skill["id"] and m.get("id") not in self.ended:
             if self.busy():
                 self.cancel.set()
                 self.worker.join(timeout=5)
+                self.ended.add(self.skill["id"])        # a cancelled skill re-sent by a slow sender must not start again
             self.hw.stop()
             self.moving, self.vel_until = False, 0.0
             self.skill = {"id": m["id"], "state": "running", "detail": ""}
