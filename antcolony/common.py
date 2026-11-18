@@ -15,15 +15,18 @@ def wrap(a):
 
 
 def dist(a, b):
+    # Calculate the Euclidean distance between two 2D points.
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 def unit(dx, dy):
     n = math.hypot(dx, dy)
+    # Use a default direction when the vector is near zero to avoid division by zero.
     return (dx / n, dy / n) if n > 1e-9 else (1.0, 0.0)
 
 
 def clamp(v, lo, hi):
+    # Keep v within the range [lo, hi].
     return lo if v < lo else hi if v > hi else v
 
 
