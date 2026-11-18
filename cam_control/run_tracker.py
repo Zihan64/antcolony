@@ -66,7 +66,8 @@ def attach(gui, pub, log=print):
                 amap = getattr(w, "amap", None)
                 ids = (amap.arena.get("corner_ids") if amap is not None else
                        ((getattr(w.mapper, "cfg", None) or {}).get("arena") or {}).get("corner_ids"))
-                floor = w.mapper.floor
+                # with extra cameras: an extra's floor while the main camera has none (same pivots)
+                floor = getattr(w, "pub_floor", None) or w.mapper.floor
                 pub.publish(r, floor, ids)
                 if time.time() - state["t"] > 10.0:
                     n_obj = sum(1 for o in r.get("objects", []) if o.get("method") in ("detect", "appearance"))

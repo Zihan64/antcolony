@@ -1,0 +1,13 @@
+{
+  "_notes": [
+    "Copy to cameras.json in the folder you start the tracker from (next to arena.json); it is then loaded automatically.",
+    "Each entry is one EXTRA camera; the main camera is still chosen in the GUI. See multi_camera.py for every item.",
+    "camera: index or part of the device name. calib: chessboard .npz (strongly recommended for the GO 3S wide lens).",
+    "Without calib or focal_px the camera fits its lens to the 4 pivots once and prints focal_px / k1 to paste here.",
+    "max_fps: how often this camera is processed; tag detection is CPU-bound and shares the CPU with the main camera."
+  ],
+  "cameras": [
+    {"name": "go3s", "camera": "Insta360", "width": 1920, "height": 1080, "fps": 30, "max_fps": 10},
+    {"name": "spare", "camera": "2", "disabled": true}
+  ]
+}

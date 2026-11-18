@@ -6,25 +6,25 @@
       "x": 0.0,
       "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 175.575
+      "yaw_deg": 15.47
     },
     "32": {
-      "x": 1.86298,
+      "x": 1.46075,
       "y": 0.0,
       "z": 0.0,
-      "yaw_deg": 175.425
+      "yaw_deg": 177.856
     },
     "31": {
-      "x": 1.77433,
-      "y": 1.0195,
+      "x": 1.22031,
+      "y": 2.22375,
       "z": 0.0,
-      "yaw_deg": 7.628
+      "yaw_deg": 158.454
     },
     "30": {
-      "x": 0.04402,
-      "y": 0.99899,
+      "x": -0.01283,
+      "y": 2.19524,
       "z": 0.0,
-      "yaw_deg": 170.068
+      "yaw_deg": 8.36
     }
   },
   "objects": {},
@@ -39,7 +39,7 @@
     "tape_m": null,
     "width_m": null,
     "height_m": null,
-    "focal_px": 997.37,
+    "focal_px": 974.59,
     "positions": null,
     "margin_m": 0.0,
     "max_range_m": 4.0,
@@ -53,6 +53,7 @@
     "obstacle_threshold": 30,
     "min_obstacle_area_m2": 0.0004,
     "appearance_z": 5.0,
+    "max_streak_width_m": 0.03,
     "route_switch_rel": 0.1,
     "route_switch_m": 0.05,
     "layout": {
@@ -63,8 +64,8 @@
     },
     "focal_source": "tags",
     "focal_at_px": [
-      1280,
-      720
+      1920,
+      1080
     ],
     "k1": 0.0
   },
@@ -83,12 +84,12 @@
       30
     ],
     "camera_distance_m": {
-      "32": 1.863,
-      "30": 1.0
+      "32": 1.4608,
+      "30": 2.1953
     },
     "tape_m": {},
-    "fit_px_free": 0.55,
-    "focal_free_px": 997.37,
+    "fit_px_free": 1.716,
+    "focal_free_px": 974.59,
     "source": "printed tag sizes (no tape yet): enter tape distances 29->32 and 29->30 for a precise scale",
     "tags": {
       "29": {
@@ -100,58 +101,58 @@
           0.0,
           0.0
         ],
-        "yaw_deg": 175.58
+        "yaw_deg": 15.47
       },
       "32": {
         "xy_m": [
-          1.863,
+          1.4608,
           0.0
         ],
         "camera_saw_xy_m": [
-          1.863,
+          1.4608,
           0.0
         ],
-        "yaw_deg": 175.43
+        "yaw_deg": 177.86
       },
       "31": {
         "xy_m": [
-          1.7743,
-          1.0195
+          1.2203,
+          2.2238
         ],
         "camera_saw_xy_m": [
-          1.7743,
-          1.0195
+          1.2203,
+          2.2238
         ],
-        "yaw_deg": 7.63
+        "yaw_deg": 158.45
       },
       "30": {
         "xy_m": [
-          0.044,
-          0.999
+          -0.0128,
+          2.1952
         ],
         "camera_saw_xy_m": [
-          0.044,
-          0.999
+          -0.0128,
+          2.1952
         ],
-        "yaw_deg": 170.07
+        "yaw_deg": 8.36
       }
     },
     "warnings": [],
-    "fit_px": 0.55,
-    "focal_px": 997.37,
+    "fit_px": 1.716,
+    "focal_px": 974.59,
     "focal_estimated": true,
     "k1": 0.0,
-    "camera_height_m": 1.8246,
+    "camera_height_m": 1.454,
     "plane_rms_mm": 0.0,
     "focal_estimate": {
-      "f_px": 997.37,
-      "f_mm_full_frame": 27.97
+      "f_px": 974.59,
+      "f_mm_full_frame": 18.22
     },
     "mm_per_camera_pixel": {
-      "c0": 2.68,
-      "c1": 2.15,
-      "c2": 3.75,
-      "c3": 3.78
+      "c0": 6.03,
+      "c1": 2.22,
+      "c2": 2.42,
+      "c3": 5.46
     }
   }
 }
