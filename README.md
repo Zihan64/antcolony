@@ -107,6 +107,6 @@ docs/SETUP.md     full technical reference
 
 ## Team and acknowledgments
 
-Built by **Zihan Zhao**, **Jonathan Hsiao**, **Junbo Zhao** and **Allen Shen** of Penn State.
+Built by **Allen Shen**, **Jonathan Hsiao**, **Junbo Zhao** and **Zihan Zhao** of Penn State.
 
 Special thanks to **Dr. Xiaozhen Wang**, Associate Professor of Electrical Engineering at Penn State, for providing equipment and support.
