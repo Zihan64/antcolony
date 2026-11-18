@@ -12,7 +12,7 @@
 
 AntColony is a low-cost testbed for cooperative robot teams. A shared overhead view, a central coordinator and on-board AI turn a handful of cheap, different robots into one team that finds objects, picks them up and carries them where they need to go.
 
-Built in 36 hours at **HackPrinceton Fall 2026** (Princeton University, November 13–15, 2026).
+Built in 36 hours at **HackPrinceton Fall 2026** (Princeton University, November 13–15, 2026). We will keep working on it after the hackathon. 
 
 <p align="center">
   <img src="docs/images/demo.gif" alt="A robot grabs a block, drops it into the tray, then two robots carry a long pole together" width="560">
@@ -110,5 +110,3 @@ docs/SETUP.md     full technical reference
 Built by **Zihan Zhao**, **Jonathan Hsiao**, **Junbo Zhao** and **Allen Shen** of Penn State.
 
 Special thanks to **Dr. Xiaozhen Wang**, Associate Professor of Electrical Engineering at Penn State, for providing equipment and support.
-
-Tracks entered at HackPrinceton Fall 2026: Sustainability, Best Hardware Hack, Best Physical AI Hack, and Amazon Best Practical AI Innovation.
